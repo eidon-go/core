@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# Cancel in-flight runs for the same ref when a new push lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Discovers the modules from go.mod files and narrows them to the ones the
+  # change touches (every module on push to main or when shared build files
+  # change). Also guards published go.mod files against replace directives.
+  discover:
+    name: Discover modules
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.modules.outputs.matrix }}
+      any: ${{ steps.modules.outputs.any }}
+      integration: ${{ steps.modules.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No replace directives in published modules
+        run: |
+          status=0
+          for m in $(scripts/modules.sh --published); do
+            if grep -Eq '^[[:space:]]*replace([[:space:]]|\()' "$m/go.mod"; then
+              echo "::error file=$m/go.mod::published module must not contain replace directives"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Compute module matrix
+        id: modules
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ "$EVENT" == "pull_request" ]]; then
+            changed=$(scripts/changed-modules.sh "$BASE_SHA" HEAD)
+          else
+            changed=$(scripts/modules.sh)
+          fi
+          published=$(scripts/modules.sh --published)
+          selected=$(comm -12 <(printf '%s\n' "$changed" | sort) <(printf '%s\n' "$published" | sort))
+
+          # One entry per module and Go version: the module's declared minimum
+          # (from its go directive) and the current stable release.
+          matrix=$(for m in $selected; do
+            min=$(awk '$1 == "go" { print $2; exit }' "$m/go.mod")
+            jq -nc --arg m "$m" --arg go "$min" '{module: $m, go: $go, leg: "min"}'
+            jq -nc --arg m "$m" '{module: $m, go: "stable", leg: "stable"}'
+          done | jq -sc '{include: .}')
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "any=$([[ -n "$selected" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          integration=false
+          if [[ -f internal/integration/go.mod ]] && printf '%s\n' "$changed" | grep -q .; then
+            integration=true
+          fi
+          echo "integration=$integration" >> "$GITHUB_OUTPUT"
+          echo "Selected modules:"; printf '  %s\n' $selected
+
+  # Every published module on its own (GOWORK=off), so it is checked against
+  # the published versions of its dependencies, exactly as a client gets it.
+  module:
+    name: ${{ matrix.module }} (go ${{ matrix.go }})
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    env:
+      GOWORK: off
+      # Never switch to a newer toolchain: the min leg must really run the
+      # declared minimum Go version.
+      GOTOOLCHAIN: local
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: go mod tidy is clean
+        run: go mod tidy -diff
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race -count=1 -timeout=5m -short -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Lint
+        if: matrix.leg == 'stable'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          working-directory: ${{ matrix.module }}
+          args: --timeout=5m ./...
+
+      - name: govulncheck
+        if: matrix.leg == 'stable'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Upload coverage
+        if: matrix.leg == 'stable'
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ matrix.module }}/coverage.out
+          flags: ${{ matrix.module == '.' && 'core' || matrix.module }}
+          fail_ci_if_error: false
+
+  # All modules together through a generated go.work: catches a change split
+  # across modules (core first, then an integration) before the core is tagged.
+  workspace:
+    name: Workspace
+    needs: discover
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build and test all modules via go.work
+        run: |
+          make work
+          make build
+          make test
+
+  # Container-based tests live in the unpublished internal/integration module
+  # (it replaces the modules it tests with the local copies).
+  integration:
+    name: Integration tests
+    needs: discover
+    if: needs.discover.outputs.integration == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: internal/integration/go.mod
+          cache-dependency-path: internal/integration/go.sum
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          working-directory: internal/integration
+          args: --timeout=5m ./...
+
+      - name: Run integration tests
+        env:
+          GOWORK: off
+        run: make test-integration

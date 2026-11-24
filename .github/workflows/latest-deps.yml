@@ -1,0 +1,55 @@
+name: Latest dependencies
+
+# Published modules keep their requirements at the minimum versions they need,
+# so clients are never forced into upgrades. This job checks every module
+# against the latest versions of its dependencies (nothing is committed), so
+# incompatibilities surface here before a client hits them.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.modules.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: modules
+        run: echo "modules=$(scripts/modules.sh --published | jq -Rsc 'split("\n") | map(select(. != ""))')" >> "$GITHUB_OUTPUT"
+
+  latest:
+    name: ${{ matrix.module }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.discover.outputs.modules) }}
+    env:
+      GOWORK: off
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Upgrade dependencies (not committed)
+        run: |
+          go get -u -t ./...
+          go mod tidy
+          git diff --stat -- go.mod
+
+      - name: Build and test
+        run: |
+          go build ./...
+          go test -race -count=1 -timeout=5m -short ./...
