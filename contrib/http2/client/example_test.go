@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"time"
 
-	"github.com/eidon-go/core/http2/client"
+	"github.com/eidon-go/core/contrib/http2/client"
 )
 
 // bearer adds an Authorization header to every request.

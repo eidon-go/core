@@ -79,7 +79,7 @@ linters:
       - builtin$
       - examples$
     rules:
-      - path: ^sql/
+      - path: ^contrib/sql/
         linters:
           - revive
         text: "avoid package names that conflict"

@@ -1,18 +1,18 @@
 # http2
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/eidon-go/core/http2.svg)](https://pkg.go.dev/github.com/eidon-go/core/http2)
-[![Release](https://img.shields.io/github/v/tag/eidon-go/core?filter=http2%2Fv*&sort=semver&label=release)](https://github.com/eidon-go/core/releases)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/eidon-go/core?filename=http2%2Fgo.mod)](./go.mod)
-[![codecov](https://codecov.io/gh/eidon-go/core/graph/badge.svg?flag=http2)](https://codecov.io/gh/eidon-go/core?flags%5B0%5D=http2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/eidon-go/core/contrib/http2.svg)](https://pkg.go.dev/github.com/eidon-go/core/contrib/http2)
+[![Release](https://img.shields.io/github/v/tag/eidon-go/core?filter=contrib%2Fhttp2%2Fv*&sort=semver&label=release)](https://github.com/eidon-go/core/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/eidon-go/core?filename=contrib%2Fhttp2%2Fgo.mod)](./go.mod)
+[![codecov](https://codecov.io/gh/eidon-go/core/graph/badge.svg?flag=contrib-http2)](https://codecov.io/gh/eidon-go/core?flags%5B0%5D=contrib-http2)
 
-An HTTP server as a [`lifecycle`](../lifecycle/README.md) component: the port is bound in `Start`,
+An HTTP server as a [`lifecycle`](../../lifecycle/README.md) component: the port is bound in `Start`,
 requests are served in `Run`, and `Shutdown` drains in-flight requests, then force-closes what is
 left when its deadline expires. HTTP/1.1 and HTTP/2 (over TLS, or cleartext h2c), OpenTelemetry
 instrumentation on by default, opt-in Kubernetes-style probes, and a panic-recovery middleware.
 The [`client`](#client) package builds the matching outbound `*http.Client`.
 
 ```sh
-go get github.com/eidon-go/core/http2
+go get github.com/eidon-go/core/contrib/http2
 ```
 
 ```go
@@ -78,7 +78,7 @@ Spans are named `{method} {route}` from the `http.ServeMux` pattern (`GET /users
 | `Shutdown` | stops accepting, waits for in-flight requests; when its ctx is done, closes the remaining connections and returns an error wrapping `ctx.Err()`. Idempotent, safe without `Start`/`Run` |
 | `Healthcheck` | `nil` while serving, `ErrNotServing` before `Run` and once the stop has begun |
 
-Following the [lifecycle contract](../lifecycle/README.md#contract), the cancelled ctx of `Run`
+Following the [lifecycle contract](../../lifecycle/README.md#contract), the cancelled ctx of `Run`
 and `Shutdown` are one stop: whichever comes first closes the listener and starts the drain, once
 (shutdown hooks run once); `Run` sets no deadline of its own, `Shutdown` bounds the drain (the
 app's shutdown timeout) and force-closes at its deadline, and `Run` returns at the same moment.

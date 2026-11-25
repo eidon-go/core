@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/eidon-go/core/config/yaml"
+	"github.com/eidon-go/core/contrib/config/yaml"
 )
 
 func TestParse(t *testing.T) {

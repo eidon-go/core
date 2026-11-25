@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/eidon-go/core/http2/middleware"
+	"github.com/eidon-go/core/contrib/http2/middleware"
 )
 
 func TestRecover(t *testing.T) {

@@ -17,7 +17,7 @@ func ExampleNew() {
 
 	cfg, err := config.New(context.Background(),
 		// For YAML add: config.WithParser(yaml.Parse, yaml.Extensions()...)
-		// with github.com/eidon-go/core/config/yaml.
+		// with github.com/eidon-go/core/contrib/config/yaml.
 		config.WithFS(files), // omit to read from the OS file system
 		config.WithFiles("config.json"),
 		config.WithDefaults(map[string]any{"http.host": "0.0.0.0"}),

@@ -17,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/eidon-go/core/app"
-	"github.com/eidon-go/core/http2"
+	"github.com/eidon-go/core/contrib/http2"
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/lifecycle/lifecycletest"
 )

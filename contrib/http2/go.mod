@@ -1,4 +1,4 @@
-module github.com/eidon-go/core/http2
+module github.com/eidon-go/core/contrib/http2
 
 go 1.26.0
 

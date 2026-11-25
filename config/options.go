@@ -70,7 +70,7 @@ func WithDefaults(values map[string]any) Option {
 
 // WithFiles adds configuration files, merged in order (later files win). The
 // format follows the extension: .json is built in, other formats need a
-// parser registered with WithParser (YAML: github.com/eidon-go/core/config/yaml).
+// parser registered with WithParser (YAML: github.com/eidon-go/core/contrib/config/yaml).
 // Files are read from the OS file system, or from the one set with WithFS.
 // Each file must be a regular file of at most MaxFileSize bytes.
 func WithFiles(paths ...string) Option {

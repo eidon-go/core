@@ -16,8 +16,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/eidon-go/core/http2"
-	"github.com/eidon-go/core/http2/client"
+	"github.com/eidon-go/core/contrib/http2"
+	"github.com/eidon-go/core/contrib/http2/client"
 )
 
 type response struct {
