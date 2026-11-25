@@ -44,9 +44,14 @@ type Event struct {
 }
 
 // WithObserver adds a function called after every Start, Run and Shutdown of
-// a component, e.g. to record metrics or traces of the lifecycle. Observers
-// are called synchronously from the goroutine that made the call, so they
-// must be fast and safe for concurrent use. Repeated options add observers.
+// a component, e.g. to record metrics or traces of the lifecycle. Repeated
+// options add observers.
+//
+// Observers are called synchronously and possibly concurrently (Run events
+// come from each runner's goroutine), so they must be fast and safe for
+// concurrent use. A Shutdown event is reported when App stops waiting for the
+// call — for an abandoned Shutdown that is before the call returns — and the
+// Run event of an abandoned runner may arrive after App.Run has returned.
 func WithObserver(fn func(ctx context.Context, e Event)) Option {
 	return func(a *App) {
 		if fn != nil {

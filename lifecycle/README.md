@@ -51,10 +51,12 @@ makes `Serve` return.
 
 ## Helpers
 
-- `Group(members...)` / `GroupNamed(name, members...)` — one component over many: starts the
-  members in order (rolling back on failure), shuts them down in reverse order, aggregates their
-  health checks and skips nil members (including typed nil pointers). Runners cannot be grouped:
-  register them with `app.App` directly.
+- `Group(members...)` / `GroupNamed(name, members...)` — one component over many: shuts the
+  members down in reverse order and skips nil members (including typed nil pointers). It is a
+  `Starter` only if a member is (starting them in order; on failure every member holding
+  resources — those before the failed one and later members without `Start` — is shut down,
+  bounded by the start context), and a `Healthchecker` only if a member is. Runners cannot be
+  grouped: register them with `app.App` directly.
 - `ShutdownFunc` — adapt a cleanup function: `a.Add(lifecycle.ShutdownFunc(tp.Shutdown))`.
 - `HealthcheckFunc` — adapt a check function; it is also a `Resource` (no-op `Shutdown`), so it
   can be registered on its own.
@@ -67,10 +69,12 @@ makes `Serve` return.
 
 ```go
 func TestServerContract(t *testing.T) {
-    lifecycletest.Runner(t, func(t *testing.T) lifecycle.Runner { return newTestServer(t) })
+    lifecycletest.Runner(t, func(t *testing.T) lifecycle.Runner { return newTestServer(t) },
+        lifecycletest.WithTimeout(30*time.Second)) // default 10s
 }
 ```
 
-`lifecycletest.Resource` checks Shutdown without Start, Shutdown with a cancelled context and
-Start→Shutdown; `lifecycletest.Runner` adds Shutdown-while-running, cancel-while-running and
-Run-after-Shutdown.
+`lifecycletest.Resource` checks Shutdown without Start, Shutdown with a cancelled context,
+Start→Shutdown and that Healthcheck returns before Start and after Shutdown;
+`lifecycletest.Runner` adds: Run blocks until Shutdown and then returns nil, Run blocks until its
+context is cancelled, and Run after Shutdown returns nil promptly.

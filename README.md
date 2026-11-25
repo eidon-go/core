@@ -6,7 +6,7 @@
 
 An explicit-wiring, stdlib-first kit for production Go services: one lifecycle contract that every
 integration follows, so telemetry, health, retries, logging and graceful shutdown behave the same
-across HTTP, gRPC, databases and brokers. No reflection, no DI container.
+across HTTP, gRPC, databases and brokers. No reflection-based wiring, no DI container.
 
 The repository holds several Go modules. The **core** module is small, stable and has no
 third-party dependencies (Go 1.25+). Every integration and format (YAML, etcd, OpenTelemetry, HTTP,

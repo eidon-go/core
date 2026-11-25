@@ -30,9 +30,9 @@
 //     returned. Run may even be called after Shutdown has started (another
 //     runner failed at once); it must then return nil promptly.
 //
-// When the ctx passed to Shutdown is done, app.App stops waiting for it and
-// reports the component as timed out; a Shutdown that ignores ctx is
-// abandoned, together with its goroutine.
+// When the ctx passed to Shutdown is done, app.App waits only a short grace
+// period (100ms) for it to force-close, then reports the component as timed
+// out; a Shutdown that ignores ctx is abandoned, together with its goroutine.
 //
 // Healthcheck and Name may be called at any time, concurrently with each
 // other and with Start, Run and Shutdown.

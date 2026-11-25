@@ -683,10 +683,9 @@ func TestHealthcheck(t *testing.T) {
 		srv,
 	)
 
-	start := time.Now()
+	// Concurrency is covered by TestHealthReport_RunsChecksConcurrently.
 	report := a.HealthReport(t.Context())
 
-	assert.Less(t, time.Since(start), 95*time.Millisecond, "checks run concurrently")
 	assert.Equal(t, []app.HealthResult{
 		{Name: "db", Err: nil},
 		{Name: "cache", Err: errDown},

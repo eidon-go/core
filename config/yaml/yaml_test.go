@@ -21,6 +21,18 @@ func TestParse(t *testing.T) {
 	}, doc)
 }
 
+func TestParse_TimestampsStayStrings(t *testing.T) {
+	t.Parallel()
+
+	doc, err := yaml.Parse([]byte("date: 2024-01-01\nlist: [2024-01-02T10:00:00Z, x]\nexplicit: !!str 7\n"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"date":     "2024-01-01",
+		"list":     []any{"2024-01-02T10:00:00Z", "x"},
+		"explicit": "7",
+	}, doc)
+}
+
 func TestParse_Empty(t *testing.T) {
 	t.Parallel()
 

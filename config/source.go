@@ -28,6 +28,8 @@ var (
 	ErrUnknownFormat = errors.New("config: no parser for format")
 )
 
+var errTrailingData = errors.New("unexpected data after the document")
+
 // Parser decodes one document into a map. Nested objects must be
 // map[string]any; values are scalars, slices or nested maps. An empty
 // document yields an empty map. Register parsers with WithParser; JSON is
@@ -35,7 +37,8 @@ var (
 type Parser func(data []byte) (map[string]any, error)
 
 // ParseJSON is the built-in Parser for ".json". Numbers are decoded as
-// json.Number, so large integers keep their precision.
+// json.Number, so large integers keep their precision. The document must be
+// a single object; an empty document or null yields an empty map.
 func ParseJSON(data []byte) (map[string]any, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]any{}, nil
@@ -47,6 +50,14 @@ func ParseJSON(data []byte) (map[string]any, error) {
 	var doc map[string]any
 	if err := dec.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("decode json: %w", err)
+	}
+
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("decode json: %w", errTrailingData)
+	}
+
+	if doc == nil {
+		return map[string]any{}, nil
 	}
 
 	return doc, nil
@@ -78,14 +89,16 @@ func (p parsers) parse(data []byte, name string) (map[string]any, error) {
 	return flatten(doc), nil
 }
 
-// loadFiles reads every file and merges them in order. Missing files listed
-// in optional are skipped.
-func loadFiles(fsys fs.FS, p parsers, paths []string, optional map[string]bool) (map[string]any, error) {
+// loadFiles reads every file and merges them in order. Missing optional
+// files are skipped.
+func loadFiles(fsys fs.FS, p parsers, files []fileSource) (map[string]any, error) {
 	acc := map[string]any{}
 
-	for _, name := range paths {
+	for _, file := range files {
+		name := file.path
+
 		data, err := readFile(fsys, name)
-		if optional[name] && errors.Is(err, fs.ErrNotExist) {
+		if file.optional && errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 

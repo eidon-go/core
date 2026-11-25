@@ -8,13 +8,14 @@ import (
 // ErrKVKeyNotFound is returned (wrapped) by KV.Get when a key does not exist.
 var ErrKVKeyNotFound = errors.New("config: KV key not found")
 
-// KVEventType distinguishes the events delivered by KV.Watch.
+// KVEventType distinguishes the events delivered by KV.Watch. The zero value
+// is not a valid event type; such events are ignored.
 type KVEventType int
 
 const (
 	// KVEventPut means the key was created or updated; Value holds the new
 	// payload.
-	KVEventPut KVEventType = iota
+	KVEventPut KVEventType = iota + 1
 	// KVEventDelete means the key was deleted; Value is nil.
 	KVEventDelete
 )

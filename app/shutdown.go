@@ -12,11 +12,11 @@ import (
 	"github.com/eidon-go/core/lifecycle"
 )
 
-// ForceCloseGrace is how long App still waits for a Shutdown after the
+// forceCloseGrace is how long App still waits for a Shutdown after the
 // shutdown timeout has expired: a Shutdown called with a done ctx is expected
 // to force-close promptly, and gets this long to do it before it is
 // abandoned.
-const ForceCloseGrace = 100 * time.Millisecond
+const forceCloseGrace = 100 * time.Millisecond
 
 // runWait lets shutdown wait for runners between the two shutdown phases.
 type runWait struct {
@@ -70,7 +70,7 @@ func (a *App) shutdown(ctx context.Context, components []lifecycle.Resource, wai
 	return err
 }
 
-// shutdownOne calls c.Shutdown and stops waiting ForceCloseGrace after ctx
+// shutdownOne calls c.Shutdown and stops waiting forceCloseGrace after ctx
 // expires: a Shutdown that ignores ctx is abandoned (its goroutine leaks) and
 // reported with ErrShutdownTimeout, so one stuck component cannot block the
 // rest.
@@ -101,7 +101,7 @@ func awaitShutdown(ctx context.Context, done <-chan error, begin time.Time) erro
 	case <-ctx.Done():
 	}
 
-	grace := time.NewTimer(ForceCloseGrace)
+	grace := time.NewTimer(forceCloseGrace)
 	defer grace.Stop()
 
 	select {

@@ -117,6 +117,11 @@ func (w *watcher) watchKey(ctx context.Context, key string) {
 // applies events until the channel closes or ctx is done. It reports whether
 // at least one event was applied.
 func (w *watcher) stream(ctx context.Context, key string) bool {
+	// The watch lives only as long as this stream: returning (error event,
+	// failed resync) cancels it.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	ch := w.kv.Watch(ctx, key)
 	if ch == nil {
 		w.logger.WarnContext(ctx, "config: KV returned no watch channel", slog.String("key", key))
@@ -124,7 +129,11 @@ func (w *watcher) stream(ctx context.Context, key string) bool {
 		return false
 	}
 
-	w.resync(ctx, key)
+	if !w.resync(ctx, key) {
+		// Values may be stale: reconnect (with backoff) instead of waiting
+		// for the next event.
+		return false
+	}
 
 	applied := false
 
@@ -179,7 +188,8 @@ func (w *watcher) handle(ctx context.Context, key string, ev KVEvent) bool {
 	}
 }
 
-func (w *watcher) resync(ctx context.Context, key string) {
+// resync re-reads key and applies it; it reports whether that succeeded.
+func (w *watcher) resync(ctx context.Context, key string) bool {
 	parsed, err := loadKey(ctx, w.kv, w.parsers, w.timeout, key)
 	if errors.Is(err, ErrKVKeyNotFound) {
 		// Deleted while disconnected: same as a delete event.
@@ -187,12 +197,16 @@ func (w *watcher) resync(ctx context.Context, key string) {
 	}
 
 	if err != nil {
-		w.logger.WarnContext(ctx, "config: resync failed", slog.String("key", key), slog.Any("err", err))
+		if ctx.Err() == nil {
+			w.logger.WarnContext(ctx, "config: resync failed", slog.String("key", key), slog.Any("err", err))
+		}
 
-		return
+		return false
 	}
 
 	w.apply(key, parsed)
+
+	return true
 }
 
 // apply stores the document of key and publishes. Publishing under the lock

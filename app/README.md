@@ -34,10 +34,15 @@ func main() {
    `Run` return), the app waits for every `Run` to return, then the other components are shut
    down in reverse order.
 
-Every `Shutdown` call is bounded: once the timeout has expired a component still gets
-`ForceCloseGrace` (100ms) to force-close, and is then abandoned (its goroutine leaks) and
-reported with `ErrShutdownTimeout`. Runners still running at the deadline are reported the same
-way. So `ctx`-less closes such as a pool's `Close()` cannot hang the process.
+Every `Shutdown` call is bounded: once the timeout has expired a component still gets 100ms to
+force-close, and is then abandoned (its goroutine leaks) and reported with `ErrShutdownTimeout`.
+Runners still running at the deadline are reported the same way. So `ctx`-less closes such as a
+pool's `Close()` cannot hang the process — but the phase can overrun the timeout by up to 100ms
+per component still pending; size the timeout (and the Kubernetes termination grace period)
+accordingly.
+
+During the shutdown delay runners keep running with their context intact; only readiness fails.
+A runner that returns during the delay ends it.
 
 `Run` returns `nil` after a clean stop; otherwise the cause joined with every shutdown error. It
 may be called once (`ErrAlreadyStarted` afterwards).
@@ -85,7 +90,10 @@ app.WithObserver(func(ctx context.Context, e app.Event) {
 })
 ```
 
-Observers are called synchronously from the goroutine that made the call; keep them fast.
+Observers are called synchronously and possibly concurrently (Run events come from each runner's
+goroutine); keep them fast and safe for concurrent use. A Shutdown event is reported when App
+stops waiting — for an abandoned Shutdown that is before the call returns — and the Run event of
+an abandoned runner may arrive after `App.Run` has returned.
 
 ## Testing
 

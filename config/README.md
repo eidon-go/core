@@ -127,7 +127,8 @@ a.Add(cfg) // the watcher runs in cfg.Run
   stops it and closes the KV. Register it with `app.App`, or call `Run`/`Shutdown` yourself.
 - Config takes ownership of the KV: `New` closes it on failure, `Shutdown` otherwise.
 - Every time a watch is opened (the first time and after a reconnect), the key is re-read, so
-  changes made between `New` and `Run` or while disconnected are not lost.
+  changes made between `New` and `Run` or while disconnected are not lost. If that read fails,
+  the watch is reopened with backoff until it succeeds.
 - A changed document replaces the key's previous values (keys removed from it disappear); a
   deleted key removes its values; an invalid document is logged and the previous values stay.
 - A failed watch reconnects with backoff (`WithWatchBackoff(initial, max)`, default 1s doubling

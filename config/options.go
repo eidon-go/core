@@ -29,8 +29,7 @@ type Option func(*options)
 
 type options struct {
 	defaults     map[string]any
-	files        []string
-	optional     map[string]bool
+	files        []fileSource
 	fsys         fs.FS
 	parsers      parsers
 	kv           KV
@@ -70,11 +69,12 @@ func WithDefaults(values map[string]any) Option {
 }
 
 // WithFiles adds configuration files, merged in order (later files win). The
-// format follows the extension: .yaml/.yml (also the default when there is
-// none) or .json. Files are read from the OS file system, or from the one set
-// with WithFS. Each file must be a regular file of at most 10 MiB.
+// format follows the extension: .json is built in, other formats need a
+// parser registered with WithParser (YAML: github.com/eidon-go/core/config/yaml).
+// Files are read from the OS file system, or from the one set with WithFS.
+// Each file must be a regular file of at most MaxFileSize bytes.
 func WithFiles(paths ...string) Option {
-	return func(o *options) { o.files = append(o.files, paths...) }
+	return func(o *options) { o.addFiles(paths, false) }
 }
 
 // WithOptionalFiles is WithFiles for files that may be missing (e.g. a local
@@ -82,17 +82,7 @@ func WithFiles(paths ...string) Option {
 // skipped. Any other error still fails New. Optional and required files are
 // merged in the order they were added.
 func WithOptionalFiles(paths ...string) Option {
-	return func(o *options) {
-		if o.optional == nil {
-			o.optional = map[string]bool{}
-		}
-
-		for _, p := range paths {
-			o.optional[p] = true
-		}
-
-		o.files = append(o.files, paths...)
-	}
+	return func(o *options) { o.addFiles(paths, true) }
 }
 
 // WithFS reads files from fsys instead of the OS file system (e.g. an
@@ -103,14 +93,24 @@ func WithFS(fsys fs.FS) Option {
 }
 
 // WithParser registers p for files and KV keys with the given extensions
-// (case-insensitive, with the dot: ".yaml"; "" means no extension),
-// replacing a parser registered earlier. ".json" is built in (ParseJSON).
+// (case-insensitive; "yaml" and ".yaml" are the same; "" means no
+// extension), replacing a parser registered earlier. ".json" is built in
+// (ParseJSON). WithParser panics if p is nil.
 //
-//	config.WithParser(yaml.Parse, ".yaml", ".yml", "") // or yaml.Option()
+//	config.WithParser(yaml.Parse, yaml.Extensions()...)
 func WithParser(p Parser, exts ...string) Option {
+	if p == nil {
+		panic("config: WithParser: nil parser")
+	}
+
 	return func(o *options) {
 		for _, ext := range exts {
-			o.parsers[strings.ToLower(ext)] = p
+			ext = strings.ToLower(ext)
+			if ext != "" && !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+
+			o.parsers[ext] = p
 		}
 	}
 }
@@ -121,9 +121,9 @@ func WithKV(kv KV) Option {
 	return func(o *options) { o.kv = kv }
 }
 
-// WithKeys adds KV keys that are read once by New. Each value is a yaml or
-// json document (by the key's extension, yaml by default); documents are
-// merged in order.
+// WithKeys adds KV keys that are read once by New. Each value is a document
+// parsed by the parser registered for the key's extension (see WithParser);
+// documents are merged in order.
 func WithKeys(keys ...string) Option {
 	return func(o *options) { o.keys = append(o.keys, keys...) }
 }
@@ -197,6 +197,18 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// fileSource is a configuration file and whether it may be missing.
+type fileSource struct {
+	path     string
+	optional bool
+}
+
+func (o *options) addFiles(paths []string, optional bool) {
+	for _, p := range paths {
+		o.files = append(o.files, fileSource{path: p, optional: optional})
+	}
+}
+
 // envName maps a dotted key to its environment variable name.
 func (o *options) envName(key string) string {
 	name := strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
@@ -218,7 +230,7 @@ func (o *options) bootstrapFromEnv() error {
 		return strings.TrimSpace(v)
 	}
 
-	o.files = append(o.files, splitList(get("config.files"))...)
+	o.addFiles(splitList(get("config.files")), false)
 	o.keys = append(o.keys, splitList(get("config.kv.keys"))...)
 	o.watchedKeys = append(o.watchedKeys, splitList(get("config.kv.watched.keys"))...)
 

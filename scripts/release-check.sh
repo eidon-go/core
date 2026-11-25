@@ -48,11 +48,17 @@ tag="$prefix$version"
 
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "tag $tag already exists"
 
+# semver_sort sorts versions so that a pre-release comes before its release
+# (v1.0.0-rc.1 < v1.0.0): "-" becomes "~", which sort -V orders first.
+semver_sort() {
+	sed 's/-/~/' | sort -V | sed 's/~/-/'
+}
+
 latest=$(git tag --list "${prefix}v*" |
 	grep -E "^${prefix//./\\.}v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$" |
-	sed "s#^${prefix}##" | sort -V | tail -n1 || true)
+	sed "s#^${prefix}##" | semver_sort | tail -n1 || true)
 if [[ -n "$latest" ]]; then
-	highest=$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n1)
+	highest=$(printf '%s\n%s\n' "$latest" "$version" | semver_sort | tail -n1)
 	[[ "$highest" == "$version" ]] || fail "$version is not greater than the latest release $latest"
 fi
 

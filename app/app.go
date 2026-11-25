@@ -47,7 +47,7 @@ var (
 	ErrAlreadyStarted = errors.New("app: already started")
 	// ErrRunnerStopped is the cause reported when a Runner's Run returns nil
 	// before shutdown was requested.
-	ErrRunnerStopped = errors.New("runner stopped unexpectedly")
+	ErrRunnerStopped = errors.New("app: runner stopped unexpectedly")
 	// ErrShutdownTimeout is reported for every component that did not finish
 	// in time: a runner whose Run had not returned, or a Shutdown that had
 	// not returned (it is abandoned, together with its goroutine) or that
@@ -125,6 +125,12 @@ func WithLogger(logger *slog.Logger) Option {
 // WithShutdownTimeout sets the budget for the whole shutdown phase, shared by
 // every component (the shutdown delay is not included). Values <= 0 mean
 // DefaultShutdownTimeout.
+//
+// After the budget is spent, each component still shutting down gets 100ms
+// more to force-close before it is abandoned and reported with
+// ErrShutdownTimeout, so the phase can overrun by up to 100ms per pending
+// component. Size the timeout (and e.g. the Kubernetes termination grace
+// period) accordingly.
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(a *App) { a.shutdownTimeout = d }
 }
@@ -207,16 +213,19 @@ func (a *App) Add(components ...lifecycle.Resource) {
 	a.components = append(a.components, components...)
 }
 
-// isRegistered reports whether c is already in list. Only comparable
-// components can be detected; comparing others would panic.
+// isRegistered reports whether c is already in list. Only pointer components
+// are compared, by address: comparing arbitrary values could panic (a struct
+// holding a slice in an interface field) or report distinct values as equal,
+// and pointers to zero-size types may share an address.
 func isRegistered(c lifecycle.Resource, list []lifecycle.Resource) bool {
-	typ := reflect.TypeOf(c)
-	if !typ.Comparable() {
+	value := reflect.ValueOf(c)
+	if value.Kind() != reflect.Pointer || value.Type().Elem().Size() == 0 {
 		return false
 	}
 
 	for _, other := range list {
-		if reflect.TypeOf(other) == typ && other == c {
+		ov := reflect.ValueOf(other)
+		if ov.Kind() == reflect.Pointer && ov.Type() == value.Type() && ov.Pointer() == value.Pointer() {
 			return true
 		}
 	}
@@ -291,7 +300,9 @@ func (a *App) begin() ([]lifecycle.Resource, error) {
 
 // notifyContext layers the configured signals on top of ctx. After the first
 // signal it restores the default behavior, so a second signal kills the
-// process even if shutdown hangs.
+// process even if shutdown hangs. When shutdown is started by cancelling ctx
+// instead, signals stay handled (a SIGTERM during that shutdown does not kill
+// the process).
 func (a *App) notifyContext(ctx context.Context) (context.Context, func()) {
 	sigs := a.signals
 	if !a.signalsSet {
@@ -305,7 +316,11 @@ func (a *App) notifyContext(ctx context.Context) (context.Context, func()) {
 	}
 
 	sigCtx, stop := signal.NotifyContext(ctx, sigs...)
-	unregister := context.AfterFunc(sigCtx, stop)
+	unregister := context.AfterFunc(sigCtx, func() {
+		if ctx.Err() == nil { // done because of a signal, not because of ctx
+			stop()
+		}
+	})
 
 	return sigCtx, func() {
 		unregister()
@@ -382,7 +397,9 @@ type runResult struct {
 func (a *App) runAndShutdown(ctx context.Context, components []lifecycle.Resource) error {
 	logger := a.Logger()
 
-	runCtx, cancelRun := context.WithCancel(ctx)
+	// Runners keep running until shutdown actually starts — after the
+	// shutdown delay — not when ctx is cancelled.
+	runCtx, cancelRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRun()
 
 	wait := a.startRunners(ctx, runCtx, components)
@@ -397,7 +414,7 @@ func (a *App) runAndShutdown(ctx context.Context, components []lifecycle.Resourc
 	case <-ctx.Done():
 		a.state.Store(int32(stateStopping))
 		logger.InfoContext(ctx, "app stopping", slog.Any("cause", context.Cause(ctx)))
-		a.drainDelay(ctx)
+		cause = a.drainDelay(ctx, wait)
 	case res := <-wait.results:
 		a.state.Store(int32(stateStopping))
 
@@ -466,14 +483,26 @@ func levelFor(err error) slog.Level {
 }
 
 // drainDelay waits for the shutdown delay, if any, while readiness already
-// fails.
-func (a *App) drainDelay(ctx context.Context) {
+// fails and runners keep serving. A runner that returns during the delay
+// ends it; its error, if any, is returned.
+func (a *App) drainDelay(ctx context.Context, wait *runWait) error {
 	if a.shutdownDelay <= 0 {
-		return
+		return nil
 	}
 
 	a.Logger().InfoContext(ctx, "app draining before shutdown", slog.Duration("delay", a.shutdownDelay))
-	time.Sleep(a.shutdownDelay)
+
+	timer := time.NewTimer(a.shutdownDelay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case res := <-wait.results:
+		wait.first = res.idx
+
+		return runErr(res, false)
+	}
 }
 
 // runErr turns a Run result into the error to report. Before shutdown was

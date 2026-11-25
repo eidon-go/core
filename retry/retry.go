@@ -19,7 +19,7 @@ import (
 )
 
 // ErrPermanent marks an error as not retryable; see Permanent.
-var ErrPermanent = errors.New("permanent error")
+var ErrPermanent = errors.New("retry: permanent error")
 
 // Permanent wraps err so that Policy.Do stops retrying and returns it
 // immediately. The result matches both err and ErrPermanent with errors.Is.
@@ -120,15 +120,30 @@ func DoValue[T any](ctx context.Context, p Policy, operation func(ctx context.Co
 			return zero, err
 		}
 
+		// The operation may have failed because ctx is done: do not report a
+		// retry that will not happen.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return zero, joinCtx(err, ctxErr)
+		}
+
 		delay := p.Delay(attempt)
 		if p.OnRetry != nil {
 			p.OnRetry(ctx, Attempt{Number: attempt, Err: err, Delay: delay})
 		}
 
 		if ctxErr := sleeper.sleep(ctx, delay); ctxErr != nil {
-			return zero, errors.Join(err, ctxErr)
+			return zero, joinCtx(err, ctxErr)
 		}
 	}
+}
+
+// joinCtx joins the last error with the ctx error, unless it already wraps it.
+func joinCtx(err, ctxErr error) error {
+	if errors.Is(err, ctxErr) {
+		return err
+	}
+
+	return errors.Join(err, ctxErr)
 }
 
 // sleeper reuses one timer across waits.
@@ -170,7 +185,7 @@ func (p Policy) Delay(attempt int) time.Duration {
 		d = float64(p.MaxDelay)
 	}
 
-	if d > math.MaxInt64 {
+	if d >= math.MaxInt64 {
 		d = math.MaxInt64
 	}
 

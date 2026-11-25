@@ -130,9 +130,7 @@ func toUint64(v any) (uint64, bool) {
 	case uint:
 		return uint64(x), true
 	case json.Number:
-		n, err := strconv.ParseUint(x.String(), 10, 64)
-
-		return n, err == nil
+		return numberToUint64(x)
 	case string:
 		n, err := strconv.ParseUint(strings.TrimSpace(x), 10, 64)
 
@@ -145,6 +143,21 @@ func toUint64(v any) (uint64, bool) {
 
 		return uint64(n), true
 	}
+}
+
+// numberToUint64 converts a JSON number: a plain non-negative integer of any
+// size, or a whole float (1e3, 1.0) like the signed integer types accept.
+func numberToUint64(x json.Number) (uint64, bool) {
+	if n, err := strconv.ParseUint(x.String(), 10, 64); err == nil {
+		return n, true
+	}
+
+	i, ok := toInt64(x)
+	if !ok || i < 0 {
+		return 0, false
+	}
+
+	return uint64(i), true
 }
 
 // intValue converts the integer kinds decoders produce to int64.

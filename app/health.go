@@ -16,6 +16,11 @@ import (
 // concurrently and joins the failures, each prefixed with the component's
 // name. App satisfies lifecycle.Healthchecker, so it can back a /readyz
 // endpoint directly.
+//
+// The app counts as running as soon as every runner has been launched, not
+// when each has finished binding; components that need to be truly ready
+// (e.g. a server listening) should do that work in Start or report it in
+// their own Healthcheck.
 func (a *App) Healthcheck(ctx context.Context) error {
 	if s := state(a.state.Load()); s != stateRunning {
 		return fmt.Errorf("%w: %s", ErrNotReady, s)

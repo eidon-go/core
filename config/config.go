@@ -112,7 +112,7 @@ func load(ctx context.Context, o *options) (*Config, error) {
 		return nil, err
 	}
 
-	files, err := loadFiles(o.fsys, o.parsers, o.files, o.optional)
+	files, err := loadFiles(o.fsys, o.parsers, o.files)
 	if err != nil {
 		return nil, err
 	}

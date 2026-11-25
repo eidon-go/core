@@ -28,15 +28,24 @@ func Extensions() []string {
 
 // Parse is a config.Parser for YAML. Mapping keys that are not strings
 // (e.g. 200: ok) become their string form; an empty document yields an empty
-// map. Only the first document of a multi-document stream is read.
+// map. Timestamps stay strings (date: 2024-01-01 reads as "2024-01-01"), as
+// config has no time type. Only the first document of a multi-document
+// stream is read.
 func Parse(data []byte) (map[string]any, error) {
-	var doc map[string]any
+	var node yaml.Node
 
-	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&doc); err != nil {
+	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&node); err != nil {
 		if errors.Is(err, io.EOF) {
 			return map[string]any{}, nil
 		}
 
+		return nil, fmt.Errorf("decode yaml: %w", err)
+	}
+
+	keepTimestampsAsStrings(&node)
+
+	var doc map[string]any
+	if err := node.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("decode yaml: %w", err)
 	}
 
@@ -45,6 +54,18 @@ func Parse(data []byte) (map[string]any, error) {
 	}
 
 	return normalize(doc), nil
+}
+
+// keepTimestampsAsStrings retags implicit timestamp scalars as strings, so
+// they decode to their original text instead of time.Time.
+func keepTimestampsAsStrings(n *yaml.Node) {
+	if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!timestamp" {
+		n.Tag = "!!str"
+	}
+
+	for _, child := range n.Content {
+		keepTimestampsAsStrings(child)
+	}
 }
 
 // normalize converts nested map[any]any (produced for non-string keys) to

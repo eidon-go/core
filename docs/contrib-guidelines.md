@@ -10,6 +10,10 @@ reason in its README.
 - One Go module per integration (`<name>/go.mod`), tagged `<name>/vX.Y.Z`.
 - Depend on `github.com/eidon-go/core` for `lifecycle` and `retry` only. Never import `core/app`
   (components must work without it) or `core/config` (configuration comes in as a struct).
+  Exception: `config/<backend>` modules (e.g. `config/etcd`) implement `config.KV` and therefore
+  import `config` — and nothing else from it.
+- Format modules (e.g. `config/yaml`) expose a plain `func([]byte) (map[string]any, error)` and
+  need not import core at all.
 - `require` the **minimum** versions you need (core and third-party), and the minimum `go`
   directive your dependencies allow. Dependabot does not bump them; the weekly latest-deps job
   checks compatibility instead.
@@ -44,7 +48,8 @@ func WithLogger(*slog.Logger) Option
 ## 4. Lifecycle
 
 Implement the [`lifecycle`](../lifecycle/README.md) contract and prove it with
-`lifecycletest.Resource` / `lifecycletest.Runner` in the module's tests.
+`lifecycletest.Resource` / `lifecycletest.Runner` in the module's tests (raise the timeout with
+`lifecycletest.WithTimeout` for container-backed components).
 
 - Every component implements `lifecycle.Namer`. Default name: the module name (`"redis"`);
   `WithName(string)` distinguishes instances (two databases).
