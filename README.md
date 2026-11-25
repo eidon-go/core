@@ -32,6 +32,7 @@ core.
 | contrib/config/yaml | `github.com/eidon-go/core/contrib/config/yaml` | [YAML parser](./contrib/config/yaml/README.md) for `config` |
 | contrib/config/etcd | `github.com/eidon-go/core/contrib/config/etcd` | [etcd v3 backend](./contrib/config/etcd/README.md) for `config` (`config.KV`): watched keys, gap-free hot reload |
 | contrib/http2 | `github.com/eidon-go/core/contrib/http2` | [HTTP server](./contrib/http2/README.md): HTTP/1.1 and HTTP/2 (TLS, h2c), graceful drain, probes, OpenTelemetry, panic recovery; [client](./contrib/http2/README.md#client) (`contrib/http2/client`): tuned transport, h2c, OpenTelemetry, RoundTripper wrappers |
+| contrib/otel | `github.com/eidon-go/core/contrib/otel` | [OpenTelemetry SDK setup](./contrib/otel/README.md): traces, metrics and logs over OTLP/HTTP, resource attributes, globals on request, flushed on shutdown |
 
 ```sh
 go get github.com/eidon-go/core
@@ -50,7 +51,6 @@ to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `life
 
 | Module | Purpose | State |
 |---|---|---|
-| `contrib/otel` | OpenTelemetry SDK and exporters setup | planned |
 | `contrib/grpc` | gRPC server and client | planned |
 | `contrib/jwt` | JWT signing and verification | planned |
 | `contrib/kafka` | Kafka producer and consumer | planned |
