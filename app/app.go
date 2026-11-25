@@ -148,6 +148,8 @@ func WithShutdownDelay(d time.Duration) Option {
 
 // WithStartTimeout bounds the start phase (all Starter.Start calls together).
 // Values <= 0 mean no limit other than the context passed to Run.
+// The bound is cooperative: Start is called synchronously, so a Starter that
+// ignores its context delays the start phase past the timeout.
 func WithStartTimeout(d time.Duration) Option {
 	return func(a *App) { a.startTimeout = d }
 }
@@ -193,6 +195,11 @@ func New(opts ...Option) *App {
 // Add panics if a component is nil (including a typed nil pointer), if the
 // same component is added twice, or if it is called after Run: all are
 // programming errors.
+//
+// "The same component" means the same pointer. Non-pointer values and
+// pointers to zero-size types are never treated as duplicates: equal values
+// need not be the same resource, and distinct zero-size values may share an
+// address.
 func (a *App) Add(components ...lifecycle.Resource) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

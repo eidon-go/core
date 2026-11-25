@@ -64,14 +64,15 @@ Later, on the same scheme: adapters for `sql` such as `river` and `sqlx`.
 ## Design principles
 
 - **Explicit wiring.** Components are built with constructors and registered with `app.Add`; there
-  is no container, no reflection and no global state.
+  is no container, no reflection-based wiring or binding, and no global state.
 - **Dependency-free core.** Anything that needs a third-party library is a separate module.
 - **One lifecycle contract.** Every integration implements the same [`lifecycle`](./lifecycle/README.md)
   interfaces, so start order, readiness, retries and graceful shutdown work the same everywhere.
 - **No struct binding.** Configuration is read through typed getters into structs you define;
   integration `Config` structs are plain Go structs you can fill from any source.
-- **Constructors do no I/O.** Connecting and pinging happen in `Start`, under `app`'s control and
-  with a configurable `retry.Policy`.
+- **Component constructors do no network I/O.** Connecting and pinging happen in `Start`, under
+  `app`'s control and with a configurable `retry.Policy`. (`config.New` is the exception by design:
+  it is a loader, and reads its files and KV keys before anything else is built.)
 
 ## Example
 

@@ -144,6 +144,10 @@ func load(ctx context.Context, o *options) (*Config, error) {
 
 // resolve applies the environment bootstrap and validates the sources.
 func (o *options) resolve() error {
+	if o.err != nil {
+		return o.err
+	}
+
 	if o.envBootstrap {
 		if err := o.bootstrapFromEnv(); err != nil {
 			return err
@@ -202,10 +206,17 @@ func checkDuplicateKeys(keys, watched []string) error {
 
 // FromMap returns a Config holding values, with no other sources and no
 // environment layer — handy in tests. Nested maps are flattened to dotted
-// keys; dotted keys can also be used directly.
+// keys; dotted keys can also be used directly. FromMap panics if two entries
+// resolve to the same dotted key (ErrKeyCollision): values is a literal in
+// code, so that is a programming error.
 func FromMap(values map[string]any) *Config {
+	flat, err := flatten(values)
+	if err != nil {
+		panic(err)
+	}
+
 	cfg := newConfig(newStore(nil, nil, nil), nil)
-	cfg.store.setSnapshot(flatten(values))
+	cfg.store.setSnapshot(flat)
 
 	return cfg
 }
@@ -324,6 +335,10 @@ func GetOrDefault[T ValueType](cfg *Config, key string, def T) T {
 // change at runtime through a watched KV key (rate limits, feature flags).
 // An environment variable that overrides key pins it for the process
 // lifetime.
+//
+// Live is a getter, not a subscription: it does not reconfigure anything
+// built from an earlier value, and two calls during one operation may see
+// different values if an update lands between them.
 func Live[T ValueType](cfg *Config, key string) func() T {
 	return func() T { return Get[T](cfg, key) }
 }

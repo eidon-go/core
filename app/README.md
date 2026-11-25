@@ -57,7 +57,7 @@ may be called once (`ErrAlreadyStarted` afterwards).
 | `WithLogger(*slog.Logger)` | `slog.Default()` | lifecycle logs; never changes the global logger |
 | `WithShutdownTimeout(d)` | 30s | budget for the whole shutdown phase |
 | `WithShutdownDelay(d)` | none | keep serving with readiness failing before shutting down |
-| `WithStartTimeout(d)` | none | budget for the whole start phase |
+| `WithStartTimeout(d)` | none | budget for the whole start phase (cooperative: a `Start` that ignores its ctx overruns it) |
 | `WithSignals(sigs...)` | SIGINT, SIGTERM | `WithSignals()` disables signal handling |
 | `WithHealthcheckTimeout(d)` | none | per-component bound in `Healthcheck` / `HealthReport` |
 | `WithObserver(fn)` | none | called after every Start, Run and Shutdown with an `Event` |
@@ -70,7 +70,8 @@ shutdown that hangs.
 `Add(components ...lifecycle.Resource)` registers components in dependency order. A component
 implementing `lifecycle.Runner` is run; every component is shut down. `Add` panics on a nil
 component (including a typed nil pointer), on a component added twice, and after `Run` — all
-programming errors.
+programming errors. Duplicates are detected by pointer identity; non-pointer values and pointers to
+zero-size types are never treated as duplicates.
 
 Ordering patterns: telemetry first (flushed last), configuration and clients next, then
 producers, then consumers and servers (stopped first).

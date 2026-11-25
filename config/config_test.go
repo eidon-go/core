@@ -198,6 +198,7 @@ func TestNew_SourceErrors(t *testing.T) {
 		"list.json":   {Data: []byte(`[1, 2]`)},
 		"dir/x.json":  {Data: []byte(`{"a": 1}`)},
 		"big.json":    {Data: make([]byte, config.MaxFileSize+1)},
+		"dup.json":    {Data: []byte(`{"http": {"port": 1}, "http.port": 2}`)},
 	}
 
 	tests := []struct {
@@ -211,6 +212,12 @@ func TestNew_SourceErrors(t *testing.T) {
 		{"too large", []config.Option{config.WithFiles("big.json")}, config.ErrFileTooLarge},
 		{"missing", []config.Option{config.WithFiles("nope.json")}, fs.ErrNotExist},
 		{"kv keys without kv", []config.Option{config.WithKeys("/a.json")}, config.ErrKVRequired},
+		{"colliding keys in a file", []config.Option{config.WithFiles("dup.json")}, config.ErrKeyCollision},
+		{
+			"colliding keys in defaults",
+			[]config.Option{config.WithDefaults(map[string]any{"a": map[string]any{"b": 1}, "a.b": 2})},
+			config.ErrKeyCollision,
+		},
 	}
 
 	for _, tt := range tests {
@@ -230,6 +237,31 @@ func TestNew_SourceErrors(t *testing.T) {
 
 	_, err = config.New(t.Context(), config.WithFS(fsys), config.WithFiles("list.json"))
 	require.ErrorContains(t, err, "parse list.json", "a top-level array is not a config document")
+
+	_, err = config.New(t.Context(), config.WithFS(fsys), config.WithFiles("dup.json"))
+	require.ErrorContains(t, err, `parse dup.json: config: entries collide after flattening: "http.port"`)
+}
+
+func TestFromMap_PanicsOnCollision(t *testing.T) {
+	t.Parallel()
+
+	assert.PanicsWithError(t, `config: entries collide after flattening: "a.b"`, func() {
+		config.FromMap(map[string]any{"a": map[string]any{"b": 1}, "a.b": 2})
+	})
+}
+
+func TestNew_SameKeyInDifferentSourcesIsLayering(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{
+		"a.json": {Data: []byte(`{"http": {"port": 1}}`)},
+		"b.json": {Data: []byte(`{"http.port": 2}`)},
+	}
+
+	cfg, err := config.New(t.Context(), config.WithFS(fsys), config.WithFiles("a.json", "b.json"),
+		config.WithDefaults(map[string]any{"http.port": 0}), config.WithEnvLookup(nil))
+	require.NoError(t, err)
+	assert.Equal(t, 2, config.Get[int](cfg, "http.port"), "a later file overrides an earlier one")
 }
 
 func TestNew_OSFiles(t *testing.T) {

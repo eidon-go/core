@@ -67,6 +67,9 @@ type Policy struct {
 
 	// RetryIf reports whether an error is retryable. nil retries every error.
 	// Errors wrapped with Permanent are never retried, whatever RetryIf says.
+	// A Policy shared by concurrent Do calls has its RetryIf and OnRetry
+	// called concurrently; callbacks that touch shared state must
+	// synchronize it.
 	RetryIf func(err error) bool
 
 	// OnRetry, if set, is called before waiting for the next attempt, e.g. to

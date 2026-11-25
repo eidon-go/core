@@ -727,6 +727,56 @@ func TestHealthcheckTimeout(t *testing.T) {
 	require.ErrorIs(t, report[0].Err, context.DeadlineExceeded)
 }
 
+// gatedChecker is healthy; once armed, the next check blocks until release
+// is closed. Other checks pass through.
+type gatedChecker struct {
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedChecker) Healthcheck(context.Context) error {
+	if g.armed.CompareAndSwap(true, false) {
+		close(g.entered)
+		<-g.release
+	}
+
+	return nil
+}
+
+func (g *gatedChecker) Shutdown(context.Context) error { return nil }
+
+func TestHealthcheck_NotReadyWhenShutdownStartsDuringChecks(t *testing.T) {
+	t.Parallel()
+
+	gate := &gatedChecker{entered: make(chan struct{}), release: make(chan struct{})}
+	srv := newServer("http", &recorder{})
+
+	a := newApp()
+	a.Add(gate, srv)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	<-srv.running
+	eventually(t, func() bool { return a.Healthcheck(t.Context()) == nil })
+
+	gate.armed.Store(true)
+
+	result := make(chan error, 1)
+
+	go func() { result <- a.Healthcheck(t.Context()) }()
+
+	<-gate.entered // the check began while the app was running
+
+	cancel()
+	eventually(t, func() bool { return errors.Is(a.Healthcheck(t.Context()), app.ErrNotReady) })
+
+	close(gate.release) // the component reports healthy after shutdown began
+	require.ErrorIs(t, <-result, app.ErrNotReady)
+	require.NoError(t, wait(t, done))
+}
+
 func TestHealthcheckConcurrentWithAdd(t *testing.T) {
 	t.Parallel()
 

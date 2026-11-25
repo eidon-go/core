@@ -26,6 +26,11 @@ var (
 	// ErrUnknownFormat means no Parser is registered for the extension of a
 	// file or KV key (see WithParser).
 	ErrUnknownFormat = errors.New("config: no parser for format")
+	// ErrKeyCollision means two entries of one document (or of one
+	// WithDefaults map) resolve to the same dotted key, e.g. a nested
+	// "a": {"b": 1} next to a literal "a.b": 2. Layering different sources
+	// over each other is not a duplicate.
+	ErrKeyCollision = errors.New("config: entries collide after flattening")
 )
 
 var errTrailingData = errors.New("unexpected data after the document")
@@ -34,6 +39,11 @@ var errTrailingData = errors.New("unexpected data after the document")
 // map[string]any; values are scalars, slices or nested maps. An empty
 // document yields an empty map. Register parsers with WithParser; JSON is
 // built in (ParseJSON), YAML lives in github.com/eidon-go/core/contrib/config/yaml.
+// A Parser is called concurrently (one watched KV key per goroutine), so it
+// must be safe for concurrent use. Distinct entries of the returned map must
+// not flatten to the same dotted key, e.g. {"a": {"b": 1}, "a.b": 2}
+// (ErrKeyCollision); a key repeated in the source text is the parser's
+// business (ParseJSON keeps the last one, like encoding/json).
 type Parser func(data []byte) (map[string]any, error)
 
 // ParseJSON is the built-in Parser for ".json". Numbers are decoded as
@@ -86,7 +96,7 @@ func (p parsers) parse(data []byte, name string) (map[string]any, error) {
 		return nil, err
 	}
 
-	return flatten(doc), nil
+	return flatten(doc)
 }
 
 // loadFiles reads every file and merges them in order. Missing optional

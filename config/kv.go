@@ -33,6 +33,9 @@ type KVEvent struct {
 // no implementation; github.com/eidon-go/core/contrib/config/etcd provides
 // one for etcd v3. The interface is small so a backend or a test fake is easy
 // to write.
+//
+// Config calls Get and Watch concurrently (each watched key has its own
+// goroutine), so a KV must be safe for concurrent use.
 type KV interface {
 	// Get returns the current value of key, or an error wrapping
 	// ErrKVKeyNotFound if the key does not exist.

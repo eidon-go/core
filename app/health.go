@@ -34,6 +34,12 @@ func (a *App) Healthcheck(ctx context.Context) error {
 		}
 	}
 
+	// Shutdown may have been requested while the checks ran: a check that
+	// started before it must not report the app as ready after it.
+	if s := state(a.state.Load()); s != stateRunning {
+		return fmt.Errorf("%w: %s", ErrNotReady, s)
+	}
+
 	return errors.Join(errs...)
 }
 

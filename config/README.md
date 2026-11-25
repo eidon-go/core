@@ -36,8 +36,11 @@ environment  >  watched KV keys  >  KV keys  >  files  >  defaults
 | `WithKV(kv)` + `WithWatchedKeys(keys...)` | documents read and then watched for changes |
 | environment | always on, see below |
 
-Nested objects are flattened to dotted keys: `{"http": {"port": 8080}}` is `http.port`. A key may
-be listed only once across `WithKeys` and `WithWatchedKeys` (`ErrDuplicateKey`).
+Nested objects are flattened to dotted keys: `{"http": {"port": 8080}}` is `http.port`. Two
+entries of one document (or one `WithDefaults` map) that flatten to the same key — `{"http":
+{"port": 1}, "http.port": 2}` — are an error (`ErrKeyCollision`): `New` fails, a watched update is
+rejected and the previous values stay. The same key in different sources is ordinary layering. A
+KV key may be listed only once across `WithKeys` and `WithWatchedKeys` (`ErrDuplicateKey`).
 
 ### Formats
 
@@ -72,7 +75,7 @@ value in a document, count as **not set**, so a lower-priority source is used.
 ```go
 config.Get[T](cfg, key) T                    // zero value when unset or mistyped
 config.GetOrDefault(cfg, key, def) T         // def when unset or mistyped
-config.Live[T](cfg, key) func() T            // re-reads on every call
+config.Live[T](cfg, key) func() T            // re-reads on every call; reconfigures nothing by itself
 config.LiveOrDefault(cfg, key, def) func() T
 ```
 

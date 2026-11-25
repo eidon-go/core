@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -618,5 +619,31 @@ func TestBackoff(t *testing.T) {
 		d := b.delay(failures)
 		assert.LessOrEqual(t, d, want, "failures=%d", failures)
 		assert.GreaterOrEqual(t, d, time.Duration(float64(want)*(1-watchJitter)), "failures=%d", failures)
+	}
+}
+
+func TestBackoff_Bounds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		b        backoff
+		failures int
+		want     time.Duration
+	}{
+		{"max near the Duration limit", backoff{initial: time.Second, max: math.MaxInt64}, 200, math.MaxInt64},
+		{"initial above max", backoff{initial: time.Minute, max: time.Second}, 3, time.Second},
+		{"initial equal to max", backoff{initial: time.Second, max: time.Second}, 1000, time.Second},
+		{"max not a power-of-two multiple", backoff{initial: time.Second, max: 5 * time.Second}, 10, 5 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := tt.b.delay(tt.failures)
+			assert.LessOrEqual(t, d, tt.want)
+			assert.GreaterOrEqual(t, d, time.Duration(float64(tt.want)*(1-watchJitter)))
+		})
 	}
 }

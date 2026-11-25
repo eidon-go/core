@@ -36,6 +36,12 @@ type backoff struct {
 func (b backoff) delay(failures int) time.Duration {
 	d := b.initial
 	for i := 1; i < failures && d < b.max; i++ {
+		if d > b.max/2 { // doubling would pass max (or overflow for a huge max)
+			d = b.max
+
+			break
+		}
+
 		d *= 2
 	}
 

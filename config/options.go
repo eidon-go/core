@@ -42,6 +42,9 @@ type options struct {
 	envPrefix    string
 	envBootstrap bool
 	logger       *slog.Logger
+	// err is an error found while applying options (e.g. a key collision in
+	// WithDefaults); New returns it.
+	err error
 }
 
 func newOptions(opts []Option) *options {
@@ -63,9 +66,19 @@ func newOptions(opts []Option) *options {
 
 // WithDefaults adds lowest-priority values. Nested maps are flattened to
 // dotted keys; dotted keys can also be used directly. Repeated calls merge,
-// later values winning.
+// later values winning. Two entries of one map that resolve to the same
+// dotted key make New fail with ErrKeyCollision.
 func WithDefaults(values map[string]any) Option {
-	return func(o *options) { o.defaults = merge(o.defaults, flatten(values)) }
+	return func(o *options) {
+		flat, err := flatten(values)
+		if err != nil {
+			o.err = errors.Join(o.err, fmt.Errorf("defaults: %w", err))
+
+			return
+		}
+
+		o.defaults = merge(o.defaults, flat)
+	}
 }
 
 // WithFiles adds configuration files, merged in order (later files win). The
@@ -160,7 +173,8 @@ func WithWatchBackoff(initial, maxDelay time.Duration) Option {
 
 // WithEnvLookup replaces os.LookupEnv for the environment layer and
 // WithEnvBootstrap, e.g. with a map in tests. nil disables the environment
-// layer.
+// layer. lookup is called on every read, so it must be safe for concurrent
+// use.
 func WithEnvLookup(lookup func(name string) (string, bool)) Option {
 	return func(o *options) { o.envLookup = lookup }
 }
