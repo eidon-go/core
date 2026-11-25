@@ -28,9 +28,15 @@ const DefaultTimeout = 10 * time.Second
 // settle is how long a check lets Run get going before stopping it.
 const settle = 50 * time.Millisecond
 
+// forceCloseBound bounds how long Run may take to return once a Shutdown
+// whose ctx was done has returned. app.App waits 100ms before it reports the
+// runner as still running; the margin covers slow CI machines.
+const forceCloseBound = time.Second
+
 var (
 	errReturnedEarly = errors.New("Run returned early; it must block until Shutdown or ctx cancellation")
 	errTimeout       = errors.New("did not return in time")
+	errPanicked      = errors.New("panicked")
 )
 
 // Option configures the checks.
@@ -67,8 +73,11 @@ func newOptions(opts []Option) options {
 //   - Shutdown without Start succeeds.
 //   - Shutdown with an already cancelled ctx returns promptly (any error).
 //   - Start followed by Shutdown succeeds.
+//   - A second Shutdown succeeds (Shutdown is idempotent).
 //   - Healthcheck returns promptly (any result) before Start and after
 //     Shutdown.
+//
+// A panic in any method fails the check.
 func Resource(t *testing.T, newResource func(t *testing.T) lifecycle.Resource, opts ...Option) {
 	t.Helper()
 
@@ -86,6 +95,10 @@ func Resource(t *testing.T, newResource func(t *testing.T) lifecycle.Resource, o
 		fail(t, checkStartThenShutdown(t.Context(), newResource(t), o.timeout))
 	})
 
+	t.Run("ShutdownTwice", func(t *testing.T) {
+		fail(t, checkShutdownTwice(t.Context(), newResource(t), o.timeout))
+	})
+
 	t.Run("HealthcheckAroundLifecycle", func(t *testing.T) {
 		fail(t, checkHealthcheck(t.Context(), newResource(t), o.timeout))
 	})
@@ -97,6 +110,11 @@ func Resource(t *testing.T, newResource func(t *testing.T) lifecycle.Resource, o
 //   - Run keeps running until its ctx is cancelled, then returns nil (or
 //     context.Canceled).
 //   - Run called after Shutdown returns nil promptly.
+//   - The app.App stop order: Run's ctx is cancelled, then Shutdown is
+//     called with an already expired ctx; Shutdown returns promptly (any
+//     error) and Run returns nil.
+//   - Cancelling Run's ctx and calling Shutdown at the same time: both
+//     return, Run with nil, Shutdown with nil.
 //
 // For a Starter, Start is called before Run in every check.
 func Runner(t *testing.T, newRunner func(t *testing.T) lifecycle.Runner, opts ...Option) {
@@ -120,6 +138,14 @@ func Runner(t *testing.T, newRunner func(t *testing.T) lifecycle.Runner, opts ..
 
 	t.Run("RunAfterShutdown", func(t *testing.T) {
 		fail(t, checkRunAfterShutdown(t.Context(), newRunner(t), o.timeout))
+	})
+
+	t.Run("CancelThenExpiredShutdown", func(t *testing.T) {
+		fail(t, checkCancelThenExpiredShutdown(t.Context(), newRunner(t), o.timeout))
+	})
+
+	t.Run("ConcurrentCancelAndShutdown", func(t *testing.T) {
+		fail(t, checkConcurrentCancelAndShutdown(t.Context(), newRunner(t), o.timeout))
 	})
 }
 
@@ -153,6 +179,18 @@ func checkStartThenShutdown(ctx context.Context, r lifecycle.Resource, timeout t
 	}
 
 	return within("Shutdown after Start", timeout, func() error { return r.Shutdown(ctx) })
+}
+
+func checkShutdownTwice(ctx context.Context, r lifecycle.Resource, timeout time.Duration) error {
+	if err := start(ctx, r, timeout); err != nil {
+		return err
+	}
+
+	if err := within("Shutdown", timeout, func() error { return r.Shutdown(ctx) }); err != nil {
+		return err
+	}
+
+	return within("second Shutdown", timeout, func() error { return r.Shutdown(ctx) })
 }
 
 func checkHealthcheck(ctx context.Context, r lifecycle.Resource, timeout time.Duration) error {
@@ -228,6 +266,61 @@ func checkRunAfterShutdown(ctx context.Context, r lifecycle.Runner, timeout time
 	return returned("Run after Shutdown", runAsync(ctx, r), timeout)
 }
 
+// checkCancelThenExpiredShutdown follows app.App at its shutdown deadline:
+// Run's ctx is cancelled, then Shutdown gets a ctx that is already done and
+// must force-close.
+func checkCancelThenExpiredShutdown(ctx context.Context, r lifecycle.Runner, timeout time.Duration) error {
+	if err := start(ctx, r, timeout); err != nil {
+		return err
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	done := runAsync(runCtx, r)
+	if err := stillRunning("before cancel", done); err != nil {
+		return err
+	}
+
+	cancelRun()
+
+	expired, expire := context.WithCancel(ctx)
+	expire()
+
+	// Any error is acceptable from a Shutdown whose ctx is done; hanging or
+	// panicking is not.
+	if err := within("Shutdown with an expired ctx after cancel", timeout, func() error {
+		_ = r.Shutdown(expired)
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return returned("Run after cancel and an expired Shutdown", done, min(timeout, forceCloseBound))
+}
+
+func checkConcurrentCancelAndShutdown(ctx context.Context, r lifecycle.Runner, timeout time.Duration) error {
+	if err := start(ctx, r, timeout); err != nil {
+		return err
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	done := runAsync(runCtx, r)
+	if err := stillRunning("before cancel and Shutdown", done); err != nil {
+		return err
+	}
+
+	go cancelRun()
+
+	return errors.Join(
+		within("Shutdown concurrent with cancel", timeout, func() error { return r.Shutdown(ctx) }),
+		returned("Run after concurrent cancel and Shutdown", done, timeout),
+	)
+}
+
 func start(ctx context.Context, r lifecycle.Resource, timeout time.Duration) error {
 	s, ok := r.(lifecycle.Starter)
 	if !ok {
@@ -240,7 +333,7 @@ func start(ctx context.Context, r lifecycle.Resource, timeout time.Duration) err
 func runAsync(ctx context.Context, r lifecycle.Runner) <-chan error {
 	done := make(chan error, 1)
 
-	go func() { done <- r.Run(ctx) }()
+	go func() { done <- protect(func() error { return r.Run(ctx) }) }()
 
 	return done
 }
@@ -274,7 +367,7 @@ func returned(what string, done <-chan error, timeout time.Duration) error {
 func within(what string, timeout time.Duration, fn func() error) error {
 	done := make(chan error, 1)
 
-	go func() { done <- fn() }()
+	go func() { done <- protect(fn) }()
 
 	select {
 	case err := <-done:
@@ -286,4 +379,16 @@ func within(what string, timeout time.Duration, fn func() error) error {
 	case <-time.After(timeout):
 		return fmt.Errorf("%s: %w (%v)", what, errTimeout, timeout)
 	}
+}
+
+// protect turns a panic in fn into an error, so that a component that panics
+// (closing a channel twice, say) fails the check instead of the test binary.
+func protect(call func() error) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("%w: %v", errPanicked, p)
+		}
+	}()
+
+	return call()
 }

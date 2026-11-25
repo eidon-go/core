@@ -22,17 +22,43 @@
 //     Run. If Start returns an error, the component must release whatever it
 //     acquired itself: its Shutdown is not called.
 //  2. Run: Runner.Run is called at most once, concurrently for all runners.
-//     It blocks until ctx is cancelled or Shutdown is called.
-//  3. Shutdown: Shutdown is called at most once per component, in reverse
-//     registration order, runners first. For a Runner, Shutdown may be called
-//     while Run is still running and must make Run return; Shutdown must also
-//     be safe when Run was never called (startup failed) or has already
-//     returned. Run may even be called after Shutdown has started (another
-//     runner failed at once); it must then return nil promptly.
+//     It blocks until the runner is stopped (see below).
+//  3. Shutdown: the ctx passed to Run is cancelled first; then Shutdown is
+//     called at most once per component — on every runner concurrently, then,
+//     once their Run has returned, on the other components in reverse
+//     registration order.
+//
+// For a Runner, the cancellation of Run's ctx and the Shutdown call that
+// follows are one stop request:
+//
+//   - On cancellation Run stops taking new work at once. It may finish the
+//     work in flight (a server drains its requests), but it does not bound
+//     that drain itself: Shutdown does. When the ctx passed to Shutdown is
+//     done, the runner force-closes and Run returns promptly.
+//   - Shutdown may therefore run while Run is draining. The two share one
+//     stop: side effects such as closing a listener or running shutdown
+//     hooks happen once.
+//   - Shutdown may also be called while Run is still running and must make
+//     Run return; it must be safe when Run was never called (startup failed)
+//     or has already returned. Run may even be called after Shutdown has
+//     started (another runner failed at once); it must then return nil
+//     promptly.
+//
+// Runners are stopped together, so only sources of work (servers, consumers,
+// schedulers) should be runners. Whatever they use while draining — a
+// producer with a flush loop, a client with a refresh loop — is a plain
+// Resource, shut down after every Run has returned.
+//
+// Code that drives components without app.App follows the same order:
+// cancelling Run's ctx alone need not release resources or bound a drain, so
+// always call Shutdown, with a deadline.
 //
 // When the ctx passed to Shutdown is done, app.App waits only a short grace
-// period (100ms) for it to force-close, then reports the component as timed
-// out; a Shutdown that ignores ctx is abandoned, together with its goroutine.
+// period (100ms) for it to force-close, and another one for Run to return,
+// then reports the component as timed out; a Shutdown that ignores ctx is
+// abandoned, together with its goroutine. Once its ctx is done, Shutdown must
+// not block on I/O with peers (a graceful TLS close, a flush to a slow
+// consumer).
 //
 // Healthcheck and Name may be called at any time, concurrently with each
 // other and with Start, Run and Shutdown.
@@ -43,10 +69,14 @@ import "context"
 // Resource is a stateful holder of connections, pools or background
 // goroutines. It participates in graceful shutdown via Shutdown.
 type Resource interface {
-	// Shutdown releases the resources held by the component. app.App calls it
-	// at most once. ctx bounds the time allowed for a graceful release: when
-	// ctx is done, the implementation must force-close (drop connections,
-	// abandon in-flight work) and return promptly, typically with ctx.Err().
+	// Shutdown releases the resources held by the component. ctx bounds the
+	// time allowed for a graceful release: when ctx is done, the
+	// implementation must force-close (drop connections, abandon in-flight
+	// work) and return promptly, typically with ctx.Err().
+	//
+	// app.App calls it at most once, but Shutdown must be idempotent: a
+	// repeated call (from Group, tests or cleanup code) returns nil once the
+	// first one has released everything.
 	Shutdown(ctx context.Context) error
 }
 
@@ -67,18 +97,21 @@ type Starter interface {
 // Runner is a Resource that performs long-running work in Run: HTTP or gRPC
 // servers, message consumers, schedulers.
 //
-// Run and Shutdown are called from different goroutines. Run returns when
-// either its ctx is cancelled or Shutdown is called — whichever comes first.
-// A server would typically map Run to Serve/ListenAndServe and Shutdown to its
-// graceful stop, which is what makes Serve return.
+// Run and Shutdown are called from different goroutines. Cancelling Run's ctx
+// or calling Shutdown — whichever comes first — stops the runner; see the
+// package documentation for how the two combine. A server would typically
+// map Run to Serve, start its graceful stop when ctx is cancelled, and let
+// Shutdown bound that stop and force-close at its deadline.
 type Runner interface {
 	Resource
 
-	// Run blocks until ctx is cancelled or Shutdown is called, then returns
-	// nil (context.Canceled is also accepted as a clean stop). Returning
-	// before that — with an error or with nil — makes app.App shut the whole
-	// application down; an error is reported as the cause. If Shutdown has
-	// already been called, Run must return nil promptly.
+	// Run blocks until the runner is stopped — its ctx cancelled or Shutdown
+	// called — and its work in flight has finished or been cut off by
+	// Shutdown, then returns nil (context.Canceled is also accepted as a
+	// clean stop). Returning before it is stopped — with an error or with
+	// nil — makes app.App shut the whole application down; an error is
+	// reported as the cause. If Shutdown has already been called, Run must
+	// return nil promptly.
 	Run(ctx context.Context) error
 }
 

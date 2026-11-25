@@ -55,13 +55,22 @@ Implement the [`lifecycle`](../lifecycle/README.md) contract and prove it with
   `WithName(string)` distinguishes instances (two databases).
 - `Start(ctx)`: connect/listen/ping, typically through `retry.Policy` (see 5). On failure, release
   everything acquired and return the error.
-- `Run(ctx)`: return `nil` when `ctx` is cancelled or `Shutdown` is called (map `ErrServerClosed`,
-  `ErrClosed` and similar to `nil`); return promptly with `nil` if `Shutdown` was called before.
-- `Shutdown(ctx)`: graceful when possible, force-close when `ctx` is done; safe without `Start` or
-  `Run`; idempotent.
+- `Run(ctx)` and `Shutdown(ctx)` are **one stop**: `app.App` cancels the ctx of `Run` first, then
+  calls `Shutdown`. On cancellation `Run` stops taking new work at once and may drain the work in
+  flight, without a deadline of its own; `Shutdown` starts the same stop if `Run` has not, bounds
+  the drain and force-closes when its `ctx` is done, after which `Run` returns promptly. Side
+  effects (closing listeners, shutdown hooks) happen once — typically a `sync.Once` around the
+  stop that both methods wait on. `Run` returns `nil` (map `ErrServerClosed`, `ErrClosed` and
+  similar to `nil`), and promptly if `Shutdown` was called before it.
+- `Shutdown(ctx)`: graceful when possible, force-close when `ctx` is done, without blocking on
+  I/O with peers afterwards; safe without `Start` or `Run`; idempotent (a repeated call returns
+  `nil`).
 - `Healthcheck(ctx)`: readiness only, cheap (cached state or a bounded ping), honors `ctx`.
-- A component that is both a client and a background worker is one `Runner`; several parts of one
-  integration may be combined with `lifecycle.GroupNamed` (resources only).
+- Only sources of work (servers, consumers, schedulers) are `Runner`s: `app.App` stops runners
+  together. Anything they use while draining — a producer with a flush loop, a client with a
+  refresh loop — is a `Resource` (a `Starter` for its goroutines), so it is shut down after every
+  `Run` has returned. Several parts of one integration may be combined with
+  `lifecycle.GroupNamed` (resources only).
 
 ## 5. Retry
 

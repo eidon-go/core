@@ -27,7 +27,7 @@ dependencies of what it actually imports.
 
 | Module | Import path | Contents |
 |---|---|---|
-| core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — component contracts (`Resource`, `Starter`, `Runner`, `Healthchecker`, `Namer`), `Group`, contract tests in `lifecycletest`; [`app`](./app/README.md) — runs components: ordered start, signals, readiness, bounded reverse-order shutdown, lifecycle events; [`config`](./config/README.md) — layered configuration (defaults, files, KV, env) with hot reload and pluggable formats (JSON built in); [`retry`](./retry/README.md) — retry policies with backoff |
+| core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — component contracts (`Resource`, `Starter`, `Runner`, `Healthchecker`, `Namer`), `Group`, contract tests in `lifecycletest`; [`app`](./app/README.md) — runs components: ordered start, signals, readiness, bounded shutdown (runners together, then the rest in reverse order), lifecycle events; [`config`](./config/README.md) — layered configuration (defaults, files, KV, env) with hot reload and pluggable formats (JSON built in); [`retry`](./retry/README.md) — retry policies with backoff |
 | config/yaml | `github.com/eidon-go/core/config/yaml` | [YAML parser](./config/yaml/README.md) for `config` |
 
 ```sh
@@ -37,8 +37,9 @@ go get github.com/eidon-go/core/config/yaml   # only if you read YAML
 
 ## Status and roadmap
 
-The core API is a **v1 candidate**: it has been reviewed, but no version is tagged yet. The first
-releases are `v1.0.0` for the core and `config/yaml/v1.0.0`; until then, expect pseudo-versions.
+The core API is a **v1 candidate**, released as `v1.0.0-rc.N` while the first integration modules
+are written against it. `v1.0.0` for the core and `config/yaml/v1.0.0` follow once the main
+integration modules have validated the API; integration modules are tagged after that.
 
 Integration modules are added one at a time, each as its own module with its own version, written
 to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `lifecycletest`:
@@ -96,7 +97,8 @@ func main() {
 ```
 
 `app.App` starts the components in order, runs the runners until SIGINT/SIGTERM (or a runner
-fails), fails readiness, then shuts everything down in reverse order under one timeout. See the
+fails), fails readiness, then under one timeout stops the runners together and shuts the other
+components down in reverse order. See the
 package READMEs for the contracts.
 
 ## Versioning

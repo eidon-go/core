@@ -7,10 +7,11 @@
 //     to Run is cancelled, a shutdown signal arrives (SIGINT, SIGTERM by
 //     default), or any runner returns.
 //  3. Shutdown: readiness fails at once (see Healthcheck), the optional
-//     shutdown delay lets load balancers notice, then under one timeout
-//     runners are shut down in reverse registration order (which makes their
-//     Run return), App waits for their Run to return, and the remaining
-//     components are shut down in reverse registration order.
+//     shutdown delay lets load balancers notice, then under one timeout the
+//     context of every Run is cancelled, every runner is shut down
+//     concurrently (which makes its Run return), App waits for their Run to
+//     return, and the remaining components are shut down in reverse
+//     registration order.
 //
 // A typical main:
 //

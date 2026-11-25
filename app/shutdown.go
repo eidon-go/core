@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/eidon-go/core/lifecycle"
@@ -28,9 +29,9 @@ type runWait struct {
 	first int
 }
 
-// shutdown shuts components down under one timeout: runners in reverse
-// order, then (if wait is set) waits for their Run to return, then every
-// other component in reverse order.
+// shutdown shuts components down under one timeout: every runner
+// concurrently, then (if wait is set) waits for their Run to return, then
+// every other component in reverse order.
 func (a *App) shutdown(ctx context.Context, components []lifecycle.Resource, wait *runWait) error {
 	a.state.Store(int32(stateStopping))
 
@@ -42,13 +43,7 @@ func (a *App) shutdown(ctx context.Context, components []lifecycle.Resource, wai
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 
-	var errs []error
-
-	for _, c := range slices.Backward(components) {
-		if _, ok := c.(lifecycle.Runner); ok {
-			errs = append(errs, a.shutdownOne(shutdownCtx, c, "runner"))
-		}
-	}
+	errs := a.shutdownRunners(shutdownCtx, components)
 
 	if wait != nil {
 		errs = append(errs, wait.collect(shutdownCtx)...)
@@ -68,6 +63,32 @@ func (a *App) shutdown(ctx context.Context, components []lifecycle.Resource, wai
 	}
 
 	return err
+}
+
+// shutdownRunners shuts every runner down concurrently, so that one runner's
+// drain does not eat into the budget of the others: runners do not depend on
+// each other, only on the resources shut down after them. The errors are in
+// reverse registration order.
+func (a *App) shutdownRunners(ctx context.Context, components []lifecycle.Resource) []error {
+	var runners []lifecycle.Resource
+
+	for _, c := range slices.Backward(components) {
+		if _, ok := c.(lifecycle.Runner); ok {
+			runners = append(runners, c)
+		}
+	}
+
+	errs := make([]error, len(runners))
+
+	var wg sync.WaitGroup
+
+	for idx, r := range runners {
+		wg.Go(func() { errs[idx] = a.shutdownOne(ctx, r, "runner") })
+	}
+
+	wg.Wait()
+
+	return errs
 }
 
 // shutdownOne calls c.Shutdown and stops waiting forceCloseGrace after ctx
@@ -123,11 +144,21 @@ func timeoutErr(ctx context.Context, err error) error {
 
 // collect waits until every Run has returned or ctx expires, and returns the
 // errors runners returned after shutdown was requested, plus
-// ErrShutdownTimeout naming the runners that are still running.
+// ErrShutdownTimeout naming the runners that are still running. After ctx
+// expires, runners get forceCloseGrace to return — the same grace their
+// Shutdown gets to force-close, which is what makes Run return.
 func (w *runWait) collect(ctx context.Context) []error {
 	select {
 	case <-w.done:
 	case <-ctx.Done():
+		grace := time.NewTimer(forceCloseGrace)
+
+		select {
+		case <-w.done:
+		case <-grace.C:
+		}
+
+		grace.Stop()
 	}
 
 	// Indexes, not the runners themselves: a Runner may be a non-comparable

@@ -48,8 +48,9 @@ type Event struct {
 // options add observers.
 //
 // Observers are called synchronously and possibly concurrently (Run events
-// come from each runner's goroutine), so they must be fast and safe for
-// concurrent use. A Shutdown event is reported when App stops waiting for the
+// come from each runner's goroutine, and runners are shut down concurrently),
+// so they must be fast and safe for concurrent use. A Shutdown event is
+// reported when App stops waiting for the
 // call — for an abandoned Shutdown that is before the call returns — and the
 // Run event of an abandoned runner may arrive after App.Run has returned.
 func WithObserver(fn func(ctx context.Context, e Event)) Option {
