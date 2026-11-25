@@ -3,7 +3,7 @@ module github.com/eidon-go/core/contrib/grpc
 go 1.26.0
 
 require (
-	github.com/eidon-go/core v1.0.0-rc.3
+	github.com/eidon-go/core v1.0.0-rc.5
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.72.0
 	go.opentelemetry.io/otel v1.47.0
