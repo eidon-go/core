@@ -43,7 +43,7 @@ jobs:
         id: check
         run: echo "tag=$(scripts/release-check.sh "$MODULE" "$VERSION")" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ inputs.module }}/go.mod
           cache-dependency-path: ${{ inputs.module }}/go.sum
