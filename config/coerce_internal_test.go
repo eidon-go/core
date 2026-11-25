@@ -118,6 +118,8 @@ func TestCoerceUint(t *testing.T) {
 	check(t, "-1", uint64(0), false)
 	check(t, 1.5, uint(0), false)
 	check(t, uint64(math.MaxUint64), uint64(math.MaxUint64), true)
+	// The largest uint of the platform still fits.
+	check(t, uint64(math.MaxUint), uint(math.MaxUint), true)
 }
 
 func TestCoerceIntSlice(t *testing.T) {
