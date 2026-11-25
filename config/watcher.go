@@ -5,21 +5,44 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"math/rand/v2"
 	"sync"
 	"time"
-
-	"github.com/eidon-go/core/retry"
 )
+
+// watchJitter is the largest fraction a reconnect delay is randomly reduced
+// by, so many instances do not reconnect in lockstep.
+const watchJitter = 0.3
 
 type watcherConfig struct {
 	kv      KV
+	parsers parsers
 	keys    []string
 	base    map[string]any
 	initial map[string]map[string]any
 	timeout time.Duration
-	backoff retry.Policy
+	backoff backoff
 	logger  *slog.Logger
 	publish func(map[string]any)
+}
+
+// backoff computes reconnect delays: initial, doubling up to max, with jitter.
+type backoff struct {
+	initial time.Duration
+	max     time.Duration
+}
+
+// delay returns the delay after the given number of consecutive failures
+// (starting at 1).
+func (b backoff) delay(failures int) time.Duration {
+	d := b.initial
+	for i := 1; i < failures && d < b.max; i++ {
+		d *= 2
+	}
+
+	d = min(d, b.max)
+
+	return d - time.Duration(float64(d)*watchJitter*rand.Float64()) //nolint:gosec // jitter needs no crypto source
 }
 
 // watcher keeps the last parsed document of every watched key and publishes
@@ -74,7 +97,7 @@ func (w *watcher) watchKey(ctx context.Context, key string) {
 		}
 
 		failures++
-		delay := w.backoff.Delay(failures)
+		delay := w.backoff.delay(failures)
 		w.logger.WarnContext(ctx, "config: watch ended, reconnecting",
 			slog.String("key", key), slog.Duration("delay", delay))
 
@@ -86,47 +109,78 @@ func (w *watcher) watchKey(ctx context.Context, key string) {
 			return
 		case <-timer.C:
 		}
-
-		// Catch up on changes missed while disconnected.
-		w.resync(ctx, key)
 	}
 }
 
-// stream consumes events of key until the channel closes. It reports whether
+// stream opens a watch on key, re-reads the key to catch up on changes made
+// before the watch was established (since New, or while disconnected), then
+// applies events until the channel closes or ctx is done. It reports whether
 // at least one event was applied.
 func (w *watcher) stream(ctx context.Context, key string) bool {
+	ch := w.kv.Watch(ctx, key)
+	if ch == nil {
+		w.logger.WarnContext(ctx, "config: KV returned no watch channel", slog.String("key", key))
+
+		return false
+	}
+
+	w.resync(ctx, key)
+
 	applied := false
 
-	for ev := range w.kv.Watch(ctx, key) {
+	for {
+		var (
+			ev KVEvent
+			ok bool
+		)
+
+		select {
+		case <-ctx.Done():
+			return applied
+		case ev, ok = <-ch:
+			if !ok {
+				return applied
+			}
+		}
+
 		if ev.Err != nil {
 			w.logger.WarnContext(ctx, "config: watch error", slog.String("key", key), slog.Any("err", ev.Err))
 
 			return applied
 		}
 
-		switch ev.Type {
-		case KVEventDelete:
-			w.apply(key, map[string]any{})
-		case KVEventPut:
-			parsed, err := parse(ev.Value, key)
-			if err != nil {
-				w.logger.ErrorContext(ctx, "config: invalid watched document, keeping previous values",
-					slog.String("key", key), slog.Any("err", err))
+		if w.handle(ctx, key, ev) {
+			applied = true
+		}
+	}
+}
 
-				continue
-			}
+// handle applies one event and reports whether it changed the state.
+func (w *watcher) handle(ctx context.Context, key string, ev KVEvent) bool {
+	switch ev.Type {
+	case KVEventDelete:
+		w.apply(key, map[string]any{})
 
-			w.apply(key, parsed)
+		return true
+	case KVEventPut:
+		parsed, err := w.parsers.parse(ev.Value, key)
+		if err != nil {
+			w.logger.ErrorContext(ctx, "config: invalid watched document, keeping previous values",
+				slog.String("key", key), slog.Any("err", err))
+
+			return false
 		}
 
-		applied = true
-	}
+		w.apply(key, parsed)
 
-	return applied
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *watcher) resync(ctx context.Context, key string) {
-	parsed, err := loadKey(ctx, w.kv, w.timeout, key)
+	parsed, err := loadKey(ctx, w.kv, w.parsers, w.timeout, key)
 	if errors.Is(err, ErrKVKeyNotFound) {
 		// Deleted while disconnected: same as a delete event.
 		parsed, err = map[string]any{}, nil

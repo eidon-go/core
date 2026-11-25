@@ -14,8 +14,8 @@ func ExamplePolicy_Do() {
 		MaxAttempts:  4,
 		InitialDelay: time.Millisecond,
 		Multiplier:   2,
-		OnRetry: func(attempt int, err error, delay time.Duration) {
-			fmt.Printf("attempt %d failed (%v), next in %v\n", attempt, err, delay)
+		OnRetry: func(_ context.Context, a retry.Attempt) {
+			fmt.Printf("attempt %d failed (%v), next in %v\n", a.Number, a.Err, a.Delay)
 		},
 	}
 

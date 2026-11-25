@@ -12,12 +12,14 @@ import (
 
 func ExampleNew() {
 	files := fstest.MapFS{
-		"config.yaml": {Data: []byte("http:\n  port: 8080\n  timeout: 15s\n")},
+		"config.json": {Data: []byte(`{"http": {"port": 8080, "timeout": "15s"}}`)},
 	}
 
 	cfg, err := config.New(context.Background(),
+		// For YAML add: config.WithParser(yaml.Parse, yaml.Extensions()...)
+		// with github.com/eidon-go/core/config/yaml.
 		config.WithFS(files), // omit to read from the OS file system
-		config.WithFiles("config.yaml"),
+		config.WithFiles("config.json"),
 		config.WithDefaults(map[string]any{"http.host": "0.0.0.0"}),
 		config.WithEnvPrefix("APP"), // APP_HTTP_PORT overrides http.port
 		config.WithEnvLookup(func(name string) (string, bool) {

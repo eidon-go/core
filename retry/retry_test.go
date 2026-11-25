@@ -88,27 +88,125 @@ func TestDo_RetryIf(t *testing.T) {
 func TestDo_OnRetry(t *testing.T) {
 	t.Parallel()
 
-	type event struct {
-		attempt int
-		delay   time.Duration
-	}
-
-	var events []event
+	var events []retry.Attempt
 
 	p := retry.Policy{
 		MaxAttempts:  3,
 		InitialDelay: time.Millisecond,
 		Multiplier:   2,
-		OnRetry: func(attempt int, err error, delay time.Duration) {
-			require.ErrorIs(t, err, errTransient)
+		OnRetry: func(ctx context.Context, a retry.Attempt) {
+			require.NoError(t, ctx.Err())
 
-			events = append(events, event{attempt, delay})
+			events = append(events, a)
 		},
 	}
 
 	calls := 0
 	require.ErrorIs(t, p.Do(t.Context(), failing(10, &calls)), errTransient)
-	assert.Equal(t, []event{{1, time.Millisecond}, {2, 2 * time.Millisecond}}, events)
+	assert.Equal(t, []retry.Attempt{
+		{Number: 1, Err: errTransient, Delay: time.Millisecond},
+		{Number: 2, Err: errTransient, Delay: 2 * time.Millisecond},
+	}, events)
+}
+
+func TestDo_Forever(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	err := retry.Policy{MaxAttempts: retry.Forever}.Do(t.Context(), failing(50, &calls))
+
+	require.NoError(t, err)
+	assert.Equal(t, 51, calls)
+}
+
+func TestDo_ForeverStopsOnContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	calls := 0
+	err := retry.Policy{MaxAttempts: retry.Forever, InitialDelay: time.Millisecond}.Do(ctx, failing(1<<30, &calls))
+
+	require.ErrorIs(t, err, errTransient)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Positive(t, calls)
+}
+
+func TestDo_ContextDoneBeforeFirstAttempt(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	calls := 0
+	err := retry.Policy{MaxAttempts: 5}.Do(ctx, failing(10, &calls))
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, calls)
+}
+
+// With a zero delay the timer and ctx.Done race; the operation must not be
+// called again after ctx is done.
+func TestDo_ZeroDelayStopsOnContext(t *testing.T) {
+	t.Parallel()
+
+	for range 100 {
+		ctx, cancel := context.WithCancel(t.Context())
+		calls := 0
+
+		err := retry.Policy{MaxAttempts: 10}.Do(ctx, func(context.Context) error {
+			calls++
+
+			cancel()
+
+			return errTransient
+		})
+
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, 1, calls)
+	}
+}
+
+func TestDo_PermanentWinsOverRetryIf(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	p := retry.Policy{MaxAttempts: 5, RetryIf: func(error) bool { return true }}
+
+	err := p.Do(t.Context(), func(context.Context) error {
+		calls++
+
+		return retry.Permanent(errTransient)
+	})
+
+	require.ErrorIs(t, err, errTransient)
+	assert.Equal(t, 1, calls)
+}
+
+func TestDoValue_ZeroOnError(t *testing.T) {
+	t.Parallel()
+
+	v, err := retry.DoValue(t.Context(), retry.Policy{MaxAttempts: 2}, func(context.Context) (string, error) {
+		return "partial", errTransient
+	})
+
+	require.ErrorIs(t, err, errTransient)
+	assert.Empty(t, v)
+}
+
+func TestDelay_JitterIsClamped(t *testing.T) {
+	t.Parallel()
+
+	negative := retry.Policy{InitialDelay: 10 * time.Millisecond, Jitter: -1}
+	assert.Equal(t, 10*time.Millisecond, negative.Delay(1))
+
+	tooLarge := retry.Policy{InitialDelay: 10 * time.Millisecond, Jitter: 5}
+	for range 100 {
+		d := tooLarge.Delay(1)
+		assert.GreaterOrEqual(t, d, time.Duration(0))
+		assert.LessOrEqual(t, d, 10*time.Millisecond)
+	}
 }
 
 func TestDo_ContextCancelledWhileWaiting(t *testing.T) {

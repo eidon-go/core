@@ -76,18 +76,39 @@ func Required[T ValueType](r *Reader, key string) T {
 		err = fmt.Errorf("%w: want %T, got %T", ErrKeyMistyped, v, raw)
 	}
 
-	r.mu.Lock()
-	r.errs = append(r.errs, &KeyError{Key: key, Err: err})
-	r.mu.Unlock()
+	r.record(&KeyError{Key: key, Err: err})
 
 	return v
 }
 
-// Err returns every error recorded by Required, joined with errors.Join, or
-// nil. Errors appear in the order they were recorded.
+// Optional returns the value of key as T, or def when the key is not set. Unlike
+// GetOrDefault, a value of the wrong type is not silently replaced by def: it
+// records a *KeyError wrapping ErrKeyMistyped in r and returns def.
+func Optional[T ValueType](r *Reader, key string, def T) T {
+	v, raw, res := lookupAs[T](r.cfg, key)
+
+	switch res {
+	case lookupFound:
+		return v
+	case lookupMistyped:
+		r.record(&KeyError{Key: key, Err: fmt.Errorf("%w: want %T, got %T", ErrKeyMistyped, v, raw)})
+	case lookupMissing:
+	}
+
+	return def
+}
+
+// Err returns every error recorded by Required and Optional, joined with
+// errors.Join, or nil. Errors appear in the order they were recorded.
 func (r *Reader) Err() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	return errors.Join(r.errs...)
+}
+
+func (r *Reader) record(err error) {
+	r.mu.Lock()
+	r.errs = append(r.errs, err)
+	r.mu.Unlock()
 }

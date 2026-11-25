@@ -12,8 +12,6 @@ import (
 	"path"
 	"strings"
 	"time"
-
-	"go.yaml.in/yaml/v3"
 )
 
 // MaxFileSize is the largest configuration file WithFiles accepts.
@@ -25,24 +23,79 @@ var (
 	ErrFileNotRegular = errors.New("config: not a regular file")
 	// ErrFileTooLarge means a configuration file exceeds MaxFileSize.
 	ErrFileTooLarge = errors.New("config: file exceeds the size limit")
-	// ErrUnknownFormat means a file or KV key has an extension other than
-	// .yaml, .yml or .json.
-	ErrUnknownFormat = errors.New("config: unknown format")
+	// ErrUnknownFormat means no Parser is registered for the extension of a
+	// file or KV key (see WithParser).
+	ErrUnknownFormat = errors.New("config: no parser for format")
 )
 
-// loadFiles reads every file and merges them in order.
-func loadFiles(fsys fs.FS, paths []string) (map[string]any, error) {
-	acc := map[string]any{}
+// Parser decodes one document into a map. Nested objects must be
+// map[string]any; values are scalars, slices or nested maps. An empty
+// document yields an empty map. Register parsers with WithParser; JSON is
+// built in (ParseJSON), YAML lives in github.com/eidon-go/core/config/yaml.
+type Parser func(data []byte) (map[string]any, error)
 
-	for _, p := range paths {
-		data, err := readFile(fsys, p)
-		if err != nil {
-			return nil, fmt.Errorf("config: read %s: %w", p, err)
+// ParseJSON is the built-in Parser for ".json". Numbers are decoded as
+// json.Number, so large integers keep their precision.
+func ParseJSON(data []byte) (map[string]any, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return map[string]any{}, nil
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+
+	var doc map[string]any
+	if err := dec.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("decode json: %w", err)
+	}
+
+	return doc, nil
+}
+
+// parsers maps a lower-case extension ("" for none) to its Parser.
+type parsers map[string]Parser
+
+// parse decodes data with the parser registered for the extension of name
+// and flattens the result.
+func (p parsers) parse(data []byte, name string) (map[string]any, error) {
+	ext := strings.ToLower(path.Ext(name))
+
+	parser, ok := p[ext]
+	if !ok {
+		hint := ""
+		if ext == "" || ext == ".yaml" || ext == ".yml" {
+			hint = " (for YAML use github.com/eidon-go/core/config/yaml)"
 		}
 
-		parsed, err := parse(data, p)
+		return nil, fmt.Errorf("%w: %q%s", ErrUnknownFormat, ext, hint)
+	}
+
+	doc, err := parser(data)
+	if err != nil {
+		return nil, err
+	}
+
+	return flatten(doc), nil
+}
+
+// loadFiles reads every file and merges them in order. Missing files listed
+// in optional are skipped.
+func loadFiles(fsys fs.FS, p parsers, paths []string, optional map[string]bool) (map[string]any, error) {
+	acc := map[string]any{}
+
+	for _, name := range paths {
+		data, err := readFile(fsys, name)
+		if optional[name] && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+
 		if err != nil {
-			return nil, fmt.Errorf("config: parse %s: %w", p, err)
+			return nil, fmt.Errorf("config: read %s: %w", name, err)
+		}
+
+		parsed, err := p.parse(data, name)
+		if err != nil {
+			return nil, fmt.Errorf("config: parse %s: %w", name, err)
 		}
 
 		acc = merge(acc, parsed)
@@ -95,11 +148,11 @@ func readFile(fsys fs.FS, name string) ([]byte, error) {
 }
 
 // loadKeys reads KV keys and merges them in order.
-func loadKeys(ctx context.Context, kv KV, timeout time.Duration, keys []string) (map[string]any, error) {
+func loadKeys(ctx context.Context, kv KV, p parsers, timeout time.Duration, keys []string) (map[string]any, error) {
 	acc := map[string]any{}
 
 	for _, key := range keys {
-		parsed, err := loadKey(ctx, kv, timeout, key)
+		parsed, err := loadKey(ctx, kv, p, timeout, key)
 		if err != nil {
 			return nil, err
 		}
@@ -111,7 +164,7 @@ func loadKeys(ctx context.Context, kv KV, timeout time.Duration, keys []string) 
 }
 
 // loadKey reads and parses one KV key.
-func loadKey(ctx context.Context, kv KV, timeout time.Duration, key string) (map[string]any, error) {
+func loadKey(ctx context.Context, kv KV, p parsers, timeout time.Duration, key string) (map[string]any, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 
@@ -124,35 +177,10 @@ func loadKey(ctx context.Context, kv KV, timeout time.Duration, key string) (map
 		return nil, fmt.Errorf("config: read KV key %s: %w", key, err)
 	}
 
-	parsed, err := parse(data, key)
+	parsed, err := p.parse(data, key)
 	if err != nil {
 		return nil, fmt.Errorf("config: parse KV key %s: %w", key, err)
 	}
 
 	return parsed, nil
-}
-
-// parse decodes a yaml or json document, chosen by the extension of name,
-// into a flat map. An empty document yields an empty map.
-func parse(data []byte, name string) (map[string]any, error) {
-	var parsed map[string]any
-
-	switch ext := strings.ToLower(path.Ext(name)); ext {
-	case "", ".yaml", ".yml":
-		if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&parsed); err != nil && !errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("decode yaml: %w", err)
-		}
-	case ".json":
-		if len(bytes.TrimSpace(data)) == 0 {
-			return map[string]any{}, nil
-		}
-
-		if err := json.Unmarshal(data, &parsed); err != nil {
-			return nil, fmt.Errorf("decode json: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("%w: %q (want .yaml, .yml or .json)", ErrUnknownFormat, ext)
-	}
-
-	return flatten(parsed), nil
 }

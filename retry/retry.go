@@ -37,11 +37,16 @@ type permanentError struct{ err error }
 func (e *permanentError) Error() string   { return e.err.Error() }
 func (e *permanentError) Unwrap() []error { return []error{e.err, ErrPermanent} }
 
+// Forever as Policy.MaxAttempts retries until the operation succeeds, returns
+// a non-retryable error or ctx is done.
+const Forever = -1
+
 // Policy describes how an operation is retried. The zero value makes a single
 // attempt (no retries). Policy is a value type: copy and adjust it freely.
 type Policy struct {
 	// MaxAttempts is the total number of attempts, including the first one.
-	// Values <= 1 mean a single attempt.
+	// 0 and 1 mean a single attempt; a negative value (Forever) means no
+	// limit other than ctx.
 	MaxAttempts int
 
 	// InitialDelay is the delay before the second attempt. Zero retries
@@ -64,15 +69,27 @@ type Policy struct {
 	// Errors wrapped with Permanent are never retried, whatever RetryIf says.
 	RetryIf func(err error) bool
 
-	// OnRetry, if set, is called before waiting for the next attempt with the
-	// number of the attempt that failed (starting at 1), its error and the
-	// delay before the next one.
-	OnRetry func(attempt int, err error, delay time.Duration)
+	// OnRetry, if set, is called before waiting for the next attempt, e.g. to
+	// log it. ctx is the context passed to Do.
+	OnRetry func(ctx context.Context, a Attempt)
 }
 
-// Do calls op until it succeeds, returns a non-retryable error, the attempts
-// are exhausted or ctx is done. It returns nil on success, otherwise the last
-// error of op; if ctx ends while waiting, that error joined with ctx.Err().
+// Attempt describes a failed attempt that will be retried. Fields may be
+// added in later versions.
+type Attempt struct {
+	// Number is the number of the failed attempt, starting at 1.
+	Number int
+	// Err is the error the attempt returned.
+	Err error
+	// Delay is the wait before the next attempt.
+	Delay time.Duration
+}
+
+// Do calls operation until it succeeds, returns a non-retryable error, the
+// attempts are exhausted or ctx is done; ctx is checked before every attempt.
+// It returns nil on success, otherwise the last error of operation; if ctx
+// ends first, that error joined with ctx.Err() (or just ctx.Err() if ctx was
+// done before the first attempt).
 func (p Policy) Do(ctx context.Context, operation func(ctx context.Context) error) error {
 	_, err := DoValue(ctx, p, func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, operation(ctx)
@@ -82,14 +99,16 @@ func (p Policy) Do(ctx context.Context, operation func(ctx context.Context) erro
 }
 
 // DoValue is Policy.Do for operations that return a value, e.g. a connection.
+// On any error it returns the zero value of T.
 func DoValue[T any](ctx context.Context, p Policy, operation func(ctx context.Context) (T, error)) (T, error) {
-	var timer *time.Timer
+	var zero T
 
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
+	if err := ctx.Err(); err != nil {
+		return zero, err //nolint:wrapcheck // the caller's own context error
+	}
+
+	var sleeper sleeper
+	defer sleeper.stop()
 
 	for attempt := 1; ; attempt++ {
 		v, err := operation(ctx)
@@ -97,28 +116,45 @@ func DoValue[T any](ctx context.Context, p Policy, operation func(ctx context.Co
 			return v, nil
 		}
 
-		if attempt >= p.MaxAttempts || !p.retryable(err) {
-			return v, err
+		if p.exhausted(attempt) || !p.retryable(err) {
+			return zero, err
 		}
 
 		delay := p.Delay(attempt)
 		if p.OnRetry != nil {
-			p.OnRetry(attempt, err, delay)
+			p.OnRetry(ctx, Attempt{Number: attempt, Err: err, Delay: delay})
 		}
 
-		if timer == nil {
-			timer = time.NewTimer(delay)
-		} else {
-			timer.Reset(delay)
+		if ctxErr := sleeper.sleep(ctx, delay); ctxErr != nil {
+			return zero, errors.Join(err, ctxErr)
 		}
+	}
+}
 
-		select {
-		case <-ctx.Done():
-			var zero T
+// sleeper reuses one timer across waits.
+type sleeper struct{ timer *time.Timer }
 
-			return zero, errors.Join(err, ctx.Err())
-		case <-timer.C:
-		}
+// sleep waits for d or until ctx is done and returns ctx.Err(). ctx is
+// checked after the wait as well: with a zero delay both can be ready at
+// once.
+func (s *sleeper) sleep(ctx context.Context, d time.Duration) error {
+	if s.timer == nil {
+		s.timer = time.NewTimer(d)
+	} else {
+		s.timer.Reset(d)
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-s.timer.C:
+	}
+
+	return ctx.Err() //nolint:wrapcheck // the caller's own context error
+}
+
+func (s *sleeper) stop() {
+	if s.timer != nil {
+		s.timer.Stop()
 	}
 }
 
@@ -143,6 +179,11 @@ func (p Policy) Delay(attempt int) time.Duration {
 	}
 
 	return time.Duration(d)
+}
+
+// exhausted reports whether attempt was the last one allowed.
+func (p Policy) exhausted(attempt int) bool {
+	return p.MaxAttempts >= 0 && attempt >= p.MaxAttempts
 }
 
 func (p Policy) retryable(err error) bool {

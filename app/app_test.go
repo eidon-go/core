@@ -37,17 +37,22 @@ func (r *recorder) list() []string {
 	return append([]string(nil), r.events...)
 }
 
-// resource is a plain Resource with an optional Start.
+// resource is a plain Resource.
 type resource struct {
 	name        string
 	rec         *recorder
 	shutdownErr error
+	hang        bool // Shutdown ignores ctx and blocks for a long time
 }
 
 func (r *resource) Name() string { return r.name }
 
 func (r *resource) Shutdown(context.Context) error {
 	r.rec.add("shutdown " + r.name)
+
+	if r.hang {
+		time.Sleep(time.Hour)
+	}
 
 	return r.shutdownErr
 }
@@ -72,11 +77,13 @@ func (s *starter) Start(ctx context.Context) error {
 }
 
 // server behaves like a real server: Run blocks until Shutdown is called
-// (ignoring ctx on purpose) and then returns nil.
+// (ignoring ctx on purpose) and returns nil; Run after Shutdown returns at
+// once.
 type server struct {
 	name    string
 	rec     *recorder
 	running chan struct{}
+	runOnce sync.Once
 	stop    chan struct{}
 	once    sync.Once
 }
@@ -88,7 +95,7 @@ func newServer(name string, rec *recorder) *server {
 func (s *server) Name() string { return s.name }
 
 func (s *server) Run(context.Context) error {
-	close(s.running)
+	s.runOnce.Do(func() { close(s.running) })
 	<-s.stop
 
 	return nil
@@ -183,6 +190,20 @@ func wait(t *testing.T, done <-chan error) error {
 	}
 }
 
+func eventually(t *testing.T, cond func() bool) {
+	t.Helper()
+	require.Eventually(t, cond, 2*time.Second, 2*time.Millisecond)
+}
+
+func cancelled(t *testing.T) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	return ctx
+}
+
 func TestRun_CleanStopOrder(t *testing.T) {
 	t.Parallel()
 
@@ -238,12 +259,12 @@ func TestRun_RunnerErrorStopsApp(t *testing.T) {
 	failing := &worker{name: "consumer", rec: rec, runErr: errBoom, early: true}
 	db := &resource{name: "db", rec: rec}
 
-	a := newApp()
+	a := newApp(app.WithShutdownDelay(time.Hour)) // skipped for a failing runner
 	a.Add(db, srv, failing)
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, errBoom)
-	assert.Contains(t, err.Error(), "run consumer: boom")
+	require.ErrorContains(t, err, "run consumer: boom")
 	assert.Contains(t, rec.list(), "shutdown http")
 	assert.Contains(t, rec.list(), "shutdown db")
 }
@@ -258,7 +279,46 @@ func TestRun_RunnerReturningNilEarlyStopsApp(t *testing.T) {
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, app.ErrRunnerStopped)
-	assert.Contains(t, err.Error(), "job")
+	require.ErrorContains(t, err, "job")
+}
+
+// A cancelled ctx makes runners return at once; that must never be reported
+// as ErrRunnerStopped, whichever select case wins.
+func TestRun_CancelledContextIsAlwaysClean(t *testing.T) {
+	t.Parallel()
+
+	for range 200 {
+		rec := &recorder{}
+
+		a := newApp()
+		a.Add(&worker{name: "a", rec: rec}, &worker{name: "b", rec: rec})
+
+		require.NoError(t, a.Run(cancelled(t)))
+	}
+}
+
+// When a runner fails at once, other runners may not have entered Run yet;
+// they must not be started after their Shutdown, and a server returning nil
+// after Shutdown is not an error.
+func TestRun_ImmediateFailureWithManyRunners(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+
+	for range 50 {
+		rec := &recorder{}
+
+		a := newApp()
+		for range 10 {
+			a.Add(newServer("srv", rec))
+		}
+
+		a.Add(&worker{name: "failing", rec: rec, runErr: errBoom, early: true})
+
+		err := wait(t, runAsync(t.Context(), a))
+		require.ErrorIs(t, err, errBoom)
+		require.NotErrorIs(t, err, app.ErrShutdownTimeout)
+	}
 }
 
 func TestRun_HangingRunnerHitsShutdownTimeout(t *testing.T) {
@@ -278,8 +338,27 @@ func TestRun_HangingRunnerHitsShutdownTimeout(t *testing.T) {
 
 	err := wait(t, done)
 	require.ErrorIs(t, err, app.ErrShutdownTimeout)
-	assert.Contains(t, err.Error(), "still running: stuck")
+	require.ErrorContains(t, err, "still running: stuck")
 	assert.Contains(t, rec.list(), "shutdown db", "resources are shut down even after a timeout")
+}
+
+func TestRun_HangingShutdownIsAbandoned(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	stuck := &resource{name: "pool", rec: rec, hang: true}
+	first := &resource{name: "first", rec: rec}
+
+	a := newApp(app.WithShutdownTimeout(50 * time.Millisecond))
+	a.Add(first, stuck)
+
+	start := time.Now()
+	err := wait(t, runAsync(cancelled(t), a))
+
+	require.ErrorIs(t, err, app.ErrShutdownTimeout)
+	require.ErrorContains(t, err, "shutdown pool")
+	assert.Less(t, time.Since(start), time.Second, "Run must not wait for the stuck Shutdown")
+	assert.Contains(t, rec.list(), "shutdown first", "later components still get Shutdown")
 }
 
 func TestRun_StartFailureRollsBack(t *testing.T) {
@@ -299,7 +378,7 @@ func TestRun_StartFailureRollsBack(t *testing.T) {
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, errStart)
-	assert.Contains(t, err.Error(), "start failing: no connection")
+	require.ErrorContains(t, err, "start failing: no connection")
 	assert.Equal(t, []string{
 		"start first", "start failing",
 		// runners first (http was constructed, so it is shut down), then the
@@ -313,9 +392,10 @@ func TestRun_CancelDuringStartIsCleanStop(t *testing.T) {
 
 	rec := &recorder{}
 	blocking := &starter{resource: resource{name: "slow", rec: rec}, blockCtx: true}
+	next := &starter{resource: resource{name: "next", rec: rec}}
 
 	a := newApp()
-	a.Add(blocking)
+	a.Add(blocking, next)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -324,6 +404,7 @@ func TestRun_CancelDuringStartIsCleanStop(t *testing.T) {
 	cancel()
 
 	require.NoError(t, wait(t, done))
+	assert.NotContains(t, rec.list(), "start next", "no Start after cancellation")
 }
 
 func TestRun_StartTimeout(t *testing.T) {
@@ -337,6 +418,54 @@ func TestRun_StartTimeout(t *testing.T) {
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestRun_RunnerThatIsAlsoStarter(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	srv := &startingServer{server: newServer("http", rec)}
+
+	a := newApp()
+	a.Add(srv)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	<-srv.running
+	cancel()
+
+	require.NoError(t, wait(t, done))
+	assert.Equal(t, []string{"start http", "shutdown http"}, rec.list())
+}
+
+type startingServer struct{ *server }
+
+func (s *startingServer) Start(context.Context) error {
+	s.rec.add("start " + s.name)
+
+	return nil
+}
+
+func TestRun_Group(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	db := &starter{resource: resource{name: "db", rec: rec}}
+	cache := &starter{resource: resource{name: "cache", rec: rec}}
+	srv := newServer("http", rec)
+
+	a := newApp()
+	a.Add(lifecycle.GroupNamed("infra", db, cache), srv)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	<-srv.running
+	cancel()
+
+	require.NoError(t, wait(t, done))
+	assert.Equal(t, []string{"start db", "start cache", "shutdown http", "shutdown cache", "shutdown db"}, rec.list())
 }
 
 func TestRun_NoRunnersBlocksUntilCancel(t *testing.T) {
@@ -371,13 +500,10 @@ func TestRun_ShutdownErrorsAreJoined(t *testing.T) {
 	a := newApp()
 	a.Add(&resource{name: "a", rec: rec, shutdownErr: errA}, &resource{name: "b", rec: rec, shutdownErr: errB})
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	err := wait(t, runAsync(ctx, a))
+	err := wait(t, runAsync(cancelled(t), a))
 	require.ErrorIs(t, err, errA)
 	require.ErrorIs(t, err, errB)
-	assert.Contains(t, err.Error(), "shutdown a: a failed")
+	require.ErrorContains(t, err, "shutdown a: a failed")
 }
 
 func TestRun_Twice(t *testing.T) {
@@ -385,11 +511,8 @@ func TestRun_Twice(t *testing.T) {
 
 	a := newApp()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	require.NoError(t, a.Run(ctx))
-	require.ErrorIs(t, a.Run(ctx), app.ErrAlreadyStarted)
+	require.NoError(t, a.Run(cancelled(t)))
+	require.ErrorIs(t, a.Run(cancelled(t)), app.ErrAlreadyStarted)
 }
 
 func TestRun_SignalTriggersShutdown(t *testing.T) {
@@ -436,6 +559,84 @@ func TestRun_NoSignalsIgnoresUnrelatedSignals(t *testing.T) {
 	require.NoError(t, wait(t, done))
 }
 
+func TestReadiness(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	gate := make(chan struct{})
+	slowStart := &gatedStarter{resource: resource{name: "db", rec: rec}, gate: gate}
+	srv := newServer("http", rec)
+
+	a := newApp(app.WithShutdownDelay(200 * time.Millisecond))
+	a.Add(slowStart, srv)
+
+	require.ErrorIs(t, a.Healthcheck(t.Context()), app.ErrNotReady, "before Run")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	eventually(t, func() bool { return slowStart.entered.Load() })
+	require.ErrorIs(t, a.Healthcheck(t.Context()), app.ErrNotReady, "while starting")
+
+	close(gate)
+	<-srv.running
+	eventually(t, func() bool { return a.Healthcheck(t.Context()) == nil })
+
+	cancel()
+	eventually(t, func() bool { return errors.Is(a.Healthcheck(t.Context()), app.ErrNotReady) })
+	assert.NotContains(t, rec.list(), "shutdown http", "runners keep serving during the shutdown delay")
+
+	require.NoError(t, wait(t, done))
+	require.ErrorIs(t, a.Healthcheck(t.Context()), app.ErrNotReady, "after Run")
+}
+
+type gatedStarter struct {
+	resource
+
+	gate    chan struct{}
+	entered atomic.Bool
+}
+
+func (g *gatedStarter) Start(context.Context) error {
+	g.entered.Store(true)
+	<-g.gate
+
+	return nil
+}
+
+func TestObserver(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+
+	a := newApp(app.WithObserver(func(_ context.Context, e app.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		events = append(events, e.Phase.String()+" "+e.Component)
+	}))
+
+	srv := newServer("http", rec)
+	a.Add(&starter{resource: resource{name: "db", rec: rec}}, srv)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	<-srv.running
+	cancel()
+	require.NoError(t, wait(t, done))
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.ElementsMatch(t, []string{"start db", "run http", "shutdown http", "shutdown db"}, events)
+}
+
 func TestAdd_Panics(t *testing.T) {
 	t.Parallel()
 
@@ -446,11 +647,22 @@ func TestAdd_Panics(t *testing.T) {
 	})
 	assert.Panics(t, func() { newApp().Add(nilResource) }, "typed nil")
 
-	a := newApp()
+	dup := &resource{name: "db"}
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	require.NoError(t, a.Run(ctx))
+	assert.PanicsWithValue(t, "app: Add: component db is already registered", func() { newApp().Add(dup, dup) })
+	assert.Panics(t, func() {
+		a := newApp()
+		a.Add(dup)
+		a.Add(dup)
+	})
+
+	// Non-comparable components cannot be detected but must not panic.
+	f := lifecycle.ShutdownFunc(func(context.Context) error { return nil })
+
+	assert.NotPanics(t, func() { newApp().Add(f, f) })
+
+	a := newApp()
+	require.NoError(t, a.Run(cancelled(t)))
 
 	assert.PanicsWithValue(t, "app: Add called after Run", func() { a.Add(&resource{}) })
 }
@@ -459,23 +671,45 @@ func TestHealthcheck(t *testing.T) {
 	t.Parallel()
 
 	errDown := errors.New("down")
+	rec := &recorder{}
+	srv := newServer("http", rec)
 
 	a := newApp()
 	a.Add(
 		&checker{name: "db", delay: 50 * time.Millisecond},
 		&checker{name: "cache", err: errDown, delay: 50 * time.Millisecond},
-		&resource{name: "plain"},
+		&resource{name: "plain", rec: rec},
+		lifecycle.HealthcheckFunc(func(context.Context) error { return nil }),
+		srv,
 	)
 
 	start := time.Now()
 	report := a.HealthReport(t.Context())
 
 	assert.Less(t, time.Since(start), 95*time.Millisecond, "checks run concurrently")
-	assert.Equal(t, []app.HealthResult{{Name: "db", Err: nil}, {Name: "cache", Err: errDown}}, report)
+	assert.Equal(t, []app.HealthResult{
+		{Name: "db", Err: nil},
+		{Name: "cache", Err: errDown},
+		{Name: "lifecycle.HealthcheckFunc", Err: nil},
+	}, report)
 
-	err := a.Healthcheck(t.Context())
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	<-srv.running
+
+	var err error
+
+	eventually(t, func() bool {
+		err = a.Healthcheck(t.Context())
+
+		return !errors.Is(err, app.ErrNotReady)
+	})
 	require.ErrorIs(t, err, errDown)
-	assert.EqualError(t, err, "cache: down")
+	require.EqualError(t, err, "cache: down")
+
+	cancel()
+	require.NoError(t, wait(t, done))
 }
 
 func TestHealthcheckTimeout(t *testing.T) {
@@ -484,7 +718,9 @@ func TestHealthcheckTimeout(t *testing.T) {
 	a := newApp(app.WithHealthcheckTimeout(20 * time.Millisecond))
 	a.Add(&checker{name: "slow", delay: time.Second})
 
-	require.ErrorIs(t, a.Healthcheck(t.Context()), context.DeadlineExceeded)
+	report := a.HealthReport(t.Context())
+	require.Len(t, report, 1)
+	require.ErrorIs(t, report[0].Err, context.DeadlineExceeded)
 }
 
 func TestHealthcheckConcurrentWithAdd(t *testing.T) {
@@ -501,7 +737,7 @@ func TestHealthcheckConcurrentWithAdd(t *testing.T) {
 	})
 	wg.Go(func() {
 		for range 100 {
-			_ = a.Healthcheck(t.Context())
+			_ = a.HealthReport(t.Context())
 		}
 	})
 	wg.Wait()
@@ -526,9 +762,6 @@ func TestZeroValueAndNilLogger(t *testing.T) {
 		return nil
 	}))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	require.NoError(t, zero.Run(ctx))
+	require.NoError(t, zero.Run(cancelled(t)))
 	assert.Equal(t, int32(1), calls.Load())
 }

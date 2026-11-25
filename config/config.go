@@ -41,7 +41,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -52,11 +51,16 @@ var (
 	// ErrAlreadyRunning is returned by Config.Run when it is called more
 	// than once.
 	ErrAlreadyRunning = errors.New("config: Run called more than once")
+	// ErrDuplicateKey is returned by New when a KV key is passed more than
+	// once, e.g. to both WithKeys and WithWatchedKeys.
+	ErrDuplicateKey = errors.New("config: KV key configured more than once")
 )
 
-// ValueType is the set of types the generic readers support.
+// ValueType is the set of types the generic readers support. New types may
+// be added in later versions (which does not affect existing callers); do
+// not rely on the set being closed, e.g. in an exhaustive type switch.
 type ValueType interface {
-	string | int | int64 | bool | float64 | time.Duration | []string
+	string | int | int64 | uint | uint64 | bool | float64 | time.Duration | []string | []int
 }
 
 // Config is a loaded configuration. Create it with New (or FromMap in tests).
@@ -66,13 +70,22 @@ type Config struct {
 	kv     KV
 	watch  *watcher
 
-	started   atomic.Bool
-	stopped   chan struct{}
-	stopOnce  sync.Once
+	mu        sync.Mutex
+	state     runState
+	cancelRun context.CancelFunc
 	runDone   chan struct{}
+
 	closeOnce sync.Once
 	closeErr  error
 }
+
+type runState int
+
+const (
+	stateIdle runState = iota
+	stateRunning
+	stateStopped
+)
 
 // New loads the configuration from the sources selected by opts and returns
 // it. ctx bounds the loading only; watching (if any) happens in Run.
@@ -95,27 +108,21 @@ func New(ctx context.Context, opts ...Option) (*Config, error) {
 }
 
 func load(ctx context.Context, o *options) (*Config, error) {
-	if o.envBootstrap {
-		if err := o.bootstrapFromEnv(); err != nil {
-			return nil, err
-		}
+	if err := o.resolve(); err != nil {
+		return nil, err
 	}
 
-	if o.kv == nil && (len(o.keys) > 0 || len(o.watchedKeys) > 0) {
-		return nil, ErrKVRequired
-	}
-
-	files, err := loadFiles(o.fsys, o.files)
+	files, err := loadFiles(o.fsys, o.parsers, o.files, o.optional)
 	if err != nil {
 		return nil, err
 	}
 
-	static, err := loadKeys(ctx, o.kv, o.kvTimeout, o.keys)
+	static, err := loadKeys(ctx, o.kv, o.parsers, o.kvTimeout, o.keys)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg := newConfig(newStore(o.envLookup, o.envName, flatten(o.defaults)), o.logger)
+	cfg := newConfig(newStore(o.envLookup, o.envName, o.defaults), o.logger)
 	cfg.kv = o.kv
 	base := merge(files, static)
 
@@ -135,13 +142,28 @@ func load(ctx context.Context, o *options) (*Config, error) {
 	return cfg, nil
 }
 
+// resolve applies the environment bootstrap and validates the sources.
+func (o *options) resolve() error {
+	if o.envBootstrap {
+		if err := o.bootstrapFromEnv(); err != nil {
+			return err
+		}
+	}
+
+	if o.kv == nil && (len(o.keys) > 0 || len(o.watchedKeys) > 0) {
+		return ErrKVRequired
+	}
+
+	return checkDuplicateKeys(o.keys, o.watchedKeys)
+}
+
 // loadWatched reads the watched keys and builds the watcher, which publishes
 // the initial snapshot.
 func loadWatched(ctx context.Context, o *options, base map[string]any, publish func(map[string]any)) (*watcher, error) {
 	initial := make(map[string]map[string]any, len(o.watchedKeys))
 
 	for _, key := range o.watchedKeys {
-		parsed, err := loadKey(ctx, o.kv, o.kvTimeout, key)
+		parsed, err := loadKey(ctx, o.kv, o.parsers, o.kvTimeout, key)
 		if err != nil {
 			return nil, err
 		}
@@ -151,14 +173,31 @@ func loadWatched(ctx context.Context, o *options, base map[string]any, publish f
 
 	return newWatcher(watcherConfig{
 		kv:      o.kv,
+		parsers: o.parsers,
 		keys:    o.watchedKeys,
 		base:    base,
 		initial: initial,
 		timeout: o.kvTimeout,
-		backoff: o.watchBackoff,
+		backoff: backoff{initial: o.watchInitial, max: o.watchMax},
 		logger:  o.logger,
 		publish: publish,
 	}), nil
+}
+
+// checkDuplicateKeys rejects a KV key listed more than once across keys and
+// watched: its values could not be removed consistently on delete.
+func checkDuplicateKeys(keys, watched []string) error {
+	seen := make(map[string]bool, len(keys)+len(watched))
+
+	for _, key := range append(append([]string{}, keys...), watched...) {
+		if seen[key] {
+			return fmt.Errorf("%w: %s", ErrDuplicateKey, key)
+		}
+
+		seen[key] = true
+	}
+
+	return nil
 }
 
 // FromMap returns a Config holding values, with no other sources and no
@@ -176,11 +215,9 @@ func newConfig(s *store, logger *slog.Logger) *Config {
 		logger = slog.Default()
 	}
 
-	return &Config{ //nolint:exhaustruct_v5 // sync and atomic fields are ready at zero value
-		store:   s,
-		logger:  logger,
-		stopped: make(chan struct{}),
-		runDone: make(chan struct{}),
+	return &Config{ //nolint:exhaustruct_v5 // run state starts at its zero value
+		store:  s,
+		logger: logger,
 	}
 }
 
@@ -189,24 +226,30 @@ func (c *Config) Name() string { return "config" }
 
 // Run watches the keys passed with WithWatchedKeys and publishes every change
 // until ctx is cancelled or Shutdown is called; it then returns nil. Without
-// watched keys it just waits. Run may be called once.
+// watched keys it just waits. Run may be called once (ErrAlreadyRunning
+// afterwards); called after Shutdown it returns nil at once.
 func (c *Config) Run(ctx context.Context) error {
-	if !c.started.CompareAndSwap(false, true) {
+	c.mu.Lock()
+
+	switch c.state {
+	case stateRunning:
+		c.mu.Unlock()
+
 		return ErrAlreadyRunning
+	case stateStopped:
+		c.mu.Unlock()
+
+		return nil
+	case stateIdle:
 	}
 
-	defer close(c.runDone)
-
 	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	done := make(chan struct{})
+	c.state, c.cancelRun, c.runDone = stateRunning, cancel, done
+	c.mu.Unlock()
 
-	go func() {
-		select {
-		case <-c.stopped:
-			cancel()
-		case <-runCtx.Done():
-		}
-	}()
+	defer close(done)
+	defer cancel()
 
 	if c.watch != nil {
 		c.watch.run(runCtx)
@@ -218,18 +261,36 @@ func (c *Config) Run(ctx context.Context) error {
 }
 
 // Shutdown stops Run (waiting for it to return, bounded by ctx) and closes
-// the KV backend, if any. The last published values stay readable.
+// the KV backend, if any. The last published values stay readable. If ctx
+// ends before the watcher stops, Shutdown returns the ctx error and the KV is
+// closed once the watcher has stopped.
 func (c *Config) Shutdown(ctx context.Context) error {
-	c.stopOnce.Do(func() { close(c.stopped) })
+	c.mu.Lock()
+	c.state = stateStopped
+	cancel, done := c.cancelRun, c.runDone
+	c.mu.Unlock()
 
-	if c.started.Load() {
+	if cancel != nil {
+		cancel()
+
 		select {
-		case <-c.runDone:
+		case <-done:
 		case <-ctx.Done():
+			go func() {
+				<-done
+
+				_ = c.closeKV()
+			}()
+
 			return fmt.Errorf("config: waiting for the watcher: %w", ctx.Err())
 		}
 	}
 
+	return c.closeKV()
+}
+
+// closeKV closes the KV backend once.
+func (c *Config) closeKV() error {
 	c.closeOnce.Do(func() {
 		if c.kv != nil {
 			if err := c.kv.Close(); err != nil {

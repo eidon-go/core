@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
@@ -12,14 +13,16 @@ import (
 // value:
 //
 //   - string: strings, booleans and numbers (formatted).
-//   - int, int64: integers in range, floats with no fractional part (json
-//     numbers decode as float64), decimal strings. Not booleans.
-//   - float64: numbers and numeric strings. Not booleans.
+//   - int, int64, uint, uint64: integers in range, floats with no fractional
+//     part, decimal strings. Not booleans.
+//   - float64: finite numbers and numeric strings. Not booleans, not NaN or
+//     infinities.
 //   - bool: booleans and the strings true/false, yes/no, on/off, 1/0
 //     (case-insensitive). Not numbers.
 //   - time.Duration: duration strings ("30s", "1m30s") and the number 0. Other
 //     numbers are rejected: their unit would be ambiguous.
-//   - []string: lists of scalars and comma-separated strings.
+//   - []string, []int: lists and comma-separated strings, every element
+//     converted by the rules above.
 //
 //nolint:cyclop // one flat case per supported type
 func coerce[T ValueType](v any) (T, bool) {
@@ -33,13 +36,17 @@ func coerce[T ValueType](v any) (T, bool) {
 	case string:
 		out, ok = toString(v)
 	case int:
-		var n int64
-
-		n, ok = toInt64(v)
-		ok = ok && n >= math.MinInt && n <= math.MaxInt
-		out = int(n)
+		out, ok = toInt(v)
 	case int64:
 		out, ok = toInt64(v)
+	case uint:
+		var n uint64
+
+		n, ok = toUint64(v)
+		ok = ok && n <= math.MaxUint
+		out = uint(n)
+	case uint64:
+		out, ok = toUint64(v)
 	case bool:
 		out, ok = toBool(v)
 	case float64:
@@ -47,7 +54,9 @@ func coerce[T ValueType](v any) (T, bool) {
 	case time.Duration:
 		out, ok = toDuration(v)
 	case []string:
-		out, ok = toStringSlice(v)
+		out, ok = toSlice(v, toString)
+	case []int:
+		out, ok = toSlice(v, toInt)
 	}
 
 	if !ok {
@@ -61,23 +70,32 @@ func toString(v any) (string, bool) {
 	switch x := v.(type) {
 	case string:
 		return x, true
+	case json.Number:
+		return x.String(), true
 	case bool:
 		return strconv.FormatBool(x), true
 	case float32:
 		return strconv.FormatFloat(float64(x), 'f', -1, 32), true
 	case float64:
 		return strconv.FormatFloat(x, 'f', -1, 64), true
+	case uint64:
+		return strconv.FormatUint(x, 10), true
 	default:
 		if n, ok := intValue(v); ok {
 			return strconv.FormatInt(n, 10), true
 		}
 
-		if u, ok := v.(uint64); ok {
-			return strconv.FormatUint(u, 10), true
-		}
-
 		return "", false
 	}
+}
+
+func toInt(v any) (int, bool) {
+	n, ok := toInt64(v)
+	if !ok || n < math.MinInt || n > math.MaxInt {
+		return 0, false
+	}
+
+	return int(n), true
 }
 
 func toInt64(v any) (int64, bool) {
@@ -86,12 +104,46 @@ func toInt64(v any) (int64, bool) {
 		return floatToInt64(x)
 	case float32:
 		return floatToInt64(float64(x))
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return n, true
+		}
+
+		if f, err := x.Float64(); err == nil {
+			return floatToInt64(f)
+		}
+
+		return 0, false
 	case string:
 		n, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
 
 		return n, err == nil
 	default:
 		return intValue(v)
+	}
+}
+
+func toUint64(v any) (uint64, bool) {
+	switch x := v.(type) {
+	case uint64:
+		return x, true
+	case uint:
+		return uint64(x), true
+	case json.Number:
+		n, err := strconv.ParseUint(x.String(), 10, 64)
+
+		return n, err == nil
+	case string:
+		n, err := strconv.ParseUint(strings.TrimSpace(x), 10, 64)
+
+		return n, err == nil
+	default:
+		n, ok := toInt64(v)
+		if !ok || n < 0 {
+			return 0, false
+		}
+
+		return uint64(n), true
 	}
 }
 
@@ -142,26 +194,36 @@ func floatToInt64(f float64) (int64, bool) {
 }
 
 func toFloat64(v any) (float64, bool) {
+	var (
+		f  float64
+		ok bool
+	)
+
 	switch x := v.(type) {
 	case float64:
-		return x, true
+		f, ok = x, true
 	case float32:
-		return float64(x), true
+		f, ok = float64(x), true
+	case json.Number:
+		n, err := x.Float64()
+		f, ok = n, err == nil
 	case string:
-		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
-
-		return f, err == nil
+		n, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		f, ok = n, err == nil
+	case uint64:
+		f, ok = float64(x), true
 	default:
-		if n, ok := intValue(v); ok {
-			return float64(n), true
-		}
+		var n int64
 
-		if u, ok := v.(uint64); ok {
-			return float64(u), true
-		}
+		n, ok = intValue(v)
+		f = float64(n)
+	}
 
+	if !ok || math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, false
 	}
+
+	return f, true
 }
 
 func toBool(v any) (bool, bool) {
@@ -198,31 +260,48 @@ func toDuration(v any) (time.Duration, bool) {
 	}
 }
 
-func toStringSlice(v any) ([]string, bool) {
+// toSlice converts a list, or a comma-separated string, element by element.
+func toSlice[E any](v any, conv func(any) (E, bool)) ([]E, bool) {
+	items, ok := listItems(v)
+	if !ok {
+		return nil, false
+	}
+
+	out := make([]E, 0, len(items))
+
+	for _, item := range items {
+		e, ok := conv(item)
+		if !ok {
+			return nil, false
+		}
+
+		out = append(out, e)
+	}
+
+	return out, true
+}
+
+// listItems returns the elements of a list value or a comma-separated string.
+func listItems(v any) ([]any, bool) {
 	switch x := v.(type) {
-	case []string:
-		return append([]string{}, x...), true
 	case []any:
-		out := make([]string, 0, len(x))
-
-		for _, item := range x {
-			s, ok := toString(item)
-			if !ok {
-				return nil, false
-			}
-
-			out = append(out, s)
-		}
-
-		return out, true
+		return x, true
+	case []string:
+		return anySlice(x), true
+	case []int:
+		return anySlice(x), true
 	case string:
-		out := splitList(x)
-		if out == nil {
-			out = []string{}
-		}
-
-		return out, true
+		return anySlice(splitList(x)), true
 	default:
 		return nil, false
 	}
+}
+
+func anySlice[E any](s []E) []any {
+	out := make([]any, len(s))
+	for i, e := range s {
+		out[i] = e
+	}
+
+	return out
 }

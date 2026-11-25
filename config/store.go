@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"maps"
+	"strings"
 	"sync/atomic"
 )
 
@@ -52,7 +54,7 @@ func (s *store) setSnapshot(m map[string]any) {
 // skipped.
 func (s *store) lookup(key string) (any, bool) {
 	if s.envLookup != nil {
-		if v, ok := s.envLookup(s.envName(key)); ok && v != "" {
+		if v, ok := s.envLookup(s.envName(key)); ok && strings.TrimSpace(v) != "" {
 			return v, true
 		}
 	}
@@ -85,13 +87,19 @@ func flattenInto(out map[string]any, prefix string, m map[string]any) {
 			key = prefix + "." + k
 		}
 
-		if child, ok := v.(map[string]any); ok {
+		switch child := v.(type) {
+		case map[string]any:
 			flattenInto(out, key, child)
+		case map[any]any: // decoders produce this for non-string keys (e.g. 200: ok)
+			converted := make(map[string]any, len(child))
+			for ck, cv := range child {
+				converted[fmt.Sprint(ck)] = cv
+			}
 
-			continue
+			flattenInto(out, key, converted)
+		default:
+			out[key] = v
 		}
-
-		out[key] = v
 	}
 }
 

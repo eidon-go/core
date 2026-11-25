@@ -8,38 +8,90 @@ import (
 	"slices"
 )
 
-// Group returns a Resource that shuts down every non-nil member in reverse
-// argument order — so members passed in construction order are torn down
-// dependents-first — joining the errors with errors.Join.
+// defaultGroupName is the Name of a Group created without GroupNamed.
+const defaultGroupName = "group"
+
+// Group combines resources into one component, e.g. the infrastructure of a
+// service or the parts of one integration. Members are given in dependency
+// order:
+//
+//   - Start starts every member that implements Starter, in order. If one
+//     fails, the members before it are shut down in reverse order and the
+//     error is returned.
+//   - Shutdown shuts every member down in reverse order and joins the errors.
+//   - Healthcheck checks every member that implements Healthchecker and joins
+//     the errors, each prefixed with the member's name.
 //
 // Nil members, including a typed nil pointer stored in the interface (a
-// struct field that was never assigned), are skipped. This lets callers pass
-// fields of a partially constructed struct without a nil guard per field:
+// struct field that was never assigned), are skipped, so the fields of a
+// partially constructed struct can be passed without a nil guard:
 //
 //	func (i *Infrastructure) Shutdown(ctx context.Context) error {
-//	    return lifecycle.Group(i.OTel, i.DB, i.Redis).Shutdown(ctx)
+//	    return lifecycle.Group(i.Telemetry, i.DB, i.Cache).Shutdown(ctx)
 //	}
 //
-// The returned value also implements Healthchecker: it checks every member
-// that implements Healthchecker and joins their errors, so registering a
-// Group with app.App does not hide the members' health checks.
-func Group(resources ...Resource) Resource {
-	return group(resources)
+// A Group cannot run members: Group panics if a member implements Runner.
+// Register runners with app.App directly.
+func Group(members ...Resource) Resource {
+	return GroupNamed(defaultGroupName, members...)
 }
 
-type group []Resource
+// GroupNamed is Group with a name for logs, errors and health reports.
+func GroupNamed(name string, members ...Resource) Resource {
+	for idx, member := range members {
+		if _, ok := member.(Runner); ok && !IsNil(member) {
+			panic(
+				fmt.Sprintf(
+					"lifecycle: Group: member %d (%s) is a Runner; add runners to app.App directly",
+					idx,
+					NameOf(member),
+				),
+			)
+		}
+	}
 
-// Shutdown implements Resource.
-func (g group) Shutdown(ctx context.Context) error {
-	var errs []error
+	return &group{name: name, members: slices.Clone(members)}
+}
 
-	for _, r := range slices.Backward(g) {
-		if IsNil(r) {
+type group struct {
+	name    string
+	members []Resource
+}
+
+// Name implements Namer.
+func (g *group) Name() string { return g.name }
+
+// Start implements Starter.
+func (g *group) Start(ctx context.Context) error {
+	for idx, member := range g.members {
+		s, ok := member.(Starter)
+		if !ok || IsNil(member) {
 			continue
 		}
 
-		if err := r.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", NameOf(r), err))
+		if err := s.Start(ctx); err != nil {
+			startErr := fmt.Errorf("start %s: %w", NameOf(member), err)
+			// The failed member cleaned up after itself; roll back the rest.
+			rollback := &group{name: g.name, members: g.members[:idx]}
+
+			return errors.Join(startErr, rollback.Shutdown(context.WithoutCancel(ctx)))
+		}
+	}
+
+	return nil
+}
+
+// Shutdown implements Resource.
+func (g *group) Shutdown(ctx context.Context) error {
+	var errs []error
+
+	for _, member := range slices.Backward(g.members) {
+		if IsNil(member) {
+			continue
+		}
+
+		if err := member.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("shutdown %s: %w", NameOf(member), err))
 		}
 	}
 
@@ -47,17 +99,17 @@ func (g group) Shutdown(ctx context.Context) error {
 }
 
 // Healthcheck implements Healthchecker.
-func (g group) Healthcheck(ctx context.Context) error {
+func (g *group) Healthcheck(ctx context.Context) error {
 	var errs []error
 
-	for _, r := range g {
-		if IsNil(r) {
+	for _, member := range g.members {
+		if IsNil(member) {
 			continue
 		}
 
-		if hc, ok := r.(Healthchecker); ok {
+		if hc, ok := member.(Healthchecker); ok {
 			if err := hc.Healthcheck(ctx); err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", NameOf(r), err))
+				errs = append(errs, fmt.Errorf("%s: %w", NameOf(member), err))
 			}
 		}
 	}
@@ -92,6 +144,8 @@ func NameOf(v any) string {
 
 // Compile-time checks.
 var (
-	_ Resource      = group(nil)
-	_ Healthchecker = group(nil)
+	_ Resource      = (*group)(nil)
+	_ Starter       = (*group)(nil)
+	_ Healthchecker = (*group)(nil)
+	_ Namer         = (*group)(nil)
 )

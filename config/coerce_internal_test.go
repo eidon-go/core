@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -94,4 +95,45 @@ func TestCoerceStringSlice(t *testing.T) {
 	check(t, "", []string{}, true)
 	check(t, []any{map[string]any{}}, []string(nil), false)
 	check(t, 5, []string(nil), false)
+}
+
+func TestCoerceJSONNumber(t *testing.T) {
+	t.Parallel()
+
+	check(t, json.Number("9007199254740993"), int64(9007199254740993), true)
+	check(t, json.Number("3.0"), 3, true)
+	check(t, json.Number("3.5"), 0, false)
+	check(t, json.Number("2.5"), 2.5, true)
+	check(t, json.Number("42"), "42", true)
+	check(t, json.Number("18446744073709551615"), uint64(math.MaxUint64), true)
+	check(t, []any{json.Number("1"), json.Number("2")}, []int{1, 2}, true)
+}
+
+func TestCoerceUint(t *testing.T) {
+	t.Parallel()
+
+	check(t, 42, uint(42), true)
+	check(t, "42", uint64(42), true)
+	check(t, -1, uint(0), false)
+	check(t, "-1", uint64(0), false)
+	check(t, 1.5, uint(0), false)
+	check(t, uint64(math.MaxUint64), uint64(math.MaxUint64), true)
+}
+
+func TestCoerceIntSlice(t *testing.T) {
+	t.Parallel()
+
+	check(t, []any{1, "2", 3.0}, []int{1, 2, 3}, true)
+	check(t, "4, 5", []int{4, 5}, true)
+	check(t, []int{6}, []int{6}, true)
+	check(t, []any{"x"}, []int(nil), false)
+	check(t, []string{"7", "8"}, []int{7, 8}, true)
+}
+
+func TestCoerceFloatSpecials(t *testing.T) {
+	t.Parallel()
+
+	check(t, "NaN", 0.0, false)
+	check(t, "+Inf", 0.0, false)
+	check(t, math.Inf(-1), 0.0, false)
 }

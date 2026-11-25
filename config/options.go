@@ -8,8 +8,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/eidon-go/core/retry"
 )
 
 // ErrInvalidEnvBootstrap is returned by New when an environment variable read
@@ -20,12 +18,10 @@ var ErrInvalidEnvBootstrap = errors.New("config: invalid bootstrap environment v
 // value.
 const DefaultKVTimeout = 5 * time.Second
 
-// Default watch reconnect backoff: 1s growing ×2 up to 30s, with jitter.
+// Default delays between reconnects of a failed watch.
 const (
-	defaultWatchInitialDelay = time.Second
-	defaultWatchMultiplier   = 2
-	defaultWatchMaxDelay     = 30 * time.Second
-	defaultWatchJitter       = 0.3
+	DefaultWatchInitialDelay = time.Second
+	DefaultWatchMaxDelay     = 30 * time.Second
 )
 
 // Option configures New.
@@ -34,12 +30,15 @@ type Option func(*options)
 type options struct {
 	defaults     map[string]any
 	files        []string
+	optional     map[string]bool
 	fsys         fs.FS
+	parsers      parsers
 	kv           KV
 	keys         []string
 	watchedKeys  []string
 	kvTimeout    time.Duration
-	watchBackoff retry.Policy
+	watchInitial time.Duration
+	watchMax     time.Duration
 	envLookup    func(string) (string, bool)
 	envPrefix    string
 	envBootstrap bool
@@ -48,15 +47,12 @@ type options struct {
 
 func newOptions(opts []Option) *options {
 	o := &options{ //nolint:exhaustruct_v5 // zero values mean "not set"
-		kvTimeout: DefaultKVTimeout,
-		watchBackoff: retry.Policy{ //nolint:exhaustruct_v5 // attempts are irrelevant: only Delay is used
-			InitialDelay: defaultWatchInitialDelay,
-			Multiplier:   defaultWatchMultiplier,
-			MaxDelay:     defaultWatchMaxDelay,
-			Jitter:       defaultWatchJitter,
-		},
-		envLookup: os.LookupEnv,
-		logger:    slog.Default(),
+		kvTimeout:    DefaultKVTimeout,
+		parsers:      parsers{".json": ParseJSON},
+		watchInitial: DefaultWatchInitialDelay,
+		watchMax:     DefaultWatchMaxDelay,
+		envLookup:    os.LookupEnv,
+		logger:       slog.Default(),
 	}
 
 	for _, opt := range opts {
@@ -66,10 +62,11 @@ func newOptions(opts []Option) *options {
 	return o
 }
 
-// WithDefaults sets the lowest-priority values. Nested maps are flattened to
-// dotted keys; dotted keys can also be used directly.
+// WithDefaults adds lowest-priority values. Nested maps are flattened to
+// dotted keys; dotted keys can also be used directly. Repeated calls merge,
+// later values winning.
 func WithDefaults(values map[string]any) Option {
-	return func(o *options) { o.defaults = values }
+	return func(o *options) { o.defaults = merge(o.defaults, flatten(values)) }
 }
 
 // WithFiles adds configuration files, merged in order (later files win). The
@@ -80,11 +77,42 @@ func WithFiles(paths ...string) Option {
 	return func(o *options) { o.files = append(o.files, paths...) }
 }
 
+// WithOptionalFiles is WithFiles for files that may be missing (e.g. a local
+// override such as config.local.yaml): a file that does not exist is
+// skipped. Any other error still fails New. Optional and required files are
+// merged in the order they were added.
+func WithOptionalFiles(paths ...string) Option {
+	return func(o *options) {
+		if o.optional == nil {
+			o.optional = map[string]bool{}
+		}
+
+		for _, p := range paths {
+			o.optional[p] = true
+		}
+
+		o.files = append(o.files, paths...)
+	}
+}
+
 // WithFS reads files from fsys instead of the OS file system (e.g. an
 // embed.FS or fstest.MapFS). Paths must then be valid fs.FS paths: slash
 // separated and relative.
 func WithFS(fsys fs.FS) Option {
 	return func(o *options) { o.fsys = fsys }
+}
+
+// WithParser registers p for files and KV keys with the given extensions
+// (case-insensitive, with the dot: ".yaml"; "" means no extension),
+// replacing a parser registered earlier. ".json" is built in (ParseJSON).
+//
+//	config.WithParser(yaml.Parse, ".yaml", ".yml", "") // or yaml.Option()
+func WithParser(p Parser, exts ...string) Option {
+	return func(o *options) {
+		for _, ext := range exts {
+			o.parsers[strings.ToLower(ext)] = p
+		}
+	}
 }
 
 // WithKV sets the KV backend for WithKeys and WithWatchedKeys. Config takes
@@ -113,11 +141,20 @@ func WithKVTimeout(d time.Duration) Option {
 	return func(o *options) { o.kvTimeout = d }
 }
 
-// WithWatchBackoff sets the delays between reconnects of a failed watch
-// (default: 1s growing ×2 up to 30s, with jitter). Only the delay fields of p
-// are used: a watch is retried until Shutdown.
-func WithWatchBackoff(p retry.Policy) Option {
-	return func(o *options) { o.watchBackoff = p }
+// WithWatchBackoff sets the delays between reconnects of a failed watch: the
+// first delay is initial, then it doubles up to maxDelay, each reduced by up
+// to 30% of random jitter. A watch is retried until Shutdown. Values <= 0
+// mean the defaults, DefaultWatchInitialDelay and DefaultWatchMaxDelay.
+func WithWatchBackoff(initial, maxDelay time.Duration) Option {
+	return func(o *options) {
+		if initial > 0 {
+			o.watchInitial = initial
+		}
+
+		if maxDelay > 0 {
+			o.watchMax = maxDelay
+		}
+	}
 }
 
 // WithEnvLookup replaces os.LookupEnv for the environment layer and

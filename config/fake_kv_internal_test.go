@@ -150,6 +150,14 @@ func (f *fakeKV) WaitForWatcher(key string, n int, timeout time.Duration) bool {
 	}
 }
 
+// WatcherCount returns the number of open watches on key.
+func (f *fakeKV) WatcherCount(key string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return len(f.watchers[key])
+}
+
 // SetData stores value (deep copy) under key WITHOUT pushing an event to
 // any subscriber. Used by tests that need to seed the data seen by a
 // future kv.Get (e.g. resync after a terminal stream error) without also

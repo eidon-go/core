@@ -50,13 +50,14 @@ func ExampleApp_Run() {
 		app.WithShutdownTimeout(10*time.Second),
 	)
 
-	a.Add(database{})                            // dependencies first
-	a.Add(httpServer{stop: make(chan struct{})}) // runners
+	// Dependencies first: telemetry is registered first so it is flushed last.
 	a.Add(lifecycle.ShutdownFunc(func(context.Context) error {
 		fmt.Println("flush telemetry")
 
 		return nil
 	}))
+	a.Add(database{})
+	a.Add(httpServer{stop: make(chan struct{})}) // runners
 
 	// In main this would be context.Background(); the app then stops on
 	// SIGINT or SIGTERM.
@@ -71,6 +72,6 @@ func ExampleApp_Run() {
 	// db: connected
 	// http: serving
 	// http: stopped
-	// flush telemetry
 	// db: closed
+	// flush telemetry
 }
