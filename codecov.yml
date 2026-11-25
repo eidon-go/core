@@ -21,7 +21,7 @@ coverage:
       default:
         # Lines changed in a PR must be covered at 80%.
         target: 80%
-        threshold: 5%
+        threshold: 0%
 
 # One flag per module (set in CI). CI tests only the modules a PR changes, so
 # the other flags keep their last coverage from main.

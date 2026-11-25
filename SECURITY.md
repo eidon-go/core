@@ -39,7 +39,8 @@ requested where appropriate. Reporters are credited in the advisory unless they 
 
 ## Dependencies
 
-Published modules are checked with [`govulncheck`](https://go.dev/doc/security/vuln/) in CI on
-every change. If a vulnerability affects only a third-party dependency, upgrading that dependency
+Published modules are checked with [`govulncheck`](https://go.dev/doc/security/vuln/) in CI: a
+pull request checks the modules it changes, and every push to `main` checks all published modules.
+If a vulnerability affects only a third-party dependency, upgrading that dependency
 in your own `go.mod` usually fixes it — modules here declare the minimum versions they need and
 do not force upgrades.
