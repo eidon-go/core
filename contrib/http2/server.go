@@ -35,21 +35,13 @@ type Server struct {
 	srv    *http.Server
 	tls    bool
 
-	mu       sync.Mutex
-	listener net.Listener // preset by WithListener, or opened by Start
-	started  bool
-	running  bool
-	closed   bool
+	// listener is preset by WithListener or opened by Start. It is written
+	// only in Start, which the lifecycle adapter orders before Serve and
+	// Drain.
+	listener net.Listener
+	addr     atomic.Pointer[net.Addr] // set once Start has succeeded
 
-	serving atomic.Bool
-
-	// The one graceful stop of srv, started by whichever comes first: the
-	// cancellation of Run's ctx or Shutdown.
-	stopOnce    sync.Once
-	cancelDrain context.CancelFunc
-	drained     chan struct{} // closed when the stop has finished
-	drainErr    error         // set before drained is closed
-	stoppedOnce sync.Once
+	lc *lifecycle.Server
 }
 
 var (
@@ -115,19 +107,31 @@ func New(cfg Config, handler http.Handler, opts ...Option) (*Server, error) {
 		protocols.SetHTTP2(useTLS)
 	}
 
-	var listener net.Listener
-	if o.listener != nil {
-		listener = &onceCloseListener{Listener: o.listener} //nolint:exhaustruct_v5 // once state starts at zero
+	return newServer(o, srv, logger, useTLS), nil
+}
+
+// newServer wires the Server to its lifecycle adapter.
+func newServer(o options, srv *http.Server, logger *slog.Logger, useTLS bool) *Server {
+	s := &Server{ //nolint:exhaustruct_v5 // listener and addr are set below / by Start
+		name:   o.name,
+		logger: logger,
+		srv:    srv,
+		tls:    useTLS,
 	}
 
-	return &Server{ //nolint:exhaustruct_v5 // run state starts at its zero value
-		name:     o.name,
-		logger:   logger,
-		srv:      srv,
-		tls:      useTLS,
-		listener: listener,
-		drained:  make(chan struct{}),
-	}, nil
+	if o.listener != nil {
+		s.listener = &onceCloseListener{Listener: o.listener} //nolint:exhaustruct_v5 // once state starts at zero
+	}
+
+	s.lc = lifecycle.NewServer(lifecycle.ServerFuncs{
+		Listen: s.listen,
+		Serve:  s.serve,
+		Drain:  s.drain,
+		Close:  srv.Close,
+		Logger: logger,
+	})
+
+	return s
 }
 
 // Name implements lifecycle.Namer.
@@ -136,45 +140,18 @@ func (s *Server) Name() string { return s.name }
 // Addr returns the address the server listens on, or nil before Start. With
 // port 0 in Config.Addr it reports the port that was picked.
 func (s *Server) Addr() net.Addr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.started {
-		return nil
+	if addr := s.addr.Load(); addr != nil {
+		return *addr
 	}
-
-	return s.listener.Addr()
-}
-
-// Start opens the listener (or takes the one from WithListener). Implements
-// lifecycle.Starter.
-func (s *Server) Start(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	switch {
-	case s.closed:
-		return ErrClosed
-	case s.started:
-		return ErrAlreadyStarted
-	}
-
-	if s.listener == nil {
-		var lc net.ListenConfig
-
-		ln, err := lc.Listen(ctx, "tcp", s.srv.Addr)
-		if err != nil {
-			return fmt.Errorf("http2: listen on %s: %w", s.srv.Addr, err)
-		}
-
-		s.listener = &onceCloseListener{Listener: ln} //nolint:exhaustruct_v5 // once state starts at zero
-	}
-
-	s.started = true
-	s.logger.InfoContext(ctx, "http server listening",
-		slog.String("addr", s.listener.Addr().String()), slog.Bool("tls", s.tls))
 
 	return nil
+}
+
+// Start opens the listener (or takes the one from WithListener). It returns
+// ErrAlreadyStarted when called twice and ErrClosed after Shutdown.
+// Implements lifecycle.Starter.
+func (s *Server) Start(ctx context.Context) error {
+	return wrap(s.lc.Start(ctx))
 }
 
 // Run serves requests until the server is stopped, then returns nil once the
@@ -187,52 +164,7 @@ func (s *Server) Start(ctx context.Context) error {
 // it; standalone code must too). Request contexts are not derived from ctx,
 // so cancelling it does not abort the requests being drained.
 func (s *Server) Run(ctx context.Context) error {
-	s.mu.Lock()
-
-	switch {
-	case s.closed:
-		s.mu.Unlock()
-
-		return nil
-	case !s.started:
-		s.mu.Unlock()
-
-		return ErrNotStarted
-	case s.running:
-		s.mu.Unlock()
-
-		return ErrAlreadyStarted
-	}
-
-	s.running = true
-	listener := s.listener
-	s.serving.Store(true)
-	s.mu.Unlock()
-
-	served := make(chan error, 1)
-
-	go func() { served <- s.serve(listener) }()
-
-	select {
-	case err := <-served:
-		if err != nil {
-			s.serving.Store(false)
-
-			return err
-		}
-
-		// Serve returns nil only once the stop has begun (Shutdown).
-		<-s.drained
-
-		return nil
-	case <-ctx.Done():
-	}
-
-	s.logger.InfoContext(ctx, "http server draining")
-	s.beginStop(ctx)
-	<-s.drained
-
-	return <-served
+	return wrap(s.lc.Run(ctx))
 }
 
 // Shutdown stops accepting connections and waits for in-flight requests to
@@ -245,104 +177,81 @@ func (s *Server) Run(ctx context.Context) error {
 // net/http; register a hook for them with WithHTTPServer and
 // http.Server.RegisterOnShutdown.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.mu.Lock()
-	s.closed = true
-	listener := s.listener
-	s.mu.Unlock()
-
-	s.beginStop(ctx)
-
-	var err error
-
-	// A finished stop wins over an expired ctx: select would pick at random
-	// when both are ready and report a clean stop as forced.
-	select {
-	case <-s.drained:
-		err = s.drainErr
-	default:
-		select {
-		case <-s.drained:
-			err = s.drainErr
-		case <-ctx.Done():
-			err = ctx.Err()
-
-			s.cancelDrain()
-			_ = s.srv.Close()
-			<-s.drained // prompt: the drain sees its ctx cancelled
-		}
+	if err := s.lc.Shutdown(ctx); err != nil {
+		return fmt.Errorf("http2: shutdown: %w", err)
 	}
 
-	// Serve closes the listener it was given; this one may never have been
-	// served (Shutdown after Start, before Run).
-	if listener != nil {
-		_ = listener.Close()
-	}
-
-	s.stoppedOnce.Do(func() {
-		s.logger.InfoContext(ctx, "http server stopped", slog.Bool("forced", err != nil))
-	})
-
-	return wrapShutdown(err)
+	return nil
 }
 
 // Healthcheck reports whether the server is accepting requests: nil while Run
 // serves, ErrNotServing before that and once the stop has begun. Implements
 // lifecycle.Healthchecker.
-func (s *Server) Healthcheck(context.Context) error {
-	if s.serving.Load() {
-		return nil
+func (s *Server) Healthcheck(ctx context.Context) error {
+	return s.lc.Healthcheck(ctx) //nolint:wrapcheck // ErrNotServing, re-exported by this package
+}
+
+// listen opens the listener unless WithListener preset one; called by Start.
+func (s *Server) listen(ctx context.Context) error {
+	if s.listener == nil {
+		var lc net.ListenConfig
+
+		ln, err := lc.Listen(ctx, "tcp", s.srv.Addr)
+		if err != nil {
+			return fmt.Errorf("listen on %s: %w", s.srv.Addr, err)
+		}
+
+		s.listener = &onceCloseListener{Listener: ln} //nolint:exhaustruct_v5 // once state starts at zero
 	}
 
-	return ErrNotServing
+	addr := s.listener.Addr()
+	s.addr.Store(&addr)
+	s.logger.InfoContext(ctx, "http server listening",
+		slog.String("addr", addr.String()), slog.Bool("tls", s.tls))
+
+	return nil
 }
 
-// beginStop starts the graceful stop of the http.Server once. The stop keeps
-// ctx's values but not its cancellation (Run's ctx is already cancelled);
-// Shutdown cancels it through cancelDrain when its own ctx is done.
-func (s *Server) beginStop(ctx context.Context) {
-	s.stopOnce.Do(func() {
-		s.serving.Store(false)
+// drain is the graceful stop: http.Server.Shutdown marks the server as
+// shutting down before it closes the listeners, so a Serve in progress
+// returns ErrServerClosed rather than an accept error. Serve closes the
+// listener it was given; this one may never have been served (Shutdown after
+// Start, before Run), so it is closed here too.
+func (s *Server) drain(ctx context.Context) error {
+	err := s.srv.Shutdown(ctx)
 
-		drainCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		s.cancelDrain = cancel
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
 
-		go func() {
-			// http.Server.Shutdown marks the server as shutting down before it
-			// closes the listeners, so a Serve in progress returns
-			// ErrServerClosed rather than an accept error.
-			if err := s.srv.Shutdown(drainCtx); err != nil && drainCtx.Err() == nil {
-				s.drainErr = err
-			}
-
-			cancel()
-			close(s.drained)
-		}()
-	})
+	return err //nolint:wrapcheck // wrapped by Shutdown
 }
 
-func (s *Server) serve(listener net.Listener) error {
+func (s *Server) serve() error {
 	var err error
 	if s.tls {
 		// Certificates come from TLSConfig, which ServeTLS also sets up for
 		// HTTP/2 negotiation.
-		err = s.srv.ServeTLS(listener, "", "")
+		err = s.srv.ServeTLS(s.listener, "", "")
 	} else {
-		err = s.srv.Serve(listener)
+		err = s.srv.Serve(s.listener)
 	}
 
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 
-	return fmt.Errorf("http2: serve: %w", err)
+	return fmt.Errorf("serve: %w", err)
 }
 
-func wrapShutdown(err error) error {
+// wrap prefixes an error of Start or Run, including the lifecycle state
+// errors, with the module name.
+func wrap(err error) error {
 	if err == nil {
 		return nil
 	}
 
-	return fmt.Errorf("http2: shutdown: %w", err)
+	return fmt.Errorf("http2: %w", err)
 }
 
 // onceCloseListener closes the listener once: Serve closes the listener it is

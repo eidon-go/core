@@ -1,25 +1,31 @@
 package http2
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/eidon-go/core/lifecycle"
+)
 
 var (
 	// ErrNilHandler is returned by New when the handler is nil.
 	ErrNilHandler = errors.New("http2: nil handler")
 
 	// ErrNotStarted is returned by Run when Start has not been called: the
-	// listener is opened in Start.
-	ErrNotStarted = errors.New("http2: Run called before Start")
+	// listener is opened in Start. It is lifecycle.ErrNotStarted.
+	ErrNotStarted = lifecycle.ErrNotStarted
 
 	// ErrAlreadyStarted is returned by a second Start or a second Run. A
-	// Server is single-use, like the http.Server it wraps.
-	ErrAlreadyStarted = errors.New("http2: server already started")
+	// Server is single-use, like the http.Server it wraps. It is
+	// lifecycle.ErrAlreadyStarted.
+	ErrAlreadyStarted = lifecycle.ErrAlreadyStarted
 
-	// ErrClosed is returned by Start after Shutdown.
-	ErrClosed = errors.New("http2: server closed")
+	// ErrClosed is returned by Start after Shutdown. It is lifecycle.ErrClosed.
+	ErrClosed = lifecycle.ErrClosed
 
 	// ErrNotServing is returned by Healthcheck while the server is not
-	// accepting requests: before Run, or once shutdown has begun.
-	ErrNotServing = errors.New("http2: server is not serving")
+	// accepting requests: before Run, or once shutdown has begun. It is
+	// lifecycle.ErrNotServing.
+	ErrNotServing = lifecycle.ErrNotServing
 
 	// ErrInvalidConfig is wrapped by every error from Config.Validate.
 	ErrInvalidConfig = errors.New("http2: invalid config")
