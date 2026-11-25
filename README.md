@@ -30,8 +30,45 @@ dependencies of what it actually imports.
 | core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — component contracts (`Resource`, `Starter`, `Runner`, `Healthchecker`, `Namer`), `Group`, contract tests in `lifecycletest`; [`app`](./app/README.md) — runs components: ordered start, signals, readiness, bounded reverse-order shutdown, lifecycle events; [`config`](./config/README.md) — layered configuration (defaults, files, KV, env) with hot reload and pluggable formats (JSON built in); [`retry`](./retry/README.md) — retry policies with backoff |
 | config/yaml | `github.com/eidon-go/core/config/yaml` | [YAML parser](./config/yaml/README.md) for `config` |
 
-More integration modules are added one by one; see [contrib guidelines](./docs/contrib-guidelines.md)
-for the conventions they follow.
+```sh
+go get github.com/eidon-go/core
+go get github.com/eidon-go/core/config/yaml   # only if you read YAML
+```
+
+## Status and roadmap
+
+The core API is a **v1 candidate**: it has been reviewed, but no version is tagged yet. The first
+releases are `v1.0.0` for the core and `config/yaml/v1.0.0`; until then, expect pseudo-versions.
+
+Integration modules are added one at a time, each as its own module with its own version, written
+to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `lifecycletest`:
+
+| Module | Purpose | State |
+|---|---|---|
+| `config/etcd` | etcd implementation of `config.KV` (watched keys, hot reload) | planned |
+| `otel` | OpenTelemetry SDK and exporters setup | planned |
+| `http2` | HTTP server and client | planned |
+| `grpc` | gRPC server and client | planned |
+| `jwt` | JWT signing and verification | planned |
+| `kafka` | Kafka producer and consumer | planned |
+| `nats` | NATS client and consumer | planned |
+| `rabbitmq` | RabbitMQ publisher and consumer | planned |
+| `redis` | Redis client | planned |
+| `sql` | `database/sql` and pgx (`sql/pgx`) with a shared transaction manager, typed `Get`/`Select`/`Exec` helpers and after-commit hooks; starts at v0.x | planned |
+
+Later, on the same scheme: adapters for `sql` such as `river` and `sqlx`.
+
+## Design principles
+
+- **Explicit wiring.** Components are built with constructors and registered with `app.Add`; there
+  is no container, no reflection and no global state.
+- **Dependency-free core.** Anything that needs a third-party library is a separate module.
+- **One lifecycle contract.** Every integration implements the same [`lifecycle`](./lifecycle/README.md)
+  interfaces, so start order, readiness, retries and graceful shutdown work the same everywhere.
+- **No struct binding.** Configuration is read through typed getters into structs you define;
+  integration `Config` structs are plain Go structs you can fill from any source.
+- **Constructors do no I/O.** Connecting and pinging happen in `Start`, under `app`'s control and
+  with a configurable `retry.Policy`.
 
 ## Example
 

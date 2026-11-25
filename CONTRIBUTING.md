@@ -24,6 +24,23 @@ The repository holds several Go modules, each with its own `go.mod` and its own 
 
 New integration modules follow the [contrib module guidelines](./docs/contrib-guidelines.md).
 
+### Adding an integration module
+
+The planned modules and their order are listed in the [roadmap](./README.md#status-and-roadmap).
+One module per pull request:
+
+1. Create `<name>/go.mod` with module path `github.com/eidon-go/core/<name>`, the minimum `go`
+   directive and minimum `require` versions; no `replace`. `make work` picks it up automatically.
+2. Implement it to the [guidelines](./docs/contrib-guidelines.md) and prove the lifecycle contract
+   with `lifecycletest.Resource` / `lifecycletest.Runner`.
+3. Container-based tests go to `internal/integration` (create the module if it does not exist yet).
+4. Add `<name>/README.md` and testable `Example*` functions, and move the module from the roadmap
+   to the **Modules** table in the root `README.md`.
+5. If the module needs core API that is not released yet, land and release that core change in a
+   separate pull request first: CI checks every module with `GOWORK=off` against the published
+   core.
+6. After merge, a maintainer releases the module (`<name>/vX.Y.Z`) with the Release workflow.
+
 ## Development setup
 
 Requirements:

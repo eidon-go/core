@@ -7,3 +7,11 @@ internal/integration/vendor
 # Local go workspace files — consuming services should use modules, not the workspace.
 go.work
 go.work.sum
+
+# Claude Code: shared config in .claude/ is committed (settings.json, agents/,
+# commands/, skills/, hooks/); personal and generated files are not.
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/plans/
+.claude/worktrees/
+.claude/*.local.*
