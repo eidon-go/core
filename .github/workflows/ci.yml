@@ -79,6 +79,9 @@ jobs:
     needs: discover
     if: needs.discover.outputs.any == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC upload to Codecov, in place of a stored token
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
@@ -137,7 +140,7 @@ jobs:
         if: matrix.leg == 'stable'
         uses: codecov/codecov-action@v7
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: ${{ matrix.module }}/coverage.out
           disable_search: true
           flags: ${{ steps.flag.outputs.flag }}
