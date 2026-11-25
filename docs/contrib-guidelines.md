@@ -12,7 +12,8 @@ reason in its README.
 - Depend on `github.com/eidon-go/core` for `lifecycle` and `retry` only. Never import `core/app`
   (components must work without it) or `core/config` (configuration comes in as a struct).
   Exception: `contrib/config/<backend>` modules (e.g. `contrib/config/etcd`) implement `config.KV` and therefore
-  import `config` — and nothing else from it.
+  import `config` — and nothing else from it; the rest of their rules are in
+  [11](#11-configuration-backends).
 - Format modules (e.g. `contrib/config/yaml`) expose a plain `func([]byte) (map[string]any, error)` and
   need not import core at all.
 - `require` the **minimum** versions you need (core and third-party), and the minimum `go`
@@ -113,3 +114,33 @@ Implement the [`lifecycle`](../lifecycle/README.md) contract and prove it with
 - Container-based tests live in `internal/integration` (not published).
 - README: install, minimal example, options table with defaults, lifecycle mapping (what
   Start/Run/Shutdown/Healthcheck do), registration-order notes. At least one `Example` test.
+
+## 11. Configuration backends
+
+`contrib/config/<backend>` modules (etcd, …) feed `config` and are used before anything else
+starts, so some of the rules above take a specific form for them. Every backend follows these:
+
+- **`config.KV`, not lifecycle.** A backend implements `config.KV` (`Get`, `Watch`, `Close`). It
+  is not a component: `config.Config` owns it (it is the `lifecycle.Runner`, runs the watches and
+  closes the backend) — so no `Namer`/`Starter`/`Runner` and no `lifecycletest` on the backend
+  itself. Prove the contract with `lifecycletest.Runner` on a `config.Config` backed by the real
+  store in `internal/integration`.
+- **The `Watch` contract** (see `config.KV`): the first event is the key's current state, then its
+  later states in order — intermediate ones may be skipped by a backend that only sees the latest
+  value, but never an older state, and every change is followed by the latest state; a failure is
+  an event with `Err`, after which the channel closes. A backend whose watches are registered
+  asynchronously takes the state and the start of the change stream from the same point of the
+  store's history.
+- **`New` does no I/O** (rule 2) — this includes authentication: create the client lazily on the
+  first `Get`/`Watch`, shared by concurrent callers, retried after a failure, closed by `Close`
+  even while it is being created.
+- **No `WithConnectRetry`** (rule 5): there is no `Start`. `config` reopens failed watches
+  (`WithWatchBackoff`); a read is retried only by the store's client, within
+  `config.WithKVTimeout`. `config.New` reads every key once and fails if the store cannot answer in
+  time — document that in the backend's README.
+- **OpenTelemetry** (rule 7) as for any client, defaulting to the globals at `New` time. The
+  global providers forward to the ones set later, so instrumentation starts working once the
+  `otel` setup runs — usually after the configuration it needs was read through this backend.
+  Leave long-lived watch streams out of tracing (their span would end only with the stream).
+- **Errors** for a missing key wrap `config.ErrKVKeyNotFound`; after `Close`, `Get` and `Watch` fail
+  with the module's `ErrClosed`.

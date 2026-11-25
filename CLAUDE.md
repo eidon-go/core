@@ -25,22 +25,23 @@ imports.
 
 ## Status and roadmap
 
-1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.2` is the latest tag.
-   Contrib modules are written against rc.N (cut rc.3… when a module needs core API changes —
+1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.3` is the latest tag.
+   Contrib modules are written against rc.N (cut rc.4… when a module needs core API changes —
    breaking changes are still allowed). Core `v1.0.0` + `contrib/config/yaml/v1.0.0` are tagged
    once the main contrib modules (`http2`, `config/etcd`, `otel`, `grpc`) have validated the API;
    contrib modules are tagged only after that, with their `require` bumped to core `v1.0.0`.
 2. **Phase 2 — contrib modules** (all under `contrib/`), one module per PR, in this order:
-   `http2` (server and `http2/client`; done) → `config/etcd` → `otel` → `grpc` → `jwt` → `kafka`
+   `http2` (server and `http2/client`; done) → `config/etcd` (done) → `otel` → `grpc` → `jwt` → `kafka`
    → `nats` → `rabbitmq` → `redis` → `sql` (as v0.x). Modules may declare a newer `go` than core
    when their dependencies need it (`contrib/http2` is go 1.26: otel ≥ v1.47 for a reachable
    vulnerability fix). Later, the same way: `river`, `sqlx` (adapters for `sql`). Each module is written to
    `docs/contrib-guidelines.md` and ships with `lifecycletest` checks, a README, `Example*` tests
    and its own tag. The checklist is in `CONTRIBUTING.md` ("Adding an integration module"); when
    a module lands, move it from the roadmap table to the Modules table in `README.md`.
-3. `internal/integration` (unpublished, testcontainers, a `replace` per module for local runs) is
-   created by the first module that needs it (`config/etcd` or `sql`); `make test-integration` and
-   the CI `integration` job activate once its `go.mod` exists.
+3. `internal/integration` (unpublished, testcontainers, a `replace` per module for local runs;
+   created with `config/etcd`) holds the container tests; `make test-integration` and the CI
+   `integration` job run them (Docker needed). A module that adds tests there adds its `require`
+   and `replace` to `internal/integration/go.mod`.
 
 ### Planned `sql` module (key decisions)
 
