@@ -58,3 +58,36 @@ func TestExtensions(t *testing.T) {
 
 	assert.ElementsMatch(t, []string{".yaml", ".yml", ""}, yaml.Extensions())
 }
+
+func TestParse_KeyCollisions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		doc  string
+		key  string
+	}{
+		{"int and float", "v:\n  1: a\n  1.0: b\n", `"v.1"`},
+		{"null and its string form", "v:\n  ~: a\n  \"<nil>\": b\n", `"v.<nil>"`},
+		{"inside a list", "list:\n  - {1: a, 1.0: b}\n", `"list[0].1"`},
+		{"deeply nested", "a:\n  b:\n    2: x\n    2.0: y\n", `"a.b.2"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Map iteration order varies; the collision must be reported
+			// whichever key comes first.
+			for range 20 {
+				doc, err := yaml.Parse([]byte(tt.doc))
+				require.ErrorIs(t, err, yaml.ErrKeyCollision)
+				require.ErrorContains(t, err, tt.key)
+				assert.Nil(t, doc)
+			}
+		})
+	}
+
+	_, err := yaml.Parse([]byte("v:\n  1: a\n  \"1\": b\n"))
+	require.ErrorContains(t, err, "decode yaml", "the decoder itself rejects 1 next to \"1\"")
+}
