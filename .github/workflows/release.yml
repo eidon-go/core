@@ -4,12 +4,12 @@ name: Release
 # renders notes from the module's own commits and creates the tag together
 # with the GitHub Release.
 #   core:        module ".",       version v1.2.0  ->  tag v1.2.0
-#   integration: module "config/etcd", version v1.0.0  ->  tag config/etcd/v1.0.0
+#   integration: module "contrib/config/etcd", version v1.0.0  ->  tag contrib/config/etcd/v1.0.0
 on:
   workflow_dispatch:
     inputs:
       module:
-        description: 'Module directory: "." for core, or e.g. "kafka", "config/etcd"'
+        description: 'Module directory: "." for core, or e.g. "contrib/kafka", "contrib/config/etcd"'
         required: true
         default: '.'
       version:

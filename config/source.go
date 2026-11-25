@@ -33,7 +33,7 @@ var errTrailingData = errors.New("unexpected data after the document")
 // Parser decodes one document into a map. Nested objects must be
 // map[string]any; values are scalars, slices or nested maps. An empty
 // document yields an empty map. Register parsers with WithParser; JSON is
-// built in (ParseJSON), YAML lives in github.com/eidon-go/core/config/yaml.
+// built in (ParseJSON), YAML lives in github.com/eidon-go/core/contrib/config/yaml.
 type Parser func(data []byte) (map[string]any, error)
 
 // ParseJSON is the built-in Parser for ".json". Numbers are decoded as
@@ -75,7 +75,7 @@ func (p parsers) parse(data []byte, name string) (map[string]any, error) {
 	if !ok {
 		hint := ""
 		if ext == "" || ext == ".yaml" || ext == ".yml" {
-			hint = " (for YAML use github.com/eidon-go/core/config/yaml)"
+			hint = " (for YAML use github.com/eidon-go/core/contrib/config/yaml)"
 		}
 
 		return nil, fmt.Errorf("%w: %q%s", ErrUnknownFormat, ext, hint)

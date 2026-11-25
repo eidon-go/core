@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/eidon-go/core/app"
-	"github.com/eidon-go/core/http2"
-	"github.com/eidon-go/core/http2/middleware"
+	"github.com/eidon-go/core/contrib/http2"
+	"github.com/eidon-go/core/contrib/http2/middleware"
 )
 
 // A server registered with app.App: the port is bound during start, the

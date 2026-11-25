@@ -12,7 +12,7 @@ Closes #
 
 ## Modules affected
 
-<!-- e.g. core (app, config), config/yaml -->
+<!-- e.g. core (app, config), contrib/http2 -->
 
 ## Checklist
 

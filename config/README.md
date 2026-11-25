@@ -5,7 +5,7 @@ in your own code and fill them with getters — there is no reflection-based str
 
 ```go
 cfg, err := config.New(ctx,
-    config.WithParser(yaml.Parse, yaml.Extensions()...), // github.com/eidon-go/core/config/yaml
+    config.WithParser(yaml.Parse, yaml.Extensions()...), // github.com/eidon-go/core/contrib/config/yaml
     config.WithFiles("config.yaml"),
     config.WithOptionalFiles("config.local.yaml"),
     config.WithDefaults(map[string]any{"http.timeout": "30s"}),
@@ -46,7 +46,7 @@ in; other formats are plugged in with `WithParser(p, exts...)`, where `""` means
 YAML lives in a separate module so the core stays dependency-free:
 
 ```go
-import "github.com/eidon-go/core/config/yaml"
+import "github.com/eidon-go/core/contrib/config/yaml"
 
 config.WithParser(yaml.Parse, yaml.Extensions()...) // .yaml, .yml and keys without extension
 ```
@@ -112,7 +112,7 @@ mistyped value.
 ## Remote configuration and hot reload
 
 A backend implements the small `config.KV` interface (`Get`, `Watch`, `Close`); the etcd v3
-backend lives in the separate module `github.com/eidon-go/core/config/etcd`.
+backend lives in the separate module `github.com/eidon-go/core/contrib/config/etcd`.
 
 ```go
 cfg, err := config.New(ctx,

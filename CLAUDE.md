@@ -14,7 +14,10 @@ anything under `internal/`, e.g. the future `internal/integration` test module).
 - `.` (core) — `lifecycle`, `app`, `config`, `retry`. **Standard library only (testify in tests
   only), Go 1.25+. Never add a third-party dependency here** — anything that needs one becomes its
   own module.
-- `config/yaml` — YAML parser for `config`; its own module so core stays dependency-free.
+- `contrib/<name>` — every other published module: integrations (`contrib/http2`, later
+  `contrib/otel`, `contrib/sql`, …) and config formats/backends (`contrib/config/yaml`,
+  `contrib/config/etcd`). Module path `github.com/eidon-go/core/contrib/<name>`, tags
+  `contrib/<name>/vX.Y.Z`. Everything outside `contrib/` and `internal/` is the core module.
 
 The point of the layout: the core is small and stable (v1), integrations change often and each
 has its own version, so a client's module graph contains only the dependencies of the modules it
@@ -22,16 +25,16 @@ imports.
 
 ## Status and roadmap
 
-1. **Done:** core + `config/yaml` merged, CI green. Core `v1.0.0-rc.1` is tagged. Contrib modules
-   are written against rc.N (cut rc.2, rc.3… when a module needs core API changes — breaking
-   changes are still allowed). Core `v1.0.0` + `config/yaml/v1.0.0` are tagged once the main
-   contrib modules (`http2`, `config/etcd`, `otel`, `grpc`) have validated the API; contrib modules
-   are tagged only after that, with their `require` bumped to core `v1.0.0`.
-2. **Phase 2 — contrib modules**, one module per PR, in this order: `http2` (server and
-   `http2/client`; done) → `config/etcd` → `otel` → `grpc` → `jwt` → `kafka` → `nats` → `rabbitmq` → `redis` →
-   `sql` (as v0.x). Modules may declare a newer `go` than core when their dependencies need it
-   (`http2` is go 1.26: otel ≥ v1.47 for a reachable vulnerability fix).
-   Later, the same way: `river`, `sqlx` (adapters for `sql`). Each module is written to
+1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.2` is the latest tag.
+   Contrib modules are written against rc.N (cut rc.3… when a module needs core API changes —
+   breaking changes are still allowed). Core `v1.0.0` + `contrib/config/yaml/v1.0.0` are tagged
+   once the main contrib modules (`http2`, `config/etcd`, `otel`, `grpc`) have validated the API;
+   contrib modules are tagged only after that, with their `require` bumped to core `v1.0.0`.
+2. **Phase 2 — contrib modules** (all under `contrib/`), one module per PR, in this order:
+   `http2` (server and `http2/client`; done) → `config/etcd` → `otel` → `grpc` → `jwt` → `kafka`
+   → `nats` → `rabbitmq` → `redis` → `sql` (as v0.x). Modules may declare a newer `go` than core
+   when their dependencies need it (`contrib/http2` is go 1.26: otel ≥ v1.47 for a reachable
+   vulnerability fix). Later, the same way: `river`, `sqlx` (adapters for `sql`). Each module is written to
    `docs/contrib-guidelines.md` and ships with `lifecycletest` checks, a README, `Example*` tests
    and its own tag. The checklist is in `CONTRIBUTING.md` ("Adding an integration module"); when
    a module lands, move it from the roadmap table to the Modules table in `README.md`.
@@ -41,9 +44,9 @@ imports.
 
 ### Planned `sql` module (key decisions)
 
-- One module with two packages: `sql` (database/sql) and `sql/pgx` (pgxpool). `sql/pgx` is a
-  package, not a module — scany v2 already pulls pgx/v5. Shared transaction core in
-  `sql/internal/txcore` (not public).
+- One module `contrib/sql` with two packages: `sql` (database/sql) and `sql/pgx` (pgxpool).
+  `sql/pgx` is a package, not a module — scany v2 already pulls pgx/v5. Shared transaction core
+  in `contrib/sql/internal/txcore` (not public).
 - Scanning: scany v2 behind a public `Scanner` interface (`WithScanner`). No sqlx (separate adapter
   module later), no squirrel dependency (helpers take a structural `Builder`; `sql.Dollar` /
   `sql.Question` structurally satisfy squirrel's `PlaceholderFormat`).
@@ -66,7 +69,8 @@ imports.
 
 ## Releases
 
-- Tags: core `vX.Y.Z`, modules `<dir>/vX.Y.Z`; major ≥ 2 uses a `/vN` path suffix.
+- Tags: core `vX.Y.Z`, modules `<dir>/vX.Y.Z` (`contrib/http2/v1.0.0`); major ≥ 2 uses a `/vN`
+  path suffix.
 - Released only via `.github/workflows/release.yml` (`workflow_dispatch` with `module` + `version`,
   from `main`): `scripts/release-check.sh` validates, then `GOWORK=off` tidy/build/test,
   per-module notes via `scripts/release-notes.sh` (git-cliff), `gh release create`.
@@ -97,12 +101,12 @@ Single test (run from the module's directory, since each module is separate):
 
 ```sh
 go test -race -run 'TestGroup_JoinsErrors' ./lifecycle/
-cd config/yaml && go test -race -run 'TestParse_Errors' ./...
+cd contrib/config/yaml && go test -race -run 'TestParse_Errors' ./...
 ```
 
 CI also builds/tests each published module with `GOWORK=off` against the *published* versions of
 its dependencies, on the minimum and current Go versions. A change spanning modules (e.g. core +
-config/yaml) must work both with and without `go.work`. CI rejects `replace` directives in
+contrib/http2) must work both with and without `go.work`. CI rejects `replace` directives in
 published `go.mod` files.
 
 ## Architecture
@@ -131,8 +135,8 @@ published `go.mod` files.
 Dependency rules between packages/modules (from `docs/contrib-guidelines.md`):
 `lifecycle` depends only on stdlib. Integration modules may import only `core/lifecycle` and
 `core/retry` — never `core/app` or `core/config` (config arrives as a plain `Config` struct).
-Exception: `config/<backend>` modules implement `config.KV` and import `config` only. Format
-modules (`config/yaml`) need not import core at all.
+Exception: `contrib/config/<backend>` modules implement `config.KV` and import `config` only.
+Format modules (`contrib/config/yaml`) need not import core at all.
 
 ## Conventions
 
@@ -149,5 +153,5 @@ adding a module.
 - Exported identifiers need doc comments; update the package/module `README.md` when behavior
   or usage changes.
 - Conventional Commits (`feat|fix|perf|refactor|docs|test|ci|chore`), scope = package or module
-  (`app`, `config/yaml`); breaking: `feat(app)!:` + `BREAKING CHANGE:` footer. PRs are
+  without the `contrib/` prefix (`app`, `http2`, `config/yaml`); breaking: `feat(app)!:` + `BREAKING CHANGE:` footer. PRs are
   squash-merged, so the PR title becomes the commit/release-notes entry (`cliff.toml`).

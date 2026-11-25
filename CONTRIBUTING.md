@@ -19,7 +19,8 @@ The repository holds several Go modules, each with its own `go.mod` and its own 
 
 - `.` — the core module (`github.com/eidon-go/core`): `lifecycle`, `app`, `config`, `retry`;
   standard library only.
-- `config/yaml`, … — integration and format modules, one per directory.
+- `contrib/<name>` — integration and format modules (`contrib/http2`, `contrib/config/yaml`, …),
+  one module per directory. Everything outside `contrib/` (and `internal/`) is the core module.
 - `internal/integration` — unpublished module with container-based integration tests.
 
 New integration modules follow the [contrib module guidelines](./docs/contrib-guidelines.md).
@@ -29,17 +30,17 @@ New integration modules follow the [contrib module guidelines](./docs/contrib-gu
 The planned modules and their order are listed in the [roadmap](./README.md#status-and-roadmap).
 One module per pull request:
 
-1. Create `<name>/go.mod` with module path `github.com/eidon-go/core/<name>`, the minimum `go`
+1. Create `contrib/<name>/go.mod` with module path `github.com/eidon-go/core/contrib/<name>`, the minimum `go`
    directive and minimum `require` versions; no `replace`. `make work` picks it up automatically.
 2. Implement it to the [guidelines](./docs/contrib-guidelines.md) and prove the lifecycle contract
    with `lifecycletest.Resource` / `lifecycletest.Runner`.
 3. Container-based tests go to `internal/integration` (create the module if it does not exist yet).
-4. Add `<name>/README.md` and testable `Example*` functions, and move the module from the roadmap
+4. Add `contrib/<name>/README.md` and testable `Example*` functions, and move the module from the roadmap
    to the **Modules** table in the root `README.md`.
 5. If the module needs core API that is not released yet, land and release that core change in a
    separate pull request first: CI checks every module with `GOWORK=off` against the published
    core.
-6. After merge, a maintainer releases the module (`<name>/vX.Y.Z`) with the Release workflow.
+6. After merge, a maintainer releases the module (`contrib/<name>/vX.Y.Z`) with the Release workflow.
 
 ## Development setup
 
@@ -97,7 +98,7 @@ docs(retry): document jitter
 ```
 
 - Types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `ci`, `chore`.
-- Scope: the package or module the change touches (`app`, `config`, `config/yaml`, …).
+- Scope: the package or module the change touches (`app`, `config`, `http2`, `config/yaml`, …) — for contrib modules without the `contrib/` prefix.
 - Breaking changes: `feat(app)!: ...` and a `BREAKING CHANGE:` footer describing the migration.
 
 Pull requests:
@@ -112,7 +113,7 @@ Pull requests:
 ## Releases
 
 Releases are made by maintainers per module with the *Release* workflow (tags `vX.Y.Z` for the
-core module, `<module>/vX.Y.Z` for the others), following [Semantic Versioning](https://semver.org).
+core module, `contrib/<name>/vX.Y.Z` for the others), following [Semantic Versioning](https://semver.org).
 
 ## License
 

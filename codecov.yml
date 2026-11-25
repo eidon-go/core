@@ -4,7 +4,7 @@ codecov:
   require_ci_to_pass: true
 
 # Go profiles carry import paths; map them onto repository paths
-# (github.com/eidon-go/core/config/yaml/x.go -> config/yaml/x.go).
+# (github.com/eidon-go/core/contrib/http2/x.go -> contrib/http2/x.go).
 fixes:
   - "github.com/eidon-go/core/::"
 

@@ -1,4 +1,4 @@
-module github.com/eidon-go/core/config/yaml
+module github.com/eidon-go/core/contrib/config/yaml
 
 go 1.25
 

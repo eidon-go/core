@@ -125,7 +125,7 @@ jobs:
         # always fetched fresh, only the tool itself is pinned.
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 
-      # Codecov flag names allow only [A-Za-z0-9_.-]: "config/yaml" -> "config-yaml".
+      # Codecov flag names allow only [A-Za-z0-9_.-]: "contrib/config/yaml" -> "contrib-config-yaml".
       # Flags are carried forward (codecov.yml), so modules a PR does not touch
       # keep their last coverage from main.
       - name: Coverage flag

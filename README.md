@@ -20,26 +20,27 @@ across HTTP, gRPC, databases and brokers. No reflection-based wiring, no DI cont
 
 The repository holds several Go modules. The **core** module is small, stable and has no
 third-party dependencies (Go 1.25+). Every integration and format (YAML, etcd, OpenTelemetry, HTTP,
-gRPC, Kafka, SQL, …) is a **separate module with its own version**, so a service pulls in only the
-dependencies of what it actually imports.
+gRPC, Kafka, SQL, …) is a **separate module with its own version** under `contrib/`, so a service
+pulls in only the dependencies of what it actually imports. Everything outside `contrib/` is the
+core.
 
 ## Modules
 
 | Module | Import path | Contents |
 |---|---|---|
 | core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — component contracts (`Resource`, `Starter`, `Runner`, `Healthchecker`, `Namer`), `Group`, contract tests in `lifecycletest`; [`app`](./app/README.md) — runs components: ordered start, signals, readiness, bounded shutdown (runners together, then the rest in reverse order), lifecycle events; [`config`](./config/README.md) — layered configuration (defaults, files, KV, env) with hot reload and pluggable formats (JSON built in); [`retry`](./retry/README.md) — retry policies with backoff |
-| config/yaml | `github.com/eidon-go/core/config/yaml` | [YAML parser](./config/yaml/README.md) for `config` |
-| http2 | `github.com/eidon-go/core/http2` | [HTTP server](./http2/README.md): HTTP/1.1 and HTTP/2 (TLS, h2c), graceful drain, probes, OpenTelemetry, panic recovery; [client](./http2/README.md#client) (`http2/client`): tuned transport, h2c, OpenTelemetry, RoundTripper wrappers |
+| contrib/config/yaml | `github.com/eidon-go/core/contrib/config/yaml` | [YAML parser](./contrib/config/yaml/README.md) for `config` |
+| contrib/http2 | `github.com/eidon-go/core/contrib/http2` | [HTTP server](./contrib/http2/README.md): HTTP/1.1 and HTTP/2 (TLS, h2c), graceful drain, probes, OpenTelemetry, panic recovery; [client](./contrib/http2/README.md#client) (`contrib/http2/client`): tuned transport, h2c, OpenTelemetry, RoundTripper wrappers |
 
 ```sh
 go get github.com/eidon-go/core
-go get github.com/eidon-go/core/config/yaml   # only if you read YAML
+go get github.com/eidon-go/core/contrib/config/yaml   # only if you read YAML
 ```
 
 ## Status and roadmap
 
 The core API is a **v1 candidate**, released as `v1.0.0-rc.N` while the first integration modules
-are written against it. `v1.0.0` for the core and `config/yaml/v1.0.0` follow once the main
+are written against it. `v1.0.0` for the core and `contrib/config/yaml/v1.0.0` follow once the main
 integration modules have validated the API; integration modules are tagged after that.
 
 Integration modules are added one at a time, each as its own module with its own version, written
@@ -47,15 +48,15 @@ to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `life
 
 | Module | Purpose | State |
 |---|---|---|
-| `config/etcd` | etcd implementation of `config.KV` (watched keys, hot reload) | planned |
-| `otel` | OpenTelemetry SDK and exporters setup | planned |
-| `grpc` | gRPC server and client | planned |
-| `jwt` | JWT signing and verification | planned |
-| `kafka` | Kafka producer and consumer | planned |
-| `nats` | NATS client and consumer | planned |
-| `rabbitmq` | RabbitMQ publisher and consumer | planned |
-| `redis` | Redis client | planned |
-| `sql` | `database/sql` and pgx (`sql/pgx`) with a shared transaction manager, typed `Get`/`Select`/`Exec` helpers and after-commit hooks; starts at v0.x | planned |
+| `contrib/config/etcd` | etcd implementation of `config.KV` (watched keys, hot reload) | planned |
+| `contrib/otel` | OpenTelemetry SDK and exporters setup | planned |
+| `contrib/grpc` | gRPC server and client | planned |
+| `contrib/jwt` | JWT signing and verification | planned |
+| `contrib/kafka` | Kafka producer and consumer | planned |
+| `contrib/nats` | NATS client and consumer | planned |
+| `contrib/rabbitmq` | RabbitMQ publisher and consumer | planned |
+| `contrib/redis` | Redis client | planned |
+| `contrib/sql` | `database/sql` and pgx (`contrib/sql/pgx`) with a shared transaction manager, typed `Get`/`Select`/`Exec` helpers and after-commit hooks; starts at v0.x | planned |
 
 Later, on the same scheme: adapters for `sql` such as `river` and `sqlx`.
 
@@ -104,7 +105,7 @@ package READMEs for the contracts.
 ## Versioning
 
 - Every module follows semver independently.
-- Core tags: `vX.Y.Z`. Integration tags: `<module>/vX.Y.Z` (e.g. `kafka/v1.4.0`, `config/etcd/v1.0.0`).
+- Core tags: `vX.Y.Z`. Integration tags: `contrib/<name>/vX.Y.Z` (e.g. `contrib/kafka/v1.4.0`, `contrib/config/etcd/v1.0.0`).
   Major versions ≥ 2 use the `/vN` module path suffix.
 - An integration's `go.mod` requires the **minimum** core version (and minimum dependency versions)
   it needs, so upgrading an integration never forces upgrades elsewhere.

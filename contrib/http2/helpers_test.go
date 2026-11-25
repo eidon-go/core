@@ -19,7 +19,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/eidon-go/core/http2"
+	"github.com/eidon-go/core/contrib/http2"
 )
 
 const testTimeout = 10 * time.Second
