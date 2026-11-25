@@ -73,34 +73,61 @@ func (s *store) lookup(key string) (any, bool) {
 // flatten converts a nested map to a flat map keyed by dotted paths. Slices
 // are kept as values. Nested empty maps contribute no keys; nil values are
 // kept (they mean "not set").
-func flatten(nested map[string]any) map[string]any {
+//
+// Two entries of one document that resolve to the same dotted key — a nested
+// "a": {"b": 1} next to a literal "a.b": 2, or the non-string key 1 next to
+// the string key "1" — are an error wrapping ErrKeyCollision: which of them
+// wins would depend on map iteration order.
+func flatten(nested map[string]any) (map[string]any, error) {
 	out := map[string]any{}
-	flattenInto(out, "", nested)
+	if err := flattenInto(out, "", nested); err != nil {
+		return nil, err
+	}
 
-	return out
+	return out, nil
 }
 
-func flattenInto(out map[string]any, prefix string, m map[string]any) {
+func flattenInto(out map[string]any, prefix string, m map[string]any) error {
 	for k, v := range m {
-		key := k
-		if prefix != "" {
-			key = prefix + "." + k
-		}
+		key := joinKey(prefix, k)
 
 		switch child := v.(type) {
 		case map[string]any:
-			flattenInto(out, key, child)
+			if err := flattenInto(out, key, child); err != nil {
+				return err
+			}
 		case map[any]any: // decoders produce this for non-string keys (e.g. 200: ok)
 			converted := make(map[string]any, len(child))
-			for ck, cv := range child {
-				converted[fmt.Sprint(ck)] = cv
+			for childKey, childValue := range child {
+				name := fmt.Sprint(childKey)
+				if _, dup := converted[name]; dup {
+					return fmt.Errorf("%w: %q", ErrKeyCollision, joinKey(key, name))
+				}
+
+				converted[name] = childValue
 			}
 
-			flattenInto(out, key, converted)
+			if err := flattenInto(out, key, converted); err != nil {
+				return err
+			}
 		default:
+			if _, dup := out[key]; dup {
+				return fmt.Errorf("%w: %q", ErrKeyCollision, key)
+			}
+
 			out[key] = v
 		}
 	}
+
+	return nil
+}
+
+func joinKey(prefix, key string) string {
+	if prefix == "" {
+		return key
+	}
+
+	return prefix + "." + key
 }
 
 // merge returns a new flat map with src layered over dst. A nil value in src
