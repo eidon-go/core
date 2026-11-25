@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +24,7 @@ import (
 // succeeded or Close was called, like grpc-go.
 type fakeServer struct {
 	hold        chan struct{} // in-flight work; nil means none
+	lingers     chan struct{} // if set, a cut-off Drain returns only once it is closed
 	grpcStyle   bool
 	serveErr    error // returned by Serve at once
 	stopErr     error // returned by Serve once the stop has begun
@@ -47,6 +49,38 @@ func newFakeServer() *fakeServer {
 
 func (f *fakeServer) endServe() { f.endOnce.Do(func() { close(f.end) }) }
 
+func (f *fakeServer) drain(ctx context.Context) error {
+	f.drains.Add(1)
+	f.stopOnce.Do(func() { close(f.stop) })
+
+	defer f.drainEnded.Store(true)
+
+	if f.drainPanic {
+		panic("drain boom")
+	}
+
+	if f.hold == nil {
+		if f.drainErr == nil {
+			f.endServe()
+		}
+
+		return f.drainErr
+	}
+
+	select {
+	case <-f.hold:
+		f.endServe()
+
+		return f.drainErr
+	case <-ctx.Done():
+		if f.lingers != nil {
+			<-f.lingers
+		}
+
+		return ctx.Err()
+	}
+}
+
 func (f *fakeServer) funcs() lifecycle.ServerFuncs {
 	return lifecycle.ServerFuncs{
 		Listen: func(context.Context) error { return nil },
@@ -69,33 +103,7 @@ func (f *fakeServer) funcs() lifecycle.ServerFuncs {
 
 			return f.stopErr
 		},
-		Drain: func(ctx context.Context) error {
-			f.drains.Add(1)
-			f.stopOnce.Do(func() { close(f.stop) })
-
-			defer f.drainEnded.Store(true)
-
-			if f.drainPanic {
-				panic("drain boom")
-			}
-
-			if f.hold == nil {
-				if f.drainErr == nil {
-					f.endServe()
-				}
-
-				return f.drainErr
-			}
-
-			select {
-			case <-f.hold:
-				f.endServe()
-
-				return f.drainErr
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		},
+		Drain: f.drain,
 		Close: func() error {
 			f.closes.Add(1)
 			f.stopOnce.Do(func() { close(f.stop) })
@@ -118,6 +126,27 @@ func runServer(ctx context.Context, s *lifecycle.Server) <-chan error {
 	go func() { done <- s.Run(ctx) }()
 
 	return done
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger writing from the drain
+// goroutine while the test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
 }
 
 func waitServing(t *testing.T, s *lifecycle.Server) {
@@ -346,7 +375,7 @@ func TestServer_Logs(t *testing.T) {
 func TestServer_LogsForcedStopFromShutdown(t *testing.T) {
 	t.Parallel()
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 
 	f := newFakeServer()
 	f.hold = make(chan struct{}) // never released
@@ -358,10 +387,65 @@ func TestServer_LogsForcedStopFromShutdown(t *testing.T) {
 	defer cancel()
 
 	require.ErrorIs(t, s.Shutdown(ctx), context.DeadlineExceeded)
-	require.NoError(t, s.Shutdown(t.Context()), "waits for the cut-off drain to return")
 
 	assert.Contains(t, buf.String(), `msg="server draining"`)
-	assert.Contains(t, buf.String(), `msg="server stopped" forced=true`)
+	require.Eventually(t, func() bool { return strings.Contains(buf.String(), `msg="server stopped" forced=true`) },
+		2*time.Second, time.Millisecond)
+}
+
+// Once the drain has been cut off, the stop is over: a later Shutdown
+// returns nil at once, even with an expired ctx and while the cut-off drain
+// is still returning (grpc-go's GracefulStop behind a stuck handler).
+func TestServer_ShutdownAfterCutoffReturnsAtOnce(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeServer()
+	f.hold = make(chan struct{})    // never released
+	f.lingers = make(chan struct{}) // the cut-off drain does not return yet
+
+	t.Cleanup(func() { close(f.lingers) })
+
+	s := newTestServer(f)
+	require.NoError(t, s.Start(t.Context()))
+
+	done := runServer(t.Context(), s)
+	waitServing(t, s)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	require.ErrorIs(t, s.Shutdown(ctx), context.DeadlineExceeded)
+	require.NoError(t, <-done)
+	assert.False(t, f.drainEnded.Load(), "the drain is still returning")
+
+	expired, expire := context.WithCancel(t.Context())
+	expire()
+
+	for range 10 {
+		require.NoError(t, s.Shutdown(expired))
+	}
+}
+
+// A waiting first Shutdown gets the Drain error even though the failed
+// Drain also cuts the stop off.
+func TestServer_FailedDrainErrorReachesWaitingShutdown(t *testing.T) {
+	t.Parallel()
+
+	errDrain := errors.New("hook failed")
+	f := newFakeServer()
+	f.grpcStyle = true
+	f.hold = make(chan struct{})
+	f.drainErr = errDrain
+	s := newTestServer(f)
+
+	shutdown := make(chan error, 1)
+
+	go func() { shutdown <- s.Shutdown(t.Context()) }()
+
+	<-s.Draining()
+	close(f.hold)
+
+	require.ErrorIs(t, <-shutdown, errDrain)
 }
 
 // A Serve that fails once the stop has begun does not make Run return
