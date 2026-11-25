@@ -41,22 +41,16 @@ type Server struct {
 	addr   string
 	tls    bool
 
-	mu       sync.Mutex
-	listener net.Listener // preset by WithListener, or opened by Start
-	started  bool
-	running  bool
-	closed   bool
+	// listener is preset by WithListener or opened by Start. It is written
+	// only in Start, which the lifecycle adapter orders before Serve and
+	// Drain.
+	listener  net.Listener
+	boundAddr atomic.Pointer[net.Addr] // set once Start has succeeded
 
-	serving atomic.Bool
+	mu     sync.Mutex
+	served bool // Serve has been called: no more RegisterService
 
-	// The one graceful stop of srv, started by whichever comes first: the
-	// cancellation of Run's ctx or Shutdown.
-	stopOnce    sync.Once
-	draining    chan struct{} // closed when the stop begins
-	drained     chan struct{} // closed when GracefulStop has returned
-	cutoffOnce  sync.Once
-	cutoff      chan struct{} // closed when Shutdown's ctx ended the drain
-	stoppedOnce sync.Once
+	lc *lifecycle.Server
 }
 
 var (
@@ -80,13 +74,10 @@ func New(cfg Config, opts ...Option) (*Server, error) {
 	}
 
 	s := &Server{ //nolint:exhaustruct_v5 // run state starts at its zero value
-		name:     o.name,
-		logger:   o.logger.With(slog.String("component", o.name)),
-		addr:     cmp.Or(cfg.Addr, DefaultAddr),
-		tls:      o.tlsConfig != nil,
-		draining: make(chan struct{}),
-		drained:  make(chan struct{}),
-		cutoff:   make(chan struct{}),
+		name:   o.name,
+		logger: o.logger.With(slog.String("component", o.name)),
+		addr:   cmp.Or(cfg.Addr, DefaultAddr),
+		tls:    o.tlsConfig != nil,
 	}
 
 	if o.listener != nil {
@@ -94,6 +85,21 @@ func New(cfg Config, opts ...Option) (*Server, error) {
 	}
 
 	s.srv = grpc.NewServer(serverOptions(cfg, o)...)
+
+	s.lc = lifecycle.NewServer(lifecycle.ServerFuncs{
+		Listen: s.listen,
+		Serve:  s.serve,
+		Drain:  s.drain,
+		// Stop runs in its own goroutine: GracefulStop keeps waiting —
+		// holding grpc.Server's lock, which Stop also needs — for handlers
+		// that ignore their cancelled context.
+		Close: func() error {
+			s.srv.Stop()
+
+			return nil
+		},
+		Logger: s.logger,
+	})
 
 	if o.health {
 		registerHealth(s, o.readiness)
@@ -134,14 +140,11 @@ func (s *Server) Name() string { return s.name }
 // Addr returns the address the server listens on, or nil before Start. With
 // port 0 in Config.Addr it reports the port that was picked.
 func (s *Server) Addr() net.Addr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.started {
-		return nil
+	if addr := s.boundAddr.Load(); addr != nil {
+		return *addr
 	}
 
-	return s.listener.Addr()
+	return nil
 }
 
 // RegisterService registers a service and its implementation, typically
@@ -153,7 +156,7 @@ func (s *Server) RegisterService(desc *grpc.ServiceDesc, impl any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.running {
+	if s.served {
 		panic("grpc: RegisterService called after Run")
 	}
 
@@ -176,35 +179,11 @@ func (s *Server) GetServiceInfo() map[string]grpc.ServiceInfo {
 	return s.srv.GetServiceInfo()
 }
 
-// Start opens the listener (or takes the one from WithListener). Implements
-// lifecycle.Starter.
+// Start opens the listener (or takes the one from WithListener). It returns
+// ErrAlreadyStarted when called twice and ErrClosed after Shutdown.
+// Implements lifecycle.Starter.
 func (s *Server) Start(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	switch {
-	case s.closed:
-		return ErrClosed
-	case s.started:
-		return ErrAlreadyStarted
-	}
-
-	if s.listener == nil {
-		var lc net.ListenConfig
-
-		ln, err := lc.Listen(ctx, "tcp", s.addr)
-		if err != nil {
-			return fmt.Errorf("grpc: listen on %s: %w", s.addr, err)
-		}
-
-		s.listener = &onceCloseListener{Listener: ln} //nolint:exhaustruct_v5 // once state starts at zero
-	}
-
-	s.started = true
-	s.logger.InfoContext(ctx, "grpc server listening",
-		slog.String("addr", s.listener.Addr().String()), slog.Bool("tls", s.tls))
-
-	return nil
+	return wrap(s.lc.Start(ctx))
 }
 
 // Run serves RPCs until the server is stopped, then returns nil once the
@@ -217,51 +196,7 @@ func (s *Server) Start(ctx context.Context) error {
 // contexts are not derived from ctx, so cancelling it does not abort the RPCs
 // being drained.
 func (s *Server) Run(ctx context.Context) error {
-	s.mu.Lock()
-
-	switch {
-	case s.closed:
-		s.mu.Unlock()
-
-		return nil
-	case !s.started:
-		s.mu.Unlock()
-
-		return ErrNotStarted
-	case s.running:
-		s.mu.Unlock()
-
-		return ErrAlreadyStarted
-	}
-
-	s.running = true
-	listener := s.listener
-	s.serving.Store(true)
-	s.mu.Unlock()
-
-	served := make(chan error, 1)
-
-	go func() { served <- s.serve(listener) }()
-
-	select {
-	case err := <-served:
-		s.serving.Store(false)
-
-		return err // nil only once a stop has finished: Serve waits for it
-	case <-s.cutoff:
-		return nil
-	case <-ctx.Done():
-	}
-
-	s.logger.InfoContext(ctx, "grpc server draining")
-	s.beginStop()
-
-	select {
-	case err := <-served:
-		return err
-	case <-s.cutoff:
-		return nil
-	}
+	return wrap(s.lc.Run(ctx))
 }
 
 // Shutdown stops accepting connections and waits for in-flight RPCs to
@@ -270,42 +205,7 @@ func (s *Server) Run(ctx context.Context) error {
 // ctx.Err(). Shutdown shares the stop that a cancelled Run has begun. It is
 // idempotent and safe without Start or Run. Implements lifecycle.Resource.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.mu.Lock()
-	s.closed = true
-	listener := s.listener
-	s.mu.Unlock()
-
-	s.beginStop()
-
-	var err error
-
-	// A finished stop wins over an expired ctx: select would pick at random
-	// when both are ready and report a clean stop as forced.
-	select {
-	case <-s.drained:
-	case <-s.cutoff:
-	default:
-		select {
-		case <-s.drained:
-		case <-s.cutoff:
-		case <-ctx.Done():
-			err = ctx.Err()
-
-			s.forceStop()
-		}
-	}
-
-	// Serve closes the listener it was given; this one may never have been
-	// served (Shutdown after Start, before Run).
-	if listener != nil {
-		_ = listener.Close()
-	}
-
-	s.stoppedOnce.Do(func() {
-		s.logger.InfoContext(ctx, "grpc server stopped", slog.Bool("forced", err != nil))
-	})
-
-	if err != nil {
+	if err := s.lc.Shutdown(ctx); err != nil {
 		return fmt.Errorf("grpc: shutdown: %w", err)
 	}
 
@@ -315,56 +215,73 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Healthcheck reports whether the server is accepting RPCs: nil while Run
 // serves, ErrNotServing before that and once the stop has begun. Implements
 // lifecycle.Healthchecker.
-func (s *Server) Healthcheck(context.Context) error {
-	if s.serving.Load() {
-		return nil
-	}
-
-	return ErrNotServing
+func (s *Server) Healthcheck(ctx context.Context) error {
+	return s.lc.Healthcheck(ctx) //nolint:wrapcheck // ErrNotServing, re-exported by this package
 }
 
 // Draining returns a channel that is closed when the stop begins (Run's ctx
 // cancelled or Shutdown called). Long-lived streaming handlers (subscriptions,
 // watches) select on it to end their RPC, so that the drain finishes before
 // the Shutdown deadline instead of being forced.
-func (s *Server) Draining() <-chan struct{} { return s.draining }
+func (s *Server) Draining() <-chan struct{} { return s.lc.Draining() }
 
-// beginStop starts the graceful stop of the grpc.Server once.
-func (s *Server) beginStop() {
-	s.stopOnce.Do(func() {
-		s.serving.Store(false)
-		close(s.draining)
+// listen opens the listener unless WithListener preset one; called by Start.
+func (s *Server) listen(ctx context.Context) error {
+	if s.listener == nil {
+		var lc net.ListenConfig
 
-		go func() {
-			s.srv.GracefulStop()
-			close(s.drained)
-		}()
-	})
+		ln, err := lc.Listen(ctx, "tcp", s.addr)
+		if err != nil {
+			return fmt.Errorf("listen on %s: %w", s.addr, err)
+		}
+
+		s.listener = &onceCloseListener{Listener: ln} //nolint:exhaustruct_v5 // once state starts at zero
+	}
+
+	addr := s.listener.Addr()
+	s.boundAddr.Store(&addr)
+	s.logger.InfoContext(ctx, "grpc server listening",
+		slog.String("addr", addr.String()), slog.Bool("tls", s.tls))
+
+	return nil
 }
 
-// forceStop closes every connection and ends the wait of Run and Shutdown,
-// once. Stop runs in the background: it closes the connections right away,
-// but GracefulStop keeps waiting — holding grpc.Server's lock, which Stop then
-// also needs — for handlers that ignore their cancelled context, so neither
-// Stop nor Serve may return until those handlers do.
-func (s *Server) forceStop() {
-	s.cutoffOnce.Do(func() {
-		go s.srv.Stop()
+// drain is the graceful stop: GracefulStop, then the listener, which Serve
+// closes only if it ran (Shutdown after Start, before Run).
+func (s *Server) drain(ctx context.Context) error {
+	err := lifecycle.DrainBlocking(s.srv.GracefulStop)(ctx)
 
-		close(s.cutoff)
-	})
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
+
+	return err
 }
 
 // serve runs grpc.Server.Serve. Once a stop has begun, Serve returns only
 // after it has finished, with nil (or ErrServerStopped when the stop came
 // before Serve).
-func (s *Server) serve(listener net.Listener) error {
-	err := s.srv.Serve(listener)
+func (s *Server) serve() error {
+	s.mu.Lock()
+	s.served = true
+	s.mu.Unlock()
+
+	err := s.srv.Serve(s.listener)
 	if err == nil || errors.Is(err, grpc.ErrServerStopped) {
 		return nil
 	}
 
-	return fmt.Errorf("grpc: serve: %w", err)
+	return fmt.Errorf("serve: %w", err)
+}
+
+// wrap prefixes an error of Start or Run, including the lifecycle state
+// errors, with the module name.
+func wrap(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("grpc: %w", err)
 }
 
 // onceCloseListener closes the listener once: Serve closes the listener it is
