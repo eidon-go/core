@@ -10,3 +10,8 @@ updates:
       interval: weekly
     commit-message:
       prefix: ci
+    # Actions are pinned to commit SHAs with a version comment; Dependabot
+    # updates both. One weekly PR for all of them.
+    groups:
+      actions:
+        patterns: [ "*" ]

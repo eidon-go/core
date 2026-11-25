@@ -1,8 +1,18 @@
 # core
 
 [![CI](https://github.com/eidon-go/core/actions/workflows/ci.yml/badge.svg)](https://github.com/eidon-go/core/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/eidon-go/core/graph/badge.svg)](https://codecov.io/gh/eidon-go/core)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=eidon-go_core&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=eidon-go_core)
+[![Go Report Card](https://goreportcard.com/badge/github.com/eidon-go/core)](https://goreportcard.com/report/github.com/eidon-go/core)
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/eidon-go/core.svg)](https://pkg.go.dev/github.com/eidon-go/core)
+[![Release](https://img.shields.io/github/v/tag/eidon-go/core?filter=v*&sort=semver&label=release)](https://github.com/eidon-go/core/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/eidon-go/core)](./go.mod)
+
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/eidon-go/core/badge)](https://scorecard.dev/viewer/?uri=github.com/eidon-go/core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-fe5196.svg)](https://www.conventionalcommits.org)
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-3.0-4baaaa.svg)](./CODE_OF_CONDUCT.md)
 
 An explicit-wiring, stdlib-first kit for production Go services: one lifecycle contract that every
 integration follows, so telemetry, health, retries, logging and graceful shutdown behave the same

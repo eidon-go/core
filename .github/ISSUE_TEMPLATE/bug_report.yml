@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [ bug ]
+body:
+  - type: input
+    id: module
+    attributes:
+      label: Module and version
+      description: Module import path and version from your go.mod.
+      placeholder: github.com/eidon-go/core v0.3.0
+    validations:
+      required: true
+  - type: input
+    id: go
+    attributes:
+      label: Go version
+      description: Output of `go version`.
+      placeholder: go version go1.25.4 linux/amd64
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest program or test that shows the problem.
+      render: go
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, errors, stack traces
+      render: text

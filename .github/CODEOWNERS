@@ -1,0 +1,4 @@
+# Code owners are requested for review automatically; the main branch ruleset
+# requires an approval from them before merge.
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+* @sergeyslonimsky

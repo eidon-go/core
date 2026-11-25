@@ -26,7 +26,7 @@ jobs:
       any: ${{ steps.modules.outputs.any }}
       integration: ${{ steps.modules.outputs.integration }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -79,6 +79,9 @@ jobs:
     needs: discover
     if: needs.discover.outputs.any == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC upload to Codecov, in place of a stored token
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
@@ -91,9 +94,9 @@ jobs:
       run:
         working-directory: ${{ matrix.module }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ matrix.go }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
@@ -109,7 +112,7 @@ jobs:
 
       - name: Lint
         if: matrix.leg == 'stable'
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
           working-directory: ${{ matrix.module }}
@@ -121,13 +124,26 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+      # Codecov flag names allow only [A-Za-z0-9_.-]: "config/yaml" -> "config-yaml".
+      # Flags are carried forward (codecov.yml), so modules a PR does not touch
+      # keep their last coverage from main.
+      - name: Coverage flag
+        id: flag
+        if: matrix.leg == 'stable'
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          if [[ "$MODULE" == "." ]]; then flag=core; else flag=${MODULE//\//-}; fi
+          echo "flag=$flag" >> "$GITHUB_OUTPUT"
+
       - name: Upload coverage
         if: matrix.leg == 'stable'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: ${{ matrix.module }}/coverage.out
-          flags: ${{ matrix.module == '.' && 'core' || matrix.module }}
+          disable_search: true
+          flags: ${{ steps.flag.outputs.flag }}
           fail_ci_if_error: false
 
   # All modules together through a generated go.work: catches a change split
@@ -137,9 +153,9 @@ jobs:
     needs: discover
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           cache: false
@@ -158,15 +174,15 @@ jobs:
     if: needs.discover.outputs.integration == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: internal/integration/go.mod
           cache-dependency-path: internal/integration/go.sum
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
           working-directory: internal/integration
@@ -176,3 +192,24 @@ jobs:
         env:
           GOWORK: off
         run: make test-integration
+
+  # The single required status check for main (branch ruleset). Matrix job
+  # names depend on the modules a PR touches and jobs may be skipped, so the
+  # ruleset requires this job instead: it fails if any job failed or was
+  # cancelled, and passes when they succeeded or were skipped.
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [ discover, module, workspace, integration ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for r in $RESULTS; do
+            if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
+              exit 1
+            fi
+          done
