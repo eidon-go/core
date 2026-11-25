@@ -2,7 +2,6 @@ package config
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"maps"
 	"math/rand/v2"
@@ -45,6 +44,17 @@ func (b backoff) delay(failures int) time.Duration {
 	return d - time.Duration(float64(d)*watchJitter*rand.Float64()) //nolint:gosec // jitter needs no crypto source
 }
 
+// resets reports whether a watch stream that ended was healthy, so the next
+// reconnect starts from the initial delay again: it delivered a change after
+// its initial state, or it stayed open for at least the maximum delay after
+// that state. The initial state alone does not count — every watch delivers
+// one, including one that a server cancels right after it opens — nor does
+// the wait for it (a cluster without quorum may hang every read until the KV
+// timeout).
+func (b backoff) resets(changed bool, lasted time.Duration) bool {
+	return changed || lasted >= b.max
+}
+
 // watcher keeps the last parsed document of every watched key and publishes
 // base merged with all of them on every change. Keeping per-key state means
 // a key removed from a document disappears from the snapshot on the next
@@ -82,13 +92,13 @@ func (w *watcher) run(ctx context.Context) {
 }
 
 // watchKey streams changes of key and reconnects with backoff when the stream
-// ends. The backoff grows while streams keep failing without delivering
-// anything and resets once a stream delivers an event.
+// ends. The backoff grows while streams keep failing and resets after a
+// healthy one (see backoff.resets).
 func (w *watcher) watchKey(ctx context.Context, key string) {
 	failures := 0
 
 	for {
-		if w.stream(ctx, key) {
+		if w.backoff.resets(w.stream(ctx, key)) {
 			failures = 0
 		}
 
@@ -112,13 +122,14 @@ func (w *watcher) watchKey(ctx context.Context, key string) {
 	}
 }
 
-// stream opens a watch on key, re-reads the key to catch up on changes made
-// before the watch was established (since New, or while disconnected), then
-// applies events until the channel closes or ctx is done. It reports whether
-// at least one event was applied.
-func (w *watcher) stream(ctx context.Context, key string) bool {
-	// The watch lives only as long as this stream: returning (error event,
-	// failed resync) cancels it.
+// stream opens a watch on key and applies its events until the channel
+// closes, an error event arrives or ctx is done. The first event is the key's
+// current state (see KV.Watch): it brings the values up to date after New or
+// a reconnect. stream reports whether a change arrived after that first
+// event and how long the watch was open after it (zero if it never reported
+// its state): the wait for the initial state does not count as healthy.
+func (w *watcher) stream(ctx context.Context, key string) (bool, time.Duration) {
+	// The watch lives only as long as this stream: returning cancels it.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -126,16 +137,15 @@ func (w *watcher) stream(ctx context.Context, key string) bool {
 	if ch == nil {
 		w.logger.WarnContext(ctx, "config: KV returned no watch channel", slog.String("key", key))
 
-		return false
+		return false, 0
 	}
 
-	if !w.resync(ctx, key) {
-		// Values may be stale: reconnect (with backoff) instead of waiting
-		// for the next event.
-		return false
+	if !w.initial(ctx, key, ch) {
+		return false, 0
 	}
 
-	applied := false
+	opened := time.Now()
+	changed := false
 
 	for {
 		var (
@@ -145,22 +155,70 @@ func (w *watcher) stream(ctx context.Context, key string) bool {
 
 		select {
 		case <-ctx.Done():
-			return applied
+			return changed, time.Since(opened)
 		case ev, ok = <-ch:
 			if !ok {
-				return applied
+				return changed, time.Since(opened)
 			}
 		}
 
 		if ev.Err != nil {
 			w.logger.WarnContext(ctx, "config: watch error", slog.String("key", key), slog.Any("err", ev.Err))
 
-			return applied
+			return changed, time.Since(opened)
 		}
 
 		if w.handle(ctx, key, ev) {
-			applied = true
+			changed = true
 		}
+	}
+}
+
+// initial waits for the first event of a watch — the key's current state —
+// and applies it. Like every KV read it is bounded by the KV timeout; a watch
+// that cannot report the state in time (or reports an error) is reopened with
+// backoff, since the values may be stale.
+func (w *watcher) initial(ctx context.Context, key string, ch <-chan KVEvent) bool {
+	var timeout <-chan time.Time
+
+	if w.timeout > 0 {
+		timer := time.NewTimer(w.timeout)
+		defer timer.Stop()
+
+		timeout = timer.C
+	}
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timeout:
+		w.logger.WarnContext(ctx, "config: watch did not report the key's state in time",
+			slog.String("key", key), slog.Duration("timeout", w.timeout))
+
+		return false
+	case ev, ok := <-ch:
+		if !ok {
+			return false
+		}
+
+		if ev.Err != nil {
+			w.logger.WarnContext(ctx, "config: watch error", slog.String("key", key), slog.Any("err", ev.Err))
+
+			return false
+		}
+
+		if ev.Type != KVEventPut && ev.Type != KVEventDelete {
+			// Breaks the KV.Watch contract: without a state the values
+			// may be stale, so the watch is reopened.
+			w.logger.ErrorContext(ctx, "config: watch did not start with the key's state",
+				slog.String("key", key), slog.Int("type", int(ev.Type)))
+
+			return false
+		}
+
+		w.handle(ctx, key, ev)
+
+		return true
 	}
 }
 
@@ -186,27 +244,6 @@ func (w *watcher) handle(ctx context.Context, key string, ev KVEvent) bool {
 	default:
 		return false
 	}
-}
-
-// resync re-reads key and applies it; it reports whether that succeeded.
-func (w *watcher) resync(ctx context.Context, key string) bool {
-	parsed, err := loadKey(ctx, w.kv, w.parsers, w.timeout, key)
-	if errors.Is(err, ErrKVKeyNotFound) {
-		// Deleted while disconnected: same as a delete event.
-		parsed, err = map[string]any{}, nil
-	}
-
-	if err != nil {
-		if ctx.Err() == nil {
-			w.logger.WarnContext(ctx, "config: resync failed", slog.String("key", key), slog.Any("err", err))
-		}
-
-		return false
-	}
-
-	w.apply(key, parsed)
-
-	return true
 }
 
 // apply stores the document of key and publishes. Publishing under the lock

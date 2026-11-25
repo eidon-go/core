@@ -21,7 +21,7 @@
 //
 // # Remote configuration
 //
-// A KV backend (e.g. github.com/eidon-go/core/config/etcd) is passed with
+// A KV backend (e.g. github.com/eidon-go/core/contrib/config/etcd) is passed with
 // WithKV. Keys passed with WithWatchedKeys are watched for changes; the
 // watcher runs in Config.Run, so a Config with watched keys must be run,
 // typically by registering it with app.App:

@@ -381,7 +381,7 @@ func TestConfig_RunAndShutdownWithoutKV(t *testing.T) {
 
 	go func() { done <- cfg.Run(t.Context()) }()
 
-	time.Sleep(10 * time.Millisecond)
+	// Shutdown may come before or after Run started: either way Run returns.
 	require.NoError(t, cfg.Shutdown(t.Context()))
 	require.NoError(t, <-done)
 	require.NoError(t, cfg.Shutdown(t.Context()), "Shutdown is idempotent")

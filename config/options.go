@@ -14,8 +14,8 @@ import (
 // by WithEnvBootstrap has an invalid value.
 var ErrInvalidEnvBootstrap = errors.New("config: invalid bootstrap environment variable")
 
-// DefaultKVTimeout bounds every KV read unless WithKVTimeout sets another
-// value.
+// DefaultKVTimeout bounds every KV read, and the wait for the initial state
+// of a watch, unless WithKVTimeout sets another value.
 const DefaultKVTimeout = 5 * time.Second
 
 // Default delays between reconnects of a failed watch.
@@ -135,8 +135,9 @@ func WithWatchedKeys(keys ...string) Option {
 	return func(o *options) { o.watchedKeys = append(o.watchedKeys, keys...) }
 }
 
-// WithKVTimeout bounds every KV read (default DefaultKVTimeout). Values <= 0
-// mean no limit other than the caller's context.
+// WithKVTimeout bounds every KV read and the wait for the initial state of a
+// watch (default DefaultKVTimeout). Values <= 0 mean no limit other than the
+// caller's context.
 func WithKVTimeout(d time.Duration) Option {
 	return func(o *options) { o.kvTimeout = d }
 }

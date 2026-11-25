@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,9 +128,11 @@ func TestKV_WatchedKeys(t *testing.T) {
 	kv.SetData("/flags.json", []byte(`{"limit": 5, "old": true}`))
 	kv.SetData("/more.json", []byte(`{"extra": 1}`))
 
+	logs := &logRecorder{}
+
 	cfg, err := New(t.Context(),
 		WithKV(kv), WithKeys("/static.json"), WithWatchedKeys("/flags.json", "/more.json"),
-		quiet(), fastBackoff(),
+		WithLogger(slog.New(logs)), fastBackoff(),
 		WithEnvLookup(func(name string) (string, bool) { return "info", name == "LEVEL" }),
 	)
 	require.NoError(t, err)
@@ -150,9 +154,12 @@ func TestKV_WatchedKeys(t *testing.T) {
 	kv.Set("/flags.json", []byte(`{"limit": null}`))
 	eventually(t, func() bool { return limit() == 1 })
 
+	kv.Set("/flags.json", []byte(`{"limit": 4}`))
+	eventually(t, func() bool { return limit() == 4 })
+
 	kv.Set("/flags.json", []byte(`{"limit": [`))
-	time.Sleep(20 * time.Millisecond)
-	assert.Equal(t, 1, limit(), "an invalid document keeps the previous values")
+	logs.waitFor(t, "config: invalid watched document, keeping previous values")
+	assert.Equal(t, 4, limit(), "an invalid document keeps the previous values")
 
 	kv.Set("/flags.json", []byte(`{"limit": 7}`))
 	eventually(t, func() bool { return limit() == 7 })
@@ -163,8 +170,7 @@ func TestKV_WatchedKeys(t *testing.T) {
 }
 
 // N3: a change made between New and Run (while other components start) must
-// not be lost, even with a backend that only delivers changes made after
-// Watch.
+// not be lost: the watch's initial state carries it.
 func TestKV_ChangeBetweenNewAndRun(t *testing.T) {
 	t.Parallel()
 
@@ -180,7 +186,7 @@ func TestKV_ChangeBetweenNewAndRun(t *testing.T) {
 	eventually(t, func() bool { return Get[int](cfg, "v") == 2 })
 }
 
-func TestKV_WatchReconnectsAndResyncs(t *testing.T) {
+func TestKV_WatchReconnectsAndCatchesUp(t *testing.T) {
 	t.Parallel()
 
 	kv := newFakeKV()
@@ -192,9 +198,10 @@ func TestKV_WatchReconnectsAndResyncs(t *testing.T) {
 	startRun(t, cfg)
 	require.True(t, kv.WaitForWatcher("/flags.json", 1, time.Second))
 
-	// The stream fails; meanwhile the value changes without an event.
-	kv.SetError("/flags.json", errors.New("connection lost"))
+	// The value changes without an event, then the stream fails: the new
+	// watch starts with the changed value.
 	kv.SetData("/flags.json", []byte(`{"v": 2}`))
+	kv.SetError("/flags.json", errors.New("connection lost"))
 
 	eventually(t, func() bool { return Get[int](cfg, "v") == 2 })
 	require.True(t, kv.WaitForWatcher("/flags.json", 1, time.Second), "watch is re-established")
@@ -202,10 +209,187 @@ func TestKV_WatchReconnectsAndResyncs(t *testing.T) {
 	kv.Set("/flags.json", []byte(`{"v": 3}`))
 	eventually(t, func() bool { return Get[int](cfg, "v") == 3 })
 
-	// Deleted while disconnected: the resync sees "not found", like a delete.
+	// Deleted while disconnected: the new watch starts with a delete.
+	kv.DeleteData("/flags.json")
 	kv.SetError("/flags.json", errors.New("connection lost"))
-	kv.Delete("/flags.json")
 	eventually(t, func() bool { return Get[int](cfg, "v") == 0 })
+}
+
+// The watcher never reads a key itself after New: the initial state of each
+// watch brings the values up to date, so no read can race the watch and put
+// an older value back.
+func TestKV_WatcherDoesNotReadAfterNew(t *testing.T) {
+	t.Parallel()
+
+	kv := newFakeKV()
+	kv.SetData("/flags.json", []byte(`{"v": 1}`))
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(), quiet(), fastBackoff())
+	require.NoError(t, err)
+
+	reads := kv.GetCalls()
+
+	startRun(t, cfg)
+	require.True(t, kv.WaitForWatcher("/flags.json", 1, time.Second))
+
+	kv.Set("/flags.json", []byte(`{"v": 2}`))
+	eventually(t, func() bool { return Get[int](cfg, "v") == 2 })
+
+	kv.SetData("/flags.json", []byte(`{"v": 3}`))
+	kv.SetError("/flags.json", errors.New("connection lost"))
+	eventually(t, func() bool { return Get[int](cfg, "v") == 3 })
+
+	assert.Equal(t, reads, kv.GetCalls())
+}
+
+// Watches that fail right after their initial state are not healthy: the
+// reconnect delay keeps growing instead of starting over every time.
+func TestKV_BackoffGrowsWhenWatchesOnlyReportState(t *testing.T) {
+	t.Parallel()
+
+	kv := &scriptedKV{fakeKV: newFakeKV(), script: func(state KVEvent) []KVEvent {
+		return []KVEvent{state, {Err: errors.New("cancelled by the server")}}
+	}}
+	kv.SetData("/flags.json", []byte(`{"v": 1}`))
+
+	logs := &logRecorder{}
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(),
+		WithLogger(slog.New(logs)), WithWatchBackoff(time.Millisecond, 64*time.Millisecond))
+	require.NoError(t, err)
+
+	startRun(t, cfg)
+
+	const reconnects = 5
+
+	eventually(t, func() bool { return len(logs.records("config: watch ended, reconnecting")) >= reconnects })
+
+	for i, rec := range logs.records("config: watch ended, reconnecting")[:reconnects] {
+		want := min(time.Millisecond<<i, 64*time.Millisecond)
+		got := recordDuration(t, rec, "delay")
+		assert.GreaterOrEqual(t, got, time.Duration(float64(want)*(1-watchJitter)), "reconnect %d", i+1)
+		assert.LessOrEqual(t, got, want, "reconnect %d", i+1)
+	}
+}
+
+// A first event that is not a state breaks the KV.Watch contract: the watch
+// is reopened instead of being trusted.
+func TestKV_WatchWithoutStateAsFirstEventIsReopened(t *testing.T) {
+	t.Parallel()
+
+	kv := &scriptedKV{fakeKV: newFakeKV(), script: func(KVEvent) []KVEvent {
+		return []KVEvent{{}} // no Type, no Err
+	}}
+	kv.SetData("/flags.json", []byte(`{"v": 1}`))
+
+	logs := &logRecorder{}
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(),
+		WithLogger(slog.New(logs)), fastBackoff())
+	require.NoError(t, err)
+
+	startRun(t, cfg)
+	logs.waitFor(t, "config: watch did not start with the key's state")
+	eventually(t, func() bool { return kv.WatchCalls() >= 3 })
+}
+
+// scriptedKV answers every Watch with the events of script (given the key's
+// state as an initial event) and then closes the channel.
+type scriptedKV struct {
+	*fakeKV
+
+	script func(state KVEvent) []KVEvent
+	calls  atomic.Int32
+}
+
+func (s *scriptedKV) Watch(_ context.Context, key string) <-chan KVEvent {
+	s.calls.Add(1)
+
+	s.mu.Lock()
+
+	state := KVEvent{Type: KVEventDelete}
+	if v, ok := s.data[key]; ok {
+		state = KVEvent{Type: KVEventPut, Value: bytes.Clone(v)}
+	}
+	s.mu.Unlock()
+
+	events := s.script(state)
+	out := make(chan KVEvent, len(events))
+
+	for _, ev := range events {
+		out <- ev
+	}
+
+	close(out)
+
+	return out
+}
+
+func (s *scriptedKV) WatchCalls() int { return int(s.calls.Load()) }
+
+// logRecorder is a slog.Handler that keeps every record, so tests can wait
+// for the watcher to log something instead of sleeping.
+type logRecorder struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (*logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.recs = append(l.recs, r.Clone())
+
+	return nil
+}
+
+func (l *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *logRecorder) WithGroup(string) slog.Handler { return l }
+
+func (l *logRecorder) records(msg string) []slog.Record {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var out []slog.Record
+
+	for _, r := range l.recs {
+		if r.Message == msg {
+			out = append(out, r)
+		}
+	}
+
+	return out
+}
+
+func (l *logRecorder) waitFor(t *testing.T, msg string) {
+	t.Helper()
+	eventually(t, func() bool { return len(l.records(msg)) > 0 })
+}
+
+func recordDuration(t *testing.T, r slog.Record, key string) time.Duration {
+	t.Helper()
+
+	var (
+		d     time.Duration
+		found bool
+	)
+
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			d, found = a.Value.Duration(), true
+
+			return false
+		}
+
+		return true
+	})
+
+	require.True(t, found, "no %q attribute", key)
+
+	return d
 }
 
 func TestKV_NilWatchChannel(t *testing.T) {
@@ -214,14 +398,17 @@ func TestKV_NilWatchChannel(t *testing.T) {
 	kv := &nilWatchKV{fakeKV: newFakeKV()}
 	kv.SetData("/flags.json", []byte(`{"v": 1}`))
 
-	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(), quiet(), fastBackoff())
+	logs := &logRecorder{}
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(),
+		WithLogger(slog.New(logs)), fastBackoff())
 	require.NoError(t, err)
 
 	done := make(chan error, 1)
 
 	go func() { done <- cfg.Run(t.Context()) }()
 
-	time.Sleep(20 * time.Millisecond)
+	logs.waitFor(t, "config: KV returned no watch channel")
 
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
@@ -234,6 +421,93 @@ func TestKV_NilWatchChannel(t *testing.T) {
 type nilWatchKV struct{ *fakeKV }
 
 func (*nilWatchKV) Watch(context.Context, string) <-chan KVEvent { return nil }
+
+// A watch that does not report the key's state within the KV timeout is
+// reopened: the values may be stale.
+func TestKV_WatchWithoutInitialStateIsReopened(t *testing.T) {
+	t.Parallel()
+
+	kv := newFakeKV()
+	kv.SetData("/flags.json", []byte(`{"v": 1}`))
+	kv.silent = true
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"),
+		WithKVTimeout(5*time.Millisecond), noEnv(), quiet(), fastBackoff())
+	require.NoError(t, err)
+
+	startRun(t, cfg)
+	eventually(t, func() bool { return kv.WatchCalls() >= 3 })
+	assert.Equal(t, 1, Get[int](cfg, "v"), "values from New stay")
+}
+
+// An initial state that is an error (the backend could not read the key)
+// ends the stream; the next watch catches up.
+func TestKV_WatchInitialErrorIsRetried(t *testing.T) {
+	t.Parallel()
+
+	kv := &initialErrorKV{fakeKV: newFakeKV(), failures: 2}
+	kv.SetData("/flags.json", []byte(`{"v": 1}`))
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(), quiet(), fastBackoff())
+	require.NoError(t, err)
+
+	kv.SetData("/flags.json", []byte(`{"v": 2}`))
+
+	startRun(t, cfg)
+	eventually(t, func() bool { return Get[int](cfg, "v") == 2 })
+	assert.GreaterOrEqual(t, kv.WatchCalls(), 3)
+}
+
+// initialErrorKV fails the first watches with an error as their first event.
+type initialErrorKV struct {
+	*fakeKV
+
+	mu       sync.Mutex
+	failures int
+}
+
+func (f *initialErrorKV) Watch(ctx context.Context, key string) <-chan KVEvent {
+	f.mu.Lock()
+	fail := f.failures > 0
+	f.failures--
+	f.mu.Unlock()
+
+	ch := f.fakeKV.Watch(ctx, key)
+	if !fail {
+		return ch
+	}
+
+	out := make(chan KVEvent, 1)
+	out <- KVEvent{Err: errors.New("read failed")}
+
+	close(out)
+
+	return out
+}
+
+func TestBackoff_Resets(t *testing.T) {
+	t.Parallel()
+
+	b := backoff{initial: time.Second, max: 30 * time.Second}
+
+	tests := []struct {
+		name    string
+		changed bool
+		lasted  time.Duration
+		want    bool
+	}{
+		{name: "initial state only, short stream", lasted: time.Second, want: false},
+		{name: "a change after the initial state", changed: true, lasted: time.Millisecond, want: true},
+		{name: "open for the maximum delay", lasted: 30 * time.Second, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, b.resets(tt.changed, tt.lasted))
+		})
+	}
+}
 
 func TestKV_ShutdownLifecycle(t *testing.T) {
 	t.Parallel()
