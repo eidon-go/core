@@ -29,7 +29,7 @@ dependencies of what it actually imports.
 |---|---|---|
 | core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — component contracts (`Resource`, `Starter`, `Runner`, `Healthchecker`, `Namer`), `Group`, contract tests in `lifecycletest`; [`app`](./app/README.md) — runs components: ordered start, signals, readiness, bounded shutdown (runners together, then the rest in reverse order), lifecycle events; [`config`](./config/README.md) — layered configuration (defaults, files, KV, env) with hot reload and pluggable formats (JSON built in); [`retry`](./retry/README.md) — retry policies with backoff |
 | config/yaml | `github.com/eidon-go/core/config/yaml` | [YAML parser](./config/yaml/README.md) for `config` |
-| http2 | `github.com/eidon-go/core/http2` | [HTTP server](./http2/README.md): HTTP/1.1 and HTTP/2 (TLS, h2c), graceful drain, probes, OpenTelemetry, panic recovery |
+| http2 | `github.com/eidon-go/core/http2` | [HTTP server](./http2/README.md): HTTP/1.1 and HTTP/2 (TLS, h2c), graceful drain, probes, OpenTelemetry, panic recovery; [client](./http2/README.md#client) (`http2/client`): tuned transport, h2c, OpenTelemetry, RoundTripper wrappers |
 
 ```sh
 go get github.com/eidon-go/core
@@ -49,7 +49,6 @@ to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `life
 |---|---|---|
 | `config/etcd` | etcd implementation of `config.KV` (watched keys, hot reload) | planned |
 | `otel` | OpenTelemetry SDK and exporters setup | planned |
-| `http2` client | outbound `http.Client` with tuned transport and OpenTelemetry | planned |
 | `grpc` | gRPC server and client | planned |
 | `jwt` | JWT signing and verification | planned |
 | `kafka` | Kafka producer and consumer | planned |
