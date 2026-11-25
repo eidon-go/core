@@ -9,7 +9,8 @@ A gRPC server as a [`lifecycle`](../../lifecycle/README.md) component: the port 
 RPCs are served in `Run`, and `Shutdown` drains in-flight RPCs, then force-closes what is left when
 its deadline expires. Keepalive and connection-age settings in a plain `Config`, TLS, OpenTelemetry
 instrumentation on by default, the standard health service driven by the application's readiness,
-and panic-recovery interceptors.
+and panic-recovery interceptors. The [`client`](#client) package builds the matching outbound
+connection.
 
 ```sh
 go get github.com/eidon-go/core/contrib/grpc
@@ -131,3 +132,61 @@ A nil readiness follows the server alone.
 handler, log it with the method and the stack trace, and answer `codes.Internal` with a generic
 message (the panic value is not sent to the client). Messages a stream sent before the panic stay
 sent. Pass them last, directly around the handler, inside logging and authentication.
+
+## Client
+
+Package `grpc/client` builds the matching outbound connection:
+
+```go
+conn, err := client.New(client.Config{
+    Target:              "dns:///billing.default.svc.cluster.local:50051",
+    LoadBalancingPolicy: client.RoundRobin, // spread RPCs over every pod of a headless service
+}, client.WithName("billing"))
+if err != nil {
+    return err
+}
+
+a.Add(conn) // closed on shutdown, after every server has drained
+
+billing := pb.NewBillingClient(conn)
+
+ctx, cancel := context.WithTimeout(ctx, 2*time.Second) // the per-call deadline
+defer cancel()
+resp, err := billing.Charge(ctx, req)
+```
+
+`client.Conn` embeds `*grpc.ClientConn`, so generated clients take it as it is, and it is a
+lifecycle `Resource` (plus `Starter` and `Namer`): `Start` begins connecting in the background
+without waiting or failing (grpc-go retries on its own), `Shutdown` closes the connection —
+idempotent, bounded by its ctx. As a Resource rather than a Runner, `app.App` closes it only after
+every server has drained, so in-flight requests can still use it. It is deliberately not a
+`Healthchecker`: a service's readiness should not follow every dependency it calls.
+
+TLS is the default (system roots); `Config.Plaintext` opts out explicitly, e.g. inside a service
+mesh. There is no connection-wide deadline: bound every call with its context.
+
+| `Config` field | Default | Meaning |
+|---|---|---|
+| `Target` | required | gRPC name: `host:port`, `dns:///host:port`, `unix:///path`, … |
+| `Plaintext` | false | connect without TLS |
+| `LoadBalancingPolicy` | `pick_first` | `client.PickFirst` or `client.RoundRobin`; a service config from the resolver (DNS `grpc_config` TXT) wins unless `grpc.WithDisableServiceConfig` is passed |
+| `MinConnectTimeout` | 20s | least time one connection attempt gets (TLS included); retries back off up to 120s, and a later attempt gets at least the current backoff |
+| `IdleTimeout` | 30m | close the transports after this long without RPCs; negative disables idle mode |
+| `KeepaliveTime` | no pings | ping after this long without activity (minimum 10s); keep it at or above the server's keepalive min time (5m by default) |
+| `KeepaliveTimeout` | 20s | wait this long for the ping's answer; requires `KeepaliveTime` |
+| `KeepalivePermitWithoutStream` | false | ping while no RPC is active (the server must permit it); requires `KeepaliveTime` |
+| `MaxRecvMsgSize` | 4 MB | largest message the client accepts |
+| `MaxSendMsgSize` | `math.MaxInt32` | largest message the client sends |
+
+| Option | Default | |
+|---|---|---|
+| `WithName(string)` | `"grpc-client"` | component name in logs and errors |
+| `WithLogger(*slog.Logger)` | `slog.Default()` | lifecycle messages |
+| `WithTLSConfig(*tls.Config)` | system roots | private CAs, mTLS; cloned; not with `Plaintext` |
+| `WithUnaryInterceptors(...)`, `WithStreamInterceptors(...)` | — | auth metadata, retries, logging; the first passed is the outermost |
+| `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals at `New` | client spans (`{package}.{Service}/{Method}`), metrics and trace-context injection via otelgrpc |
+| `WithOtelGRPCOptions(...otelgrpc.Option)` | — | extra otelgrpc options, e.g. `WithFilter` for long-lived streams |
+| `WithDialOptions(...grpc.DialOption)` | — | escape hatch, applied last: per-RPC credentials, a service config with retry policies (include the load-balancing policy in it — it replaces the one from `Config`), resolvers, … |
+
+The instrumentation sits at the transport, inside every interceptor: each attempt of a retrying
+interceptor (and each grpc-go retry) gets its own span.
