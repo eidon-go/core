@@ -27,6 +27,7 @@ cfg, err := config.New(ctx,
 - `Parse` matches `config.Parser`; it does not import `config`, so it works with any `config`
   version.
 - Mapping keys that are not strings (`200: ok`) become their string form (`codes.200`). Two keys
-  of one mapping with the same string form (`1` and `1.0`) are an error (`ErrKeyCollision`).
+  of one mapping that decode to different values with the same string form (`1` and `1.0`) are an
+  error (`ErrKeyCollision`); keys that decode to the same value (`1` and `0x1`) keep the last one.
 - An empty document is an empty config; only the first document of a multi-document stream is
   read; a top-level list is an error.

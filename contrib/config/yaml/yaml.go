@@ -20,8 +20,10 @@ import (
 )
 
 // ErrKeyCollision is returned (wrapped, with the key's path) by Parse when two
-// keys of one mapping have the same string form, e.g. 1 and 1.0 (both "1"):
-// which value survived would depend on map iteration order.
+// nested keys that decode to different values have the same string form,
+// e.g. 1 and 1.0 (both "1"): which value survived would depend on map
+// iteration order. Keys that decode to the same value (1 and 0x1) are a
+// repeated key, and the YAML decoder keeps the last one.
 var ErrKeyCollision = errors.New("yaml: mapping keys collide after conversion to strings")
 
 // Extensions returns the file and KV key extensions to register Parse for:
