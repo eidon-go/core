@@ -30,11 +30,13 @@ core.
 |---|---|---|
 | core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — component contracts (`Resource`, `Starter`, `Runner`, `Healthchecker`, `Namer`), `Group`, contract tests in `lifecycletest`; [`app`](./app/README.md) — runs components: ordered start, signals, readiness, bounded shutdown (runners together, then the rest in reverse order), lifecycle events; [`config`](./config/README.md) — layered configuration (defaults, files, KV, env) with hot reload and pluggable formats (JSON built in); [`retry`](./retry/README.md) — retry policies with backoff |
 | contrib/config/yaml | `github.com/eidon-go/core/contrib/config/yaml` | [YAML parser](./contrib/config/yaml/README.md) for `config` |
+| contrib/config/etcd | `github.com/eidon-go/core/contrib/config/etcd` | [etcd v3 backend](./contrib/config/etcd/README.md) for `config` (`config.KV`): watched keys, gap-free hot reload |
 | contrib/http2 | `github.com/eidon-go/core/contrib/http2` | [HTTP server](./contrib/http2/README.md): HTTP/1.1 and HTTP/2 (TLS, h2c), graceful drain, probes, OpenTelemetry, panic recovery; [client](./contrib/http2/README.md#client) (`contrib/http2/client`): tuned transport, h2c, OpenTelemetry, RoundTripper wrappers |
 
 ```sh
 go get github.com/eidon-go/core
 go get github.com/eidon-go/core/contrib/config/yaml   # only if you read YAML
+go get github.com/eidon-go/core/contrib/config/etcd   # only if you keep configuration in etcd
 ```
 
 ## Status and roadmap
@@ -48,7 +50,6 @@ to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `life
 
 | Module | Purpose | State |
 |---|---|---|
-| `contrib/config/etcd` | etcd implementation of `config.KV` (watched keys, hot reload) | planned |
 | `contrib/otel` | OpenTelemetry SDK and exporters setup | planned |
 | `contrib/grpc` | gRPC server and client | planned |
 | `contrib/jwt` | JWT signing and verification | planned |

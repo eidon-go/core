@@ -12,6 +12,11 @@ linters:
     - ireturn
     - wsl
   settings:
+    gomoddirectives:
+      # Only the unpublished internal/integration module uses replace (to test
+      # the local copies of the modules); CI rejects replace directives in
+      # published modules separately.
+      replace-local: true
     gosec:
       # G117 flags exported struct fields whose name matches a secret
       # pattern (Password, Token, Secret, ...). Our Config structs
