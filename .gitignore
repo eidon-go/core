@@ -1,6 +1,8 @@
 .idea
 .DS_Store
 vendor
+coverage.out
+.coverage
 internal/integration/vendor
 
 # Local go workspace files — consuming services should use modules, not the workspace.
