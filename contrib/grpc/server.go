@@ -47,8 +47,8 @@ type Server struct {
 	listener  net.Listener
 	boundAddr atomic.Pointer[net.Addr] // set once Start has succeeded
 
-	mu     sync.Mutex
-	served bool // Serve has been called: no more RegisterService
+	mu        sync.Mutex
+	runCalled bool // Run has been called: no more RegisterService
 
 	lc *lifecycle.Server
 }
@@ -156,7 +156,7 @@ func (s *Server) RegisterService(desc *grpc.ServiceDesc, impl any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.served {
+	if s.runCalled {
 		panic("grpc: RegisterService called after Run")
 	}
 
@@ -196,6 +196,12 @@ func (s *Server) Start(ctx context.Context) error {
 // contexts are not derived from ctx, so cancelling it does not abort the RPCs
 // being drained.
 func (s *Server) Run(ctx context.Context) error {
+	// Set before Run returns control to anyone, so that RegisterService
+	// after Run panics deterministically rather than racing Serve.
+	s.mu.Lock()
+	s.runCalled = true
+	s.mu.Unlock()
+
 	return wrap(s.lc.Run(ctx))
 }
 
@@ -262,10 +268,6 @@ func (s *Server) drain(ctx context.Context) error {
 // after it has finished, with nil (or ErrServerStopped when the stop came
 // before Serve).
 func (s *Server) serve() error {
-	s.mu.Lock()
-	s.served = true
-	s.mu.Unlock()
-
 	err := s.srv.Serve(s.listener)
 	if err == nil || errors.Is(err, grpc.ErrServerStopped) {
 		return nil
