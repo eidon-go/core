@@ -2,7 +2,8 @@
 // registered with Add — through one managed lifecycle:
 //
 //  1. Start: every lifecycle.Starter is started in registration order. A
-//     failure shuts down what was started and Run returns the error.
+//     failure shuts down every component — started or not — and Run
+//     returns the error.
 //  2. Run: every lifecycle.Runner runs concurrently until the context passed
 //     to Run is cancelled, a shutdown signal arrives (SIGINT, SIGTERM by
 //     default), or any runner returns.
@@ -57,6 +58,14 @@ var (
 	// ErrNotReady is returned by Healthcheck while the app is not serving:
 	// before Run, during startup, and from the moment shutdown is requested.
 	ErrNotReady = errors.New("app: not ready")
+	// ErrHealthcheckPanicked is the result reported for a component whose
+	// Healthcheck panicked: the panic is recovered, so a faulty check fails
+	// readiness instead of killing the process.
+	ErrHealthcheckPanicked = errors.New("app: healthcheck panicked")
+	// ErrShutdownPanicked is reported for a component whose Shutdown
+	// panicked: the panic is recovered and the other components are still
+	// shut down.
+	ErrShutdownPanicked = errors.New("app: shutdown panicked")
 )
 
 // DefaultShutdownTimeout bounds the shutdown phase unless WithShutdownTimeout
@@ -263,23 +272,23 @@ func (a *App) Run(ctx context.Context) error {
 	logger := a.Logger()
 	logger.InfoContext(ctx, "app starting", slog.Int("components", len(components)))
 
-	live, startErr := a.start(ctx, components)
+	startErr := a.start(ctx, components)
 
 	if ctx.Err() != nil {
 		// Stopped by ctx or a signal during startup: a clean stop, whatever
 		// the starters returned.
 		logger.InfoContext(ctx, "app stopped during startup", slog.Any("cause", context.Cause(ctx)))
 
-		return a.shutdown(ctx, live, nil)
+		return a.shutdown(ctx, components, nil)
 	}
 
 	if startErr != nil {
 		logger.ErrorContext(ctx, "app startup failed", slog.Any("err", startErr))
 
-		return errors.Join(startErr, a.shutdown(ctx, live, nil))
+		return errors.Join(startErr, a.shutdown(ctx, components, nil))
 	}
 
-	return a.runAndShutdown(ctx, live)
+	return a.runAndShutdown(ctx, components)
 }
 
 // Logger returns the logger set with WithLogger, or slog.Default().
@@ -337,11 +346,10 @@ func (a *App) notifyContext(ctx context.Context) (context.Context, func()) {
 }
 
 // start calls Start on every Starter in registration order, stopping at the
-// first failure or when ctx is done. It returns the components that must be
-// shut down: everything up to the last successful Start, plus every
-// non-Starter (those were constructed by the caller and hold resources
-// whether or not startup completed).
-func (a *App) start(ctx context.Context, components []lifecycle.Resource) ([]lifecycle.Resource, error) {
+// first failure or when ctx is done. Whatever it returns, every component is
+// shut down afterwards: any of them may hold resources from construction on,
+// and the one that failed may hold some from its partial Start.
+func (a *App) start(ctx context.Context, components []lifecycle.Resource) error {
 	if a.startTimeout > 0 {
 		var cancel context.CancelFunc
 
@@ -349,13 +357,9 @@ func (a *App) start(ctx context.Context, components []lifecycle.Resource) ([]lif
 		defer cancel()
 	}
 
-	live := make([]lifecycle.Resource, 0, len(components))
-
-	for idx, c := range components {
+	for _, c := range components {
 		s, ok := c.(lifecycle.Starter)
 		if !ok {
-			live = append(live, c)
-
 			continue
 		}
 
@@ -367,31 +371,11 @@ func (a *App) start(ctx context.Context, components []lifecycle.Resource) ([]lif
 		}
 
 		if err != nil {
-			return append(
-					live,
-					nonStarters(components[idx+1:])...), fmt.Errorf(
-					"start %s: %w",
-					lifecycle.NameOf(c),
-					err,
-				)
-		}
-
-		live = append(live, c)
-	}
-
-	return live, nil
-}
-
-func nonStarters(components []lifecycle.Resource) []lifecycle.Resource {
-	var out []lifecycle.Resource
-
-	for _, c := range components {
-		if _, ok := c.(lifecycle.Starter); !ok {
-			out = append(out, c)
+			return fmt.Errorf("start %s: %w", lifecycle.NameOf(c), err)
 		}
 	}
 
-	return out
+	return nil
 }
 
 type runResult struct {

@@ -30,8 +30,11 @@ type Namer interface {               // optional: name in logs, errors, health r
 
 `app.App` drives a component through three phases:
 
-1. **Start** — `Start` is called once, in registration order, before any `Run`. If it fails,
-   the component cleans up after itself: its `Shutdown` is not called.
+1. **Start** — `Start` is called once, in registration order, before any `Run`. If one fails
+   (or the context is done), the startup stops and **every** component is shut down as in
+   phase 3: the started ones, the one that failed and the ones never started — any of them may
+   hold resources from construction on. A failed `Start` need not clean up after itself;
+   `Shutdown` must be safe in every state: never started, after a failed `Start`, after `Run`.
 2. **Run** — `Run` is called at most once, concurrently for all runners. It blocks until the
    runner is stopped — its context cancelled **or** `Shutdown` called — and its work in flight
    has finished or been cut off, then returns `nil`. Returning before it is stopped (with an
@@ -72,9 +75,9 @@ cancelled, `Shutdown` → the same graceful stop, bounded by its context, then a
 
 - `Group(members...)` / `GroupNamed(name, members...)` — one component over many: shuts the
   members down in reverse order and skips nil members (including typed nil pointers). It is a
-  `Starter` only if a member is (starting them in order; on failure every member holding
-  resources — those before the failed one and later members without `Start` — is shut down,
-  bounded by the start context), and a `Healthchecker` only if a member is. Runners cannot be
+  `Starter` only if a member is (starting them in order and stopping at the first error; it
+  does not shut members down itself — the caller's `Shutdown` releases every member), and a
+  `Healthchecker` only if a member is. Runners cannot be
   grouped: register them with `app.App` directly.
 - `ShutdownFunc` — adapt a cleanup function: `a.Add(lifecycle.ShutdownFunc(tp.Shutdown))`. It
   is idempotent only if the function is.
@@ -95,8 +98,8 @@ func TestServerContract(t *testing.T) {
 ```
 
 `lifecycletest.Resource` checks Shutdown without Start, Shutdown with a cancelled context,
-Start→Shutdown, a repeated Shutdown, and that Healthcheck returns before Start and after
-Shutdown; `lifecycletest.Runner` adds: Run blocks until Shutdown and then returns nil, Run blocks
+Start→Shutdown, Shutdown after a Start with a cancelled context, a repeated Shutdown, and that
+Healthcheck returns before Start and after Shutdown; `lifecycletest.Runner` adds: Run blocks until Shutdown and then returns nil, Run blocks
 until its context is cancelled, Run after Shutdown returns nil promptly, the `app.App` stop order
 (cancel, then Shutdown with an already expired context: Run must return within a second), and
 cancellation and Shutdown at the same time. A panic in any method fails the check.

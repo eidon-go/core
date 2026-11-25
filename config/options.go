@@ -224,9 +224,13 @@ func (o *options) addFiles(paths []string, optional bool) {
 	}
 }
 
+// envNameReplacer maps the separators of a dotted key to underscores. A
+// Replacer is safe for concurrent use, and building one is not cheap.
+var envNameReplacer = strings.NewReplacer(".", "_", "-", "_") //nolint:gochecknoglobals // immutable
+
 // envName maps a dotted key to its environment variable name.
 func (o *options) envName(key string) string {
-	name := strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
+	name := strings.ToUpper(envNameReplacer.Replace(key))
 	if o.envPrefix != "" {
 		name = strings.ToUpper(o.envPrefix) + "_" + name
 	}

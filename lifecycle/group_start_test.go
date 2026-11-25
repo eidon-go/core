@@ -36,6 +36,10 @@ type runner struct{ member }
 
 func (*runner) Run(context.Context) error { return nil }
 
+type failingStarter struct{ fakeResource }
+
+func (*failingStarter) Start(context.Context) error { return errors.New("refused") }
+
 func TestGroup_StartInOrder(t *testing.T) {
 	t.Parallel()
 
@@ -49,7 +53,9 @@ func TestGroup_StartInOrder(t *testing.T) {
 	assert.Equal(t, []string{"start a", "start b"}, log)
 }
 
-func TestGroup_StartFailureRollsBack(t *testing.T) {
+// A failed Start stops at the failing member and leaves the rollback to the
+// caller's Shutdown, which releases every member, started or not.
+func TestGroup_StartFailureStopsAndShutdownReleasesAll(t *testing.T) {
 	t.Parallel()
 
 	var log []string
@@ -69,8 +75,12 @@ func TestGroup_StartFailureRollsBack(t *testing.T) {
 
 	require.ErrorIs(t, err, errStart)
 	require.ErrorContains(t, err, "start b: refused")
-	assert.Equal(t, []string{"start a", "start b", "shutdown a"}, log, "b cleans up itself, c is never started")
-	assert.True(t, plain.called, "members before the failure are shut down")
+	assert.Equal(t, []string{"start a", "start b"}, log, "c is never started, nothing is shut down yet")
+	assert.False(t, plain.called)
+
+	require.NoError(t, g.Shutdown(t.Context()))
+	assert.Equal(t, []string{"start a", "start b", "shutdown c", "shutdown b", "shutdown a"}, log)
+	assert.True(t, plain.called)
 }
 
 func TestGroup_Name(t *testing.T) {
@@ -92,4 +102,21 @@ func TestGroup_PanicsOnRunner(t *testing.T) {
 	var nilRunner *runner
 
 	assert.NotPanics(t, func() { lifecycle.Group(nilRunner) }, "a nil member is skipped, whatever its type")
+}
+
+// A failed Start shuts nothing down with its own (possibly expired) ctx; the
+// caller's Shutdown does, with a fresh deadline.
+func TestGroup_FailedStartDoesNotShutDown(t *testing.T) {
+	t.Parallel()
+
+	before, failing, after := &fakeResource{}, &failingStarter{}, &fakeResource{}
+	g := lifecycle.Group(before, failing, after)
+
+	s, ok := g.(lifecycle.Starter)
+	require.True(t, ok)
+	require.ErrorContains(t, s.Start(t.Context()), "refused")
+	assert.False(t, before.called || failing.called || after.called)
+
+	require.NoError(t, g.Shutdown(t.Context()))
+	assert.True(t, before.called && failing.called && after.called, "Shutdown releases every member")
 }

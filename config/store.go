@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -14,6 +16,13 @@ type store struct {
 	envLookup func(string) (string, bool)
 	envName   func(string) string
 	defaults  map[string]any
+
+	// envNames caches envName per key (string → string): lookup runs on
+	// every read, often in a request path through Live. It holds one entry
+	// per distinct key ever read: small for keys fixed in code, but it grows
+	// with keys built at run time (tenants.<id>.limit) — a few dozen bytes per
+	// key, acceptable for config keys.
+	envNames sync.Map
 }
 
 // newStore builds a store. A nil envLookup or envName disables the
@@ -27,7 +36,7 @@ func newStore(envLookup func(string) (string, bool), envName func(string) string
 		defaults = map[string]any{}
 	}
 
-	s := &store{ //nolint:exhaustruct_v5 // snapshot is set below
+	s := &store{ //nolint:exhaustruct_v5 // snapshot is set below, envNames starts empty
 		envLookup: envLookup,
 		envName:   envName,
 		defaults:  defaults,
@@ -54,7 +63,7 @@ func (s *store) setSnapshot(m map[string]any) {
 // skipped.
 func (s *store) lookup(key string) (any, bool) {
 	if s.envLookup != nil {
-		if v, ok := s.envLookup(s.envName(key)); ok && strings.TrimSpace(v) != "" {
+		if v, ok := s.envLookup(s.envVar(key)); ok && strings.TrimSpace(v) != "" {
 			return v, true
 		}
 	}
@@ -70,9 +79,22 @@ func (s *store) lookup(key string) (any, bool) {
 	return nil, false
 }
 
+// envVar returns the environment variable name for key, computed once.
+func (s *store) envVar(key string) string {
+	if name, ok := s.envNames.Load(key); ok {
+		return name.(string) //nolint:forcetypeassert // only strings are stored
+	}
+
+	name := s.envName(key)
+	s.envNames.Store(key, name)
+
+	return name
+}
+
 // flatten converts a nested map to a flat map keyed by dotted paths. Slices
-// are kept as values. Nested empty maps contribute no keys; nil values are
-// kept (they mean "not set").
+// are kept as values, copied so that the caller's map (a WithDefaults or
+// FromMap literal) shares no memory with the config. Nested empty maps
+// contribute no keys; nil values are kept (they mean "not set").
 //
 // Two entries of one document that resolve to the same dotted key — a nested
 // "a": {"b": 1} next to a literal "a.b": 2, or the non-string key 1 next to
@@ -115,11 +137,45 @@ func flattenInto(out map[string]any, prefix string, m map[string]any) error {
 				return fmt.Errorf("%w: %q", ErrKeyCollision, key)
 			}
 
-			out[key] = v
+			out[key] = cloneValue(v)
 		}
 	}
 
 	return nil
+}
+
+// cloneValue deep-copies the lists and maps of a leaf value; other values are
+// immutable or not decoded by config, and are returned as is.
+func cloneValue(v any) any {
+	switch x := v.(type) {
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			out[i] = cloneValue(item)
+		}
+
+		return out
+	case []string:
+		return slices.Clone(x)
+	case []int:
+		return slices.Clone(x)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, item := range x {
+			out[k] = cloneValue(item)
+		}
+
+		return out
+	case map[any]any:
+		out := make(map[any]any, len(x))
+		for k, item := range x {
+			out[k] = cloneValue(item)
+		}
+
+		return out
+	default:
+		return v
+	}
 }
 
 func joinKey(prefix, key string) string {

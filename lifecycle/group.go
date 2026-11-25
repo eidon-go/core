@@ -17,10 +17,10 @@ const defaultGroupName = "group"
 //
 //   - Shutdown shuts every member down in reverse order and joins the errors.
 //   - If any member implements Starter, the Group does too: Start starts those
-//     members in order. If one fails, every member that holds resources —
-//     the ones before it and the members after it without Start — is shut
-//     down in reverse order, bounded by the ctx passed to Start, and the
-//     error is returned.
+//     members in order and stops at the first error, which it returns. It
+//     does not shut members down itself: as for any component whose Start
+//     failed, the caller calls Shutdown (app.App does), and that releases
+//     every member, started or not, with the shutdown's own deadline.
 //   - If any member implements Healthchecker, the Group does too: Healthcheck
 //     checks those members and joins the errors, each prefixed with the
 //     member's name.
@@ -46,8 +46,8 @@ func GroupNamed(name string, members ...Resource) Resource {
 	g := &group{name: name, members: slices.Clone(members)}
 
 	// Expose only the optional interfaces the members have: a Group that
-	// claimed Start without starting anything would not be shut down when
-	// an earlier component fails to start, leaking its members.
+	// claimed Start or Healthcheck without a member behind it would be
+	// started, timed and reported for nothing.
 	switch {
 	case hasStarter && hasChecker:
 		return &startCheckGroup{g}
@@ -116,19 +116,16 @@ func (g *checkGroup) Healthcheck(ctx context.Context) error { return g.healthche
 func (g *startCheckGroup) Healthcheck(ctx context.Context) error { return g.healthcheck(ctx) }
 
 func (g *group) start(ctx context.Context) error {
-	for idx, member := range g.members {
+	for _, member := range g.members {
 		s, ok := member.(Starter)
 		if !ok || IsNil(member) {
 			continue
 		}
 
 		if err := s.Start(ctx); err != nil {
-			// The failed member cleaned up after itself. Everything before
-			// it holds resources, and so do the later members without Start
-			// (constructed, never to be started).
-			rollback := append(slices.Clone(g.members[:idx]), withoutStart(g.members[idx+1:])...)
-
-			return errors.Join(fmt.Errorf("start %s: %w", NameOf(member), err), shutdownAll(ctx, rollback))
+			// No rollback here: the caller shuts the whole Group down, with
+			// a fresh deadline rather than this ctx, which may have expired.
+			return fmt.Errorf("start %s: %w", NameOf(member), err)
 		}
 	}
 
@@ -168,18 +165,6 @@ func shutdownAll(ctx context.Context, members []Resource) error {
 	}
 
 	return errors.Join(errs...)
-}
-
-func withoutStart(members []Resource) []Resource {
-	var out []Resource
-
-	for _, member := range members {
-		if _, ok := member.(Starter); !ok {
-			out = append(out, member)
-		}
-	}
-
-	return out
 }
 
 // IsNil reports whether v is nil, including the classic Go gotcha of a nil
