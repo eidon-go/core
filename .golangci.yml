@@ -1,0 +1,119 @@
+version: "2"
+run:
+  # No run.go: each module is linted at the Go version its own go.mod declares.
+  allow-parallel-runners: true
+linters:
+  default: all
+  disable:
+    # Deprecated since golangci-lint v2.13, replaced by exhaustruct_v5.
+    - exhaustruct
+    - gomodguard
+    - noinlineerr
+    - ireturn
+    - wsl
+  settings:
+    gosec:
+      # G117 flags exported struct fields whose name matches a secret
+      # pattern (Password, Token, Secret, ...). Our Config structs
+      # intentionally expose such fields — they are connection parameters,
+      # not leaked secrets. Disabling the rule globally keeps the intent
+      # visible in the config instead of spraying //nolint comments.
+      excludes:
+        - G117
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+    depguard:
+      rules:
+        main:
+          list-mode: lax
+          files:
+            - '!**/*_a _file.go'
+          allow:
+            - $gostd
+          deny:
+            - pkg: github.com/sirupsen/logrus
+              desc: not allowed
+            - pkg: github.com/pkg/errors
+              desc: Should be replaced by standard lib errors package
+    varnamelen:
+      ignore-names:
+        - id
+        - db
+        - q
+        - tx
+        - g
+        - ch
+        - v
+        - ok
+        - o
+        - r
+        - c
+        - s
+        - a
+        - w
+        - p
+        - ss
+        - rc
+        - x
+        - kv
+        - ev
+        - d
+        - wg
+        - f
+        - k
+        - n
+        - nc
+        - js
+        - h
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+    rules:
+      - path: ^sql/
+        linters:
+          - revive
+        text: "avoid package names that conflict"
+      - path: (.+)_test.go
+        linters:
+          - funlen
+          - goconst
+          - varnamelen
+          - exhaustruct_v5
+          - godox
+          - err113
+          - gosec
+          - bodyclose
+          # Test fakes return ctx.Err() and the like as-is on purpose.
+          - wrapcheck
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+    - golines
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/eidon-go/core)
+      custom-order: true
+    golines:
+      max-len: 120
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

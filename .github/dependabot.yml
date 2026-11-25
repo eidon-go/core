@@ -1,0 +1,12 @@
+# Go requirements of published modules are deliberately NOT bumped: they state
+# the minimum version a module needs, and raising them would force upgrades on
+# every client. Compatibility with the latest versions is checked by
+# .github/workflows/latest-deps.yml instead. Only CI actions are kept current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

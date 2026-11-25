@@ -1,0 +1,8 @@
+.idea
+.DS_Store
+vendor
+internal/integration/vendor
+
+# Local go workspace files — consuming services should use modules, not the workspace.
+go.work
+go.work.sum

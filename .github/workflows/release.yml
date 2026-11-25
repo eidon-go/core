@@ -1,0 +1,81 @@
+name: Release
+
+# Releases one module: validates the request, re-runs the module's checks,
+# renders notes from the module's own commits and creates the tag together
+# with the GitHub Release.
+#   core:        module ".",       version v1.2.0  ->  tag v1.2.0
+#   integration: module "config/etcd", version v1.0.0  ->  tag config/etcd/v1.0.0
+on:
+  workflow_dispatch:
+    inputs:
+      module:
+        description: 'Module directory: "." for core, or e.g. "kafka", "config/etcd"'
+        required: true
+        default: '.'
+      version:
+        description: 'Version, e.g. v1.2.3 (or v1.2.3-rc.1 for a pre-release)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release ${{ inputs.module }} ${{ inputs.version }}
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      MODULE: ${{ inputs.module }}
+      VERSION: ${{ inputs.version }}
+      GOWORK: off
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Inputs reach scripts only through env vars, never interpolated into
+      # the shell source.
+      - name: Validate request
+        id: check
+        run: echo "tag=$(scripts/release-check.sh "$MODULE" "$VERSION")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.module }}/go.mod
+          cache-dependency-path: ${{ inputs.module }}/go.sum
+
+      - name: Verify module
+        run: |
+          cd "$MODULE"
+          go mod tidy -diff
+          go build ./...
+          go test -race -count=1 -timeout=5m -short ./...
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Render release notes
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          scripts/release-notes.sh "$MODULE" "$TAG" > notes.md
+          cat notes.md
+
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          prerelease=()
+          [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md "${prerelease[@]}"
+
+      - name: Warm the module proxy
+        run: |
+          path=$(awk '$1 == "module" { print $2; exit }' "$MODULE/go.mod")
+          GOPROXY=https://proxy.golang.org go list -m "$path@$VERSION"

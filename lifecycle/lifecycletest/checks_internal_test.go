@@ -1,0 +1,93 @@
+package lifecycletest
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+const short = 200 * time.Millisecond
+
+// earlyRunner returns from Run at once: a contract violation.
+type earlyRunner struct{}
+
+func (earlyRunner) Run(context.Context) error      { return nil }
+func (earlyRunner) Shutdown(context.Context) error { return nil }
+
+// deafRunner ignores both Shutdown and ctx.
+type deafRunner struct{}
+
+func (deafRunner) Run(context.Context) error      { select {} }
+func (deafRunner) Shutdown(context.Context) error { return nil }
+
+// erroringRunner returns an error after Shutdown.
+type erroringRunner struct{ stop chan struct{} }
+
+func (r *erroringRunner) Run(ctx context.Context) error {
+	select {
+	case <-r.stop:
+	case <-ctx.Done():
+	}
+
+	return errors.New("server closed")
+}
+
+func (r *erroringRunner) Shutdown(context.Context) error {
+	select {
+	case <-r.stop:
+	default:
+		close(r.stop)
+	}
+
+	return nil
+}
+
+// stuckShutdown ignores its ctx.
+type stuckShutdown struct{}
+
+func (stuckShutdown) Shutdown(context.Context) error {
+	time.Sleep(time.Hour)
+
+	return nil
+}
+
+func TestChecksDetectViolations(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"Run returns at once", checkShutdownStopsRun(ctx, earlyRunner{}, short)},
+		{"Run ignores Shutdown", checkShutdownStopsRun(ctx, deafRunner{}, short)},
+		{"Run ignores ctx", checkCancelStopsRun(ctx, deafRunner{}, short)},
+		{"Run errors after Shutdown", checkShutdownStopsRun(ctx, &erroringRunner{stop: make(chan struct{})}, short)},
+		{"Run after Shutdown hangs", checkRunAfterShutdown(ctx, deafRunner{}, short)},
+		{"Shutdown ignores cancelled ctx", checkShutdownCancelled(ctx, stuckShutdown{}, short)},
+	}
+
+	for _, tt := range tests {
+		if tt.err == nil {
+			t.Errorf("%s: check passed, want a failure", tt.name)
+		}
+	}
+}
+
+func TestWithTimeout(t *testing.T) {
+	t.Parallel()
+
+	if got := newOptions(nil).timeout; got != DefaultTimeout {
+		t.Errorf("default timeout = %v", got)
+	}
+
+	if got := newOptions([]Option{WithTimeout(time.Minute)}).timeout; got != time.Minute {
+		t.Errorf("WithTimeout = %v", got)
+	}
+
+	if got := newOptions([]Option{WithTimeout(-1)}).timeout; got != DefaultTimeout {
+		t.Errorf("non-positive timeout must keep the default, got %v", got)
+	}
+}
