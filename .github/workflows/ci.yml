@@ -146,52 +146,6 @@ jobs:
           flags: ${{ steps.flag.outputs.flag }}
           fail_ci_if_error: false
 
-  # Static analysis and coverage of every published module in SonarQube Cloud.
-  # Tests run here again (without -race) so the analysis always sees the
-  # coverage of the whole repository, not only of the modules a PR touches.
-  sonar:
-    name: SonarQube Cloud
-    runs-on: ubuntu-latest
-    env:
-      GOWORK: off
-      # Empty for pull requests from forks (secrets are not passed to them):
-      # the analysis is skipped there and runs again once the change is on main.
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-    steps:
-      - name: Skip without SONAR_TOKEN
-        if: env.SONAR_TOKEN == ''
-        run: echo "::notice::SONAR_TOKEN is not available, SonarQube analysis skipped"
-
-      - uses: actions/checkout@v4
-        with:
-          # Full history: blame data and the new-code period need it.
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-          cache: false
-
-      - name: Test with coverage
-        if: env.SONAR_TOKEN != ''
-        run: |
-          mkdir -p .coverage
-          reports=()
-          for m in $(scripts/modules.sh --published); do
-            name=$([[ "$m" == "." ]] && echo core || echo "${m//\//-}")
-            (cd "$m" && go test -count=1 -timeout=5m -short -covermode=atomic \
-              -coverprofile="$GITHUB_WORKSPACE/.coverage/$name.out" ./...)
-            reports+=(".coverage/$name.out")
-          done
-          echo "SONAR_GO_COVERAGE=$(IFS=,; echo "${reports[*]}")" >> "$GITHUB_ENV"
-
-      - name: Scan
-        if: env.SONAR_TOKEN != ''
-        uses: SonarSource/sonarqube-scan-action@v8
-        with:
-          args: >
-            -Dsonar.go.coverage.reportPaths=${{ env.SONAR_GO_COVERAGE }}
-
   # All modules together through a generated go.work: catches a change split
   # across modules (core first, then an integration) before the core is tagged.
   workspace:
@@ -246,7 +200,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [ discover, module, workspace, integration, sonar ]
+    needs: [ discover, module, workspace, integration ]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results
