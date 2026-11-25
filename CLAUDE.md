@@ -122,7 +122,8 @@ published `go.mod` files.
   `lifecycle/lifecycle.go` — read it before touching `app` or writing a component. `lifecycle/lifecycletest` provides
   `lifecycletest.Resource` / `lifecycletest.Runner` contract tests that every component must pass.
   Components build on the adapters instead of their own stop state machine: clients on
-  `lifecycle.CloseOnce` / `ShutdownOnce` (`*Releaser`), servers on `lifecycle.NewServer`
+  `lifecycle.CloseOnce` / `ShutdownOnce` (`*Releaser`), workers (consumers, schedulers) on
+  `lifecycle.NewWorker` (`WorkerFuncs{Run func(stop, work context.Context) error}`), servers on `lifecycle.NewServer`
   (`ServerFuncs{Listen, Serve, Drain, Close}`, kept in an unexported field, not embedded).
 - **`app`** — drives components: ordered Start, concurrent Run, signals, readiness/health,
   bounded shutdown (Run ctx cancelled, runners shut down concurrently, then the rest in reverse
