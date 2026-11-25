@@ -14,6 +14,7 @@ import (
 	"github.com/eidon-go/core/contrib/kafka"
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/lifecycle/lifecycletest"
+	"github.com/eidon-go/core/retry"
 )
 
 func TestClient_Contract(t *testing.T) {
@@ -53,10 +54,14 @@ func TestClient_Lifecycle(t *testing.T) {
 
 	c, err := kafka.NewClient(kafka.Config{Brokers: brokers, ClientID: "svc"}, testOptions(kafka.WithName("events"))...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
 	assert.Equal(t, "events", c.Name())
-	require.NotNil(t, c.Kgo())
+	require.Nil(t, c.Kgo(), "created in Start")
+	require.ErrorIs(t, c.Healthcheck(t.Context()), kafka.ErrNotStarted)
 
 	require.NoError(t, c.Start(t.Context()))
+	require.NotNil(t, c.Kgo())
+	require.ErrorIs(t, c.Start(t.Context()), kafka.ErrAlreadyStarted)
 	require.NoError(t, c.Healthcheck(t.Context()))
 	require.NoError(t, c.Shutdown(t.Context()))
 	require.ErrorIs(t, c.Healthcheck(t.Context()), kafka.ErrClosed)
@@ -68,10 +73,28 @@ func TestClient_StartFailsWithoutCluster(t *testing.T) {
 
 	c, err := kafka.NewClient(kafka.Config{Brokers: []string{"127.0.0.1:1"}}, testOptions()...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
 
 	err = c.Start(t.Context())
 	require.ErrorContains(t, err, "kafka: ping")
 	require.NoError(t, c.Shutdown(t.Context()))
+}
+
+// Shutdown ends a Start that is waiting between ping attempts.
+func TestClient_ShutdownInterruptsStart(t *testing.T) {
+	t.Parallel()
+
+	slow := kafka.WithConnectRetry(retry.Policy{MaxAttempts: retry.Forever, InitialDelay: time.Hour})
+	c, err := kafka.NewClient(kafka.Config{Brokers: []string{"127.0.0.1:1"}}, testOptions(slow)...)
+	require.NoError(t, err)
+
+	started := make(chan error, 1)
+
+	go func() { started <- c.Start(t.Context()) }()
+
+	require.Eventually(t, func() bool { return c.Kgo() != nil }, waitFor, time.Millisecond)
+	require.NoError(t, c.Shutdown(boundedCtx(t)))
+	require.ErrorIs(t, receive(t, started), kafka.ErrClosed)
 }
 
 func TestNew_InvalidConfig(t *testing.T) {
@@ -97,7 +120,7 @@ func TestOptions(t *testing.T) {
 	p, err := kafka.NewProducer(cfg, opts...)
 	require.NoError(t, err)
 	assert.Equal(t, "events", p.Name())
-	assert.NotNil(t, p.Kgo())
+	assert.Nil(t, p.Kgo(), "created in Start")
 	require.NoError(t, p.Shutdown(t.Context()))
 
 	c, err := kafka.NewConsumer(consumerConfig(cfg.Brokers), newRecorder(), opts...)
@@ -105,8 +128,10 @@ func TestOptions(t *testing.T) {
 	assert.Equal(t, "events", c.Name())
 	require.NoError(t, c.Shutdown(t.Context()))
 
-	_, err = kafka.NewClient(cfg, kafka.WithKgoOpts(kgo.MaxBufferedRecords(-1)))
-	require.ErrorIs(t, err, kafka.ErrInvalidConfig, "franz-go rejects the options")
+	bad, err := kafka.NewClient(cfg, kafka.WithKgoOpts(kgo.MaxBufferedRecords(-1)))
+	require.NoError(t, err)
+	require.ErrorIs(t, bad.Start(t.Context()), kafka.ErrInvalidConfig, "franz-go rejects the options")
+	require.NoError(t, bad.Shutdown(t.Context()))
 
 	plain, err := kafka.NewClient(cfg)
 	require.NoError(t, err)
@@ -119,9 +144,7 @@ func TestProducer_Publish(t *testing.T) {
 
 	brokers := newCluster(t, testTopic)
 
-	p, err := kafka.NewProducer(kafka.Config{Brokers: brokers}, testOptions()...)
-	require.NoError(t, err)
-	require.NoError(t, p.Start(t.Context()))
+	p := newProducer(t, brokers)
 	require.NoError(t, p.Healthcheck(t.Context()))
 
 	require.NoError(t, p.Publish(t.Context(),
@@ -144,12 +167,12 @@ func TestProducer_Publish(t *testing.T) {
 func TestProducer_PublishErrors(t *testing.T) {
 	t.Parallel()
 
-	p, err := kafka.NewProducer(
-		kafka.Config{Brokers: newCluster(t, testTopic)},
-		testOptions()...)
+	p, err := kafka.NewProducer(kafka.Config{Brokers: newCluster(t, testTopic)}, testOptions()...)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Shutdown(context.WithoutCancel(t.Context())) })
+	shutdownOnCleanup(t, p)
 
+	require.ErrorIs(t, p.Produce(t.Context(), testTopic, nil, nil), kafka.ErrNotStarted)
+	require.NoError(t, p.Start(t.Context()))
 	require.ErrorContains(t, p.Publish(t.Context(), nil), "message 0 is nil")
 	require.ErrorContains(
 		t,

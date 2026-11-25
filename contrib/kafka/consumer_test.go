@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -116,9 +117,7 @@ func TestConsumer_MessageFields(t *testing.T) {
 
 	brokers := newCluster(t, testTopic)
 
-	p, err := kafka.NewProducer(kafka.Config{Brokers: brokers}, testOptions()...)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Shutdown(context.WithoutCancel(t.Context())) })
+	p := newProducer(t, brokers)
 
 	ts := time.UnixMilli(1_700_000_000_000)
 	require.NoError(t, p.Publish(t.Context(), &kafka.Message{
@@ -137,7 +136,7 @@ func TestConsumer_MessageFields(t *testing.T) {
 		}),
 	)
 
-	m := <-got
+	m := receive(t, got)
 
 	require.NoError(t, stop())
 	assert.Equal(t, testTopic, m.Topic)
@@ -173,6 +172,7 @@ func TestConsumer_StopFinishesTheMessageInFlight(t *testing.T) {
 
 	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, testOptions()...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -180,11 +180,11 @@ func TestConsumer_StopFinishesTheMessageInFlight(t *testing.T) {
 
 	go func() { done <- c.Run(ctx) }()
 
-	<-entered
+	receive(t, entered)
 	cancel() // as app.App does on a signal
 
 	close(release)
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 	require.NoError(t, c.Shutdown(t.Context()))
 	assert.Equal(t, []string{"a"}, rec.values())
 
@@ -218,20 +218,21 @@ func TestConsumer_ShutdownDeadlineCancelsTheHandler(t *testing.T) {
 			return kafka.ErrorActionRetry
 		}))...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
 
 	done := make(chan error, 1)
 
 	go func() { done <- c.Run(t.Context()) }()
 
-	<-entered
+	receive(t, entered)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
 	require.ErrorIs(t, c.Shutdown(ctx), context.DeadlineExceeded)
-	require.ErrorIs(t, <-handlerErr, context.Canceled)
-	require.NoError(t, <-done)
+	require.ErrorIs(t, receive(t, handlerErr), context.Canceled)
+	require.NoError(t, receive(t, done))
 }
 
 func TestConsumer_RetryThenSuccess(t *testing.T) {
@@ -287,9 +288,10 @@ func TestConsumer_DefaultStopsWhenRetriesAreExhausted(t *testing.T) {
 
 	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, testOptions()...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
 
-	err = c.Run(t.Context())
+	err = runToEnd(t, c)
 	require.ErrorIs(t, err, kafka.ErrStopped)
 	require.ErrorIs(t, err, kafka.ErrRetriesExhausted)
 	require.ErrorIs(t, err, errDown)
@@ -317,10 +319,31 @@ func TestConsumer_PermanentErrorStopsAtOnce(t *testing.T) {
 
 	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, testOptions()...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
-	require.ErrorIs(t, c.Run(t.Context()), kafka.ErrStopped)
+	require.ErrorIs(t, runToEnd(t, c), kafka.ErrStopped)
 	assert.Equal(t, 1, rec.callsOf("bad"))
 	require.NoError(t, c.Shutdown(t.Context()))
+}
+
+// A batch franz-go will never decompress stalls its partition for good: Run
+// fails instead of looking healthy.
+func TestConsumer_UndecompressableBatchFailsRun(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	gzip := kafka.WithKgoOpts(kgo.ProducerBatchCompression(kgo.GzipCompression()))
+	require.NoError(t, newProducer(t, brokers, gzip).Produce(t.Context(), testTopic, nil, make([]byte, 4096)))
+
+	c, err := kafka.NewConsumer(consumerConfig(brokers), newRecorder(),
+		testOptions(kafka.WithKgoOpts(kgo.MaxDecompressBatchBytes(64)))...)
+	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
+	require.NoError(t, c.Start(t.Context()))
+
+	err = runToEnd(t, c)
+	require.ErrorIs(t, err, kgo.ErrMaxDecompress)
+	require.ErrorContains(t, err, "kafka: fetch "+testTopic+"[0]")
 }
 
 func TestConsumer_SkipCommits(t *testing.T) {
@@ -372,7 +395,7 @@ func TestConsumer_HandlerPanicGoesToTheErrorHandler(t *testing.T) {
 			return kafka.ErrorActionSkip
 		}))
 
-	require.ErrorContains(t, <-got, "kafka: handler panicked: boom")
+	require.ErrorContains(t, receive(t, got), "kafka: handler panicked: boom")
 	require.NoError(t, stop())
 }
 
@@ -386,8 +409,9 @@ func TestConsumer_ErrorHandlerPanicStops(t *testing.T) {
 	c, err := kafka.NewConsumer(consumerConfig(brokers), h, testOptions(
 		kafka.WithErrorHandler(func(context.Context, *kafka.Message, error) kafka.ErrorAction { panic("boom") }))...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
-	require.ErrorIs(t, c.Run(t.Context()), kafka.ErrStopped)
+	require.ErrorIs(t, runToEnd(t, c), kafka.ErrStopped)
 	require.NoError(t, c.Shutdown(t.Context()))
 }
 
@@ -416,7 +440,7 @@ func TestConsumer_StopDuringRedeliveryDelay(t *testing.T) {
 	)
 	_, stop := startConsumer(t, consumerConfig(brokers), rec, slow)
 
-	<-failed
+	receive(t, failed)
 
 	start := time.Now()
 
@@ -437,9 +461,7 @@ func TestConsumer_DeadLetter(t *testing.T) {
 	brokers := newCluster(t, testTopic, dlt)
 	produce(t, brokers, testTopic, "bad", "good")
 
-	p, err := kafka.NewProducer(kafka.Config{Brokers: brokers}, testOptions()...)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Shutdown(context.WithoutCancel(t.Context())) })
+	p := newProducer(t, brokers)
 
 	rec := newRecorder()
 	rec.handle = func(_ context.Context, msg *kafka.Message, _ int) error {
@@ -480,9 +502,7 @@ func TestConsumer_ProcessSpan(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 	tracing := []kafka.Option{kafka.WithTracerProvider(tp), kafka.WithPropagators(propagation.TraceContext{})}
 
-	p, err := kafka.NewProducer(kafka.Config{Brokers: brokers}, testOptions(tracing...)...)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Shutdown(context.WithoutCancel(t.Context())) })
+	p := newProducer(t, brokers, tracing...)
 
 	ctx, parent := tp.Tracer("test").Start(t.Context(), "request")
 	require.NoError(t, p.Produce(ctx, testTopic, nil, []byte("a")))
@@ -499,7 +519,7 @@ func TestConsumer_ProcessSpan(t *testing.T) {
 		}),
 		tracing...)
 
-	sc := <-got
+	sc := receive(t, got)
 
 	require.NoError(t, stop())
 	assert.Equal(t, parent.SpanContext().TraceID(), sc.TraceID(), "trace continues from the publisher")

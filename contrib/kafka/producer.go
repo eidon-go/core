@@ -3,9 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -19,43 +17,55 @@ import (
 //
 // It is a Publisher, Starter, Resource, Healthchecker and Namer.
 type Producer struct {
-	name     string
-	logger   *slog.Logger
-	connect  retry.Policy
-	client   *kgo.Client
-	releaser *lifecycle.Releaser
+	name    string
+	connect retry.Policy
+	lazy    *lazyClient
+	flusher *lifecycle.Releaser // flushes the buffered records, once
+	closer  *lifecycle.Releaser // closes the client, once
 }
 
-// NewProducer validates cfg and builds the producer; it does no network I/O —
-// franz-go connects on first use, and Start pings.
+// NewProducer validates cfg and prepares the producer; it does no network
+// I/O: the franz-go client is created in Start.
 func NewProducer(cfg Config, opts ...Option) (*Producer, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
+	cfg = cfg.clone()
 	o := newOptions(opts)
+	lazy := newLazyClient(o.clientOpts(cfg, o.tracer(cfg.ClientID, "")), (*kgo.Client).Close)
 
-	client, err := kgo.NewClient(o.clientOpts(cfg, o.tracer(cfg.ClientID, ""))...)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
-	}
+	return &Producer{
+		name:    o.name,
+		connect: o.connectPolicy(),
+		lazy:    lazy,
+		flusher: lifecycle.ShutdownOnce(func(ctx context.Context) error {
+			if client := lazy.get(); client != nil {
+				return client.Flush(ctx)
+			}
 
-	p := &Producer{
-		name:     o.name,
-		logger:   o.logger,
-		connect:  o.connectPolicy(),
-		client:   client,
-		releaser: nil,
-	}
-	p.releaser = lifecycle.ShutdownOnce(p.release)
-
-	return p, nil
+			return nil
+		}),
+		closer: lifecycle.CloseOnce(lazy.close),
+	}, nil
 }
 
-// Publish sends msgs and waits until every one is acknowledged or ctx is
-// done; it returns the first error. Each message needs a Topic. The trace
-// context of ctx goes into the record headers. Implements Publisher.
+// Publish sends msgs and waits until every one is acknowledged; it returns
+// the first error. Each message needs a Topic. The trace context of ctx goes
+// into the record headers. It returns ErrNotStarted before Start.
+//
+// Cancelling ctx ends the wait for records that have not been sent yet; a
+// record already in flight to the broker (the producer is idempotent) is
+// waited for until the broker answers or the client's delivery timeout
+// passes, so Publish may return after ctx is done. An error does not mean
+// that the broker rejected the record: it may have been written, and a
+// retry may duplicate it. Implements Publisher.
 func (p *Producer) Publish(ctx context.Context, msgs ...*Message) error {
+	client := p.lazy.get()
+	if client == nil {
+		return fmt.Errorf("kafka: publish: %w", ErrNotStarted)
+	}
+
 	records := make([]*kgo.Record, 0, len(msgs))
 
 	for i, m := range msgs {
@@ -66,7 +76,7 @@ func (p *Producer) Publish(ctx context.Context, msgs ...*Message) error {
 		records = append(records, m.record(ctx))
 	}
 
-	if err := p.client.ProduceSync(ctx, records...).FirstErr(); err != nil {
+	if err := client.ProduceSync(ctx, records...).FirstErr(); err != nil {
 		return fmt.Errorf("kafka: publish: %w", err)
 	}
 
@@ -79,55 +89,42 @@ func (p *Producer) Produce(ctx context.Context, topic string, key, value []byte)
 	return p.Publish(ctx, &Message{Topic: topic, Key: key, Value: value}) //nolint:exhaustruct_v5 // a plain message
 }
 
-// Kgo returns the franz-go client. It is owned by Producer: do not close it,
-// call Shutdown.
-func (p *Producer) Kgo() *kgo.Client { return p.client }
+// Kgo returns the franz-go client, nil before Start. It is owned by
+// Producer: do not close it, call Shutdown.
+func (p *Producer) Kgo() *kgo.Client { return p.lazy.get() }
 
 // Name returns the component name (WithName). Implements lifecycle.Namer.
 func (p *Producer) Name() string { return p.name }
 
-// Start pings the cluster until it answers, retried with the WithConnectRetry
-// policy. It returns ErrClosed after Shutdown. Implements lifecycle.Starter.
+// Start creates the client and pings the cluster until it answers, retried
+// with the WithConnectRetry policy; Shutdown ends the retries. It returns
+// ErrClosed after Shutdown and ErrAlreadyStarted when called twice.
+// Implements lifecycle.Starter.
 func (p *Producer) Start(ctx context.Context) error {
-	return startPing(ctx, p.connect, p.client, p.releaser)
+	return p.lazy.start(ctx, p.connect)
 }
 
 // Shutdown waits until the buffered records are delivered (Flush), until ctx
 // is done, then closes the client: records still buffered then fail with an
-// error of their Publish. Idempotent. Implements lifecycle.Resource.
+// error of their Publish. When ctx is done before the close has finished, it
+// returns ctx.Err() and the close goes on in the background; a later
+// Shutdown waits for it. Idempotent, safe without Start. Implements
+// lifecycle.Resource.
 func (p *Producer) Shutdown(ctx context.Context) error {
-	return wrap(p.releaser.Shutdown(ctx))
-}
-
-// Healthcheck pings the cluster within ctx. Implements lifecycle.Healthchecker.
-func (p *Producer) Healthcheck(ctx context.Context) error {
-	return healthPing(ctx, p.client, p.releaser)
-}
-
-// release flushes until ctx is done, then closes the client; the close is
-// not waited for past ctx.
-func (p *Producer) release(ctx context.Context) error {
-	flushErr := p.client.Flush(ctx)
-
-	closed := make(chan struct{})
-
-	go func() {
-		defer close(closed)
-
-		p.client.Close()
-	}()
-
-	select {
-	case <-closed:
-	case <-ctx.Done():
-		return errors.Join(flushErr, ctx.Err())
-	}
+	flushErr := p.flusher.Shutdown(ctx)
+	closeErr := p.closer.Shutdown(ctx)
 
 	if flushErr != nil {
-		return fmt.Errorf("flush: %w", flushErr)
+		return fmt.Errorf("kafka: flush: %w", flushErr)
 	}
 
-	return nil
+	return wrap(closeErr)
+}
+
+// Healthcheck pings the cluster within ctx; ErrNotStarted before Start,
+// ErrClosed after Shutdown. Implements lifecycle.Healthchecker.
+func (p *Producer) Healthcheck(ctx context.Context) error {
+	return p.lazy.ping(ctx)
 }
 
 // JSONProducer publishes values of type T as JSON to one topic, with a

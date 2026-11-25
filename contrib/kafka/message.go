@@ -58,8 +58,9 @@ func (f HandlerFunc) Handle(ctx context.Context, msg *Message) error { return f(
 // Publisher publishes messages; *Producer implements it. Depend on it rather
 // than on *Producer to swap in a fake in tests.
 type Publisher interface {
-	// Publish sends msgs and waits until every one is acknowledged or ctx is
-	// done. It returns the first error.
+	// Publish sends msgs and waits until every one is acknowledged. It
+	// returns the first error. Cancelling ctx is best effort: see
+	// Producer.Publish.
 	Publish(ctx context.Context, msgs ...*Message) error
 }
 

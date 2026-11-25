@@ -3,6 +3,7 @@ package kafka
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -50,6 +51,14 @@ func (c Config) kgoOpts() []kgo.Opt {
 	}
 
 	return opts
+}
+
+// clone copies the slices, so that a caller changing them after the
+// constructor (Start creates the client later) changes nothing.
+func (c Config) clone() Config {
+	c.Brokers = slices.Clone(c.Brokers)
+
+	return c
 }
 
 // Offset selects where a consumer group starts reading a partition that has

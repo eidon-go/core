@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
+	"slices"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -55,12 +55,9 @@ type Consumer struct {
 	redelivery   retry.Policy
 	errorHandler ErrorHandler
 	tracer       *kotel.Tracer
-	kgoOpts      []kgo.Opt
 	maxPoll      int
 
-	mu     sync.Mutex
-	client *kgo.Client // created by Start
-
+	lazy     *lazyClient
 	worker   *lifecycle.Worker
 	releaser *lifecycle.Releaser
 }
@@ -76,6 +73,8 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer
 		return nil, err
 	}
 
+	cfg.Config = cfg.clone()
+	cfg.Topics = slices.Clone(cfg.Topics)
 	offset, _ := cfg.Offset.kgo() // validated
 
 	maxPoll := cfg.MaxPollRecords
@@ -86,7 +85,7 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer
 	o := newOptions(opts)
 	tracer := o.tracer(cfg.ClientID, cfg.Group)
 
-	c := &Consumer{ //nolint:exhaustruct_v5 // client, worker and releaser are set below and in Start
+	c := &Consumer{ //nolint:exhaustruct_v5 // lazy, worker and releaser are set below
 		cfg:          cfg,
 		handler:      handler,
 		name:         o.name,
@@ -98,7 +97,7 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer
 		maxPoll:      maxPoll,
 	}
 
-	c.kgoOpts = o.clientOpts(cfg.Config, tracer,
+	kgoOpts := o.clientOpts(cfg.Config, tracer,
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(cfg.Topics...),
 		kgo.ConsumeResetOffset(offset),
@@ -109,8 +108,11 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer
 		kgo.BlockRebalanceOnPoll(),
 		kgo.OnPartitionsRevoked(c.onRevoked),
 	)
+	// A loop cut off by Shutdown's deadline may still hold a poll: the
+	// rebalance is allowed so that leaving the group does not wait for it.
+	c.lazy = newLazyClient(kgoOpts, (*kgo.Client).CloseAllowingRebalance)
 	c.worker = lifecycle.NewWorker(lifecycle.WorkerFuncs{Run: c.loop, Logger: c.logger})
-	c.releaser = lifecycle.CloseOnce(c.close)
+	c.releaser = lifecycle.CloseOnce(c.lazy.close)
 
 	return c, nil
 }
@@ -119,35 +121,28 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer
 func (c *Consumer) Name() string { return c.name }
 
 // Start creates the client, which joins the group, and pings the cluster
-// until it answers, retried with the WithConnectRetry policy. It returns
-// ErrClosed after Shutdown and ErrAlreadyStarted when called twice.
-// Implements lifecycle.Starter.
+// until it answers, retried with the WithConnectRetry policy; Shutdown ends
+// the retries. It returns ErrClosed after Shutdown and ErrAlreadyStarted when
+// called twice. Implements lifecycle.Starter.
 func (c *Consumer) Start(ctx context.Context) error {
-	client, err := c.newClient()
-	if err != nil {
-		return err
-	}
-
-	return startPing(ctx, c.connect, client, c.releaser)
+	return c.lazy.start(ctx, c.connect)
 }
 
 // Run consumes until the consumer is stopped — ctx cancelled or Shutdown
 // called — and the message in flight is handled, then commits and returns
 // nil. It returns an error wrapping ErrStopped when the ErrorHandler stops
-// the consumer, ErrNotStarted without Start, ErrAlreadyStarted when called
-// twice, and nil at once after Shutdown. Implements lifecycle.Runner.
+// the consumer, an error wrapping kgo.ErrMaxDecompress when a partition
+// cannot be fetched any more, ErrNotStarted without Start, ErrAlreadyStarted
+// when called twice, and nil at once after Shutdown. Implements
+// lifecycle.Runner.
 func (c *Consumer) Run(ctx context.Context) error {
-	c.mu.Lock()
-	started := c.client != nil
-	c.mu.Unlock()
-
-	if !started && !c.releaser.Closing() {
+	if c.lazy.get() == nil && !c.lazy.isClosed() {
 		return wrap(ErrNotStarted)
 	}
 
 	err := c.worker.Run(ctx)
-	if errors.Is(err, ErrStopped) {
-		return err //nolint:wrapcheck // ErrStopped carries the module prefix
+	if errors.Is(err, ErrStopped) || errors.Is(err, kgo.ErrMaxDecompress) {
+		return err //nolint:wrapcheck // the loop's errors carry the module prefix
 	}
 
 	return wrap(err)
@@ -175,42 +170,6 @@ func (c *Consumer) Healthcheck(ctx context.Context) error {
 	return wrap(c.worker.Healthcheck(ctx))
 }
 
-func (c *Consumer) newClient() (*kgo.Client, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	switch {
-	case c.releaser.Closing():
-		return nil, ErrClosed
-	case c.client != nil:
-		return nil, ErrAlreadyStarted
-	}
-
-	client, err := kgo.NewClient(c.kgoOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
-	}
-
-	c.client = client
-
-	return client, nil
-}
-
-// close leaves the group and closes the client, if Start created it. A loop
-// cut off by Shutdown's deadline may still hold a poll: the rebalance is
-// allowed so that leaving does not wait for it.
-func (c *Consumer) close() error {
-	c.mu.Lock()
-	client := c.client
-	c.mu.Unlock()
-
-	if client != nil {
-		client.CloseAllowingRebalance()
-	}
-
-	return nil
-}
-
 // onRevoked commits the handled messages of the partitions being revoked
 // (and of the others: commits are per group member) before another member
 // takes them over.
@@ -222,10 +181,7 @@ func (c *Consumer) onRevoked(ctx context.Context, client *kgo.Client, _ map[stri
 
 // loop is the worker's loop: it polls with stop and handles with work.
 func (c *Consumer) loop(stop, work context.Context) error {
-	c.mu.Lock()
-	client := c.client
-	c.mu.Unlock()
-
+	client := c.lazy.get()
 	errStreak := 0
 
 	for {
@@ -238,12 +194,21 @@ func (c *Consumer) loop(stop, work context.Context) error {
 		}
 
 		if stop.Err() != nil {
-			// Records polled together with the stop are not handled: they
-			// are not marked and come again after a restart.
+			// Records polled together with the stop are not handled and not
+			// committed: they come again after a restart from the committed
+			// offset (or, with no commit yet, from the Offset of the config —
+			// with OffsetNewest they are not read again).
 			client.AllowRebalance()
 			c.commit(work, client)
 
 			return nil //nolint:nilerr // the stop is not an error
+		}
+
+		if err := fatalFetchError(fetches); err != nil {
+			client.AllowRebalance()
+			c.commit(work, client)
+
+			return err
 		}
 
 		if c.logFetchErrors(stop, fetches) && fetches.NumRecords() == 0 {
@@ -290,6 +255,22 @@ func (c *Consumer) logFetchErrors(ctx context.Context, fetches kgo.Fetches) bool
 	})
 
 	return found
+}
+
+// fatalFetchError returns the first error after which franz-go stops
+// fetching a partition for good: a batch larger than the decompression
+// bound (kgo.ErrDecompressTooLarge) is never skipped, so the partition would
+// stall while the consumer looks healthy.
+func fatalFetchError(fetches kgo.Fetches) error {
+	var fatal error
+
+	fetches.EachError(func(topic string, partition int32, err error) {
+		if fatal == nil && errors.Is(err, kgo.ErrMaxDecompress) {
+			fatal = fmt.Errorf("kafka: fetch %s[%d]: %w", topic, partition, err)
+		}
+	})
+
+	return fatal
 }
 
 // handleFetches handles the polled records in order until one stops the
@@ -353,14 +334,15 @@ func (c *Consumer) logFailure(ctx context.Context, r *kgo.Record, attempt int, a
 }
 
 // waitRedelivery waits for the redelivery delay after the failed attempt,
-// unless the stop begins first; it reports whether it waited.
+// unless the stop begins first; it reports whether a new attempt may start.
 func (c *Consumer) waitRedelivery(stop, work context.Context, attempt int, err error) bool {
 	delay := c.redelivery.Delay(attempt)
 	if c.redelivery.OnRetry != nil {
 		c.redelivery.OnRetry(work, retry.Attempt{Number: attempt, Err: err, Delay: delay})
 	}
 
-	return sleep(stop, delay)
+	// The stop may have begun just as the delay ended: no new attempt then.
+	return sleep(stop, delay) && stop.Err() == nil
 }
 
 // handleOnce calls the handler in the record's process span; a panic is an

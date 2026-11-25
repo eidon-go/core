@@ -60,6 +60,72 @@ func consumerConfig(brokers []string) kafka.ConsumerConfig {
 	}
 }
 
+// newProducer returns a started producer, shut down when the test ends.
+func newProducer(t *testing.T, brokers []string, opts ...kafka.Option) *kafka.Producer {
+	t.Helper()
+
+	p, err := kafka.NewProducer(kafka.Config{Brokers: brokers}, testOptions(opts...)...)
+	require.NoError(t, err)
+	shutdownOnCleanup(t, p)
+	require.NoError(t, p.Start(t.Context()))
+
+	return p
+}
+
+// shutdownOnCleanup shuts r down, bounded, when the test ends.
+func shutdownOnCleanup(t *testing.T, r interface {
+	Shutdown(ctx context.Context) error
+},
+) {
+	t.Helper()
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), waitFor)
+		defer cancel()
+
+		_ = r.Shutdown(ctx)
+	})
+}
+
+// boundedCtx is a context for cleanup: not cancelled with the test, but
+// bounded.
+func boundedCtx(t *testing.T) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), waitFor)
+	t.Cleanup(cancel)
+
+	return ctx
+}
+
+// receive waits for a value of ch, failing the test after waitFor.
+func receive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(waitFor):
+		require.FailNow(t, "nothing received")
+
+		var zero T
+
+		return zero
+	}
+}
+
+// runToEnd runs c until Run returns by itself, failing the test after
+// waitFor.
+func runToEnd(t *testing.T, c *kafka.Consumer) error {
+	t.Helper()
+
+	done := make(chan error, 1)
+
+	go func() { done <- c.Run(t.Context()) }()
+
+	return receive(t, done)
+}
+
 // produce publishes values to topic, in order, with a plain franz-go client.
 func produce(t *testing.T, brokers []string, topic string, values ...string) { //nolint:unparam // for any topic
 	t.Helper()
@@ -195,6 +261,7 @@ func startConsumer(
 
 	c, err := kafka.NewConsumer(cfg, h, testOptions(opts...)...)
 	require.NoError(t, err)
+	shutdownOnCleanup(t, c) // also when Start fails
 	require.NoError(t, c.Start(t.Context()))
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -215,7 +282,7 @@ func startConsumer(
 
 			require.NoError(t, c.Shutdown(sctx))
 
-			runErr = <-done
+			runErr = receive(t, done)
 		})
 
 		return runErr

@@ -89,19 +89,24 @@ rebalance callbacks) passed through `WithKgoOpts` break its guarantees.
 
 | Component | `Start` | `Run` | `Shutdown` | `Healthcheck` |
 |---|---|---|---|---|
-| `Consumer` | creates the client (joins the group), pings with retry | consumes until stopped; returns `nil`, or an error wrapping `ErrStopped` when the error handler stops it | stops `Run` (see below), then leaves the group and closes the client | `nil` while consuming, `ErrNotRunning` otherwise |
-| `Producer` | pings with retry | — | flushes buffered records until its ctx is done, then closes | pings |
-| `Client` | pings with retry | — | closes | pings |
+| `Consumer` | creates the client (joins the group), pings with retry | consumes until stopped; returns `nil`, an error wrapping `ErrStopped` when the error handler stops it, or one wrapping `kgo.ErrMaxDecompress` when a partition can no longer be fetched (below) | stops `Run` (see below), then leaves the group and closes the client | `nil` while consuming, `ErrNotRunning` otherwise |
+| `Producer` | creates the client, pings with retry | — | flushes buffered records until its ctx is done, then closes | pings |
+| `Client` | creates the client, pings with retry | — | closes | pings |
 
-`New*` do no network I/O. `Shutdown` is idempotent and safe without `Start`; `Start` after
-`Shutdown` returns `ErrClosed`. When the ctx of `Shutdown` is done, it returns an error wrapping
-`ctx.Err()` and the close goes on in the background.
+`New*` do no network I/O: the franz-go client — whose background loops talk to the brokers — is
+created in `Start`, so `Kgo()` is `nil` before it and `Publish` returns `ErrNotStarted`. A
+`Shutdown` during `Start` ends its ping retries at once (`Start` returns `ErrClosed`). `Shutdown`
+is idempotent and safe without `Start`; `Start` after `Shutdown` returns `ErrClosed`, a second
+`Start` `ErrAlreadyStarted`. When the ctx of `Shutdown` is done, it returns an error wrapping
+`ctx.Err()` and the close goes on in the background; a later `Shutdown` waits for it.
 
 The consumer is built on [`lifecycle.Worker`](../../lifecycle/README.md#writing-a-component).
 Following the [lifecycle contract](../../lifecycle/README.md#contract), the cancelled ctx of `Run`
 and `Shutdown` are one stop:
 
-1. The poll returns at once; records polled but not yet handled are left for the next owner.
+1. The poll returns at once; records polled but not yet handled are not committed, so they are
+   read again from the committed offset — with no commit yet, from `Offset`, so with
+   `OffsetNewest` they are not.
 2. The message in flight finishes: the handler's ctx is not derived from `Run`'s, it is cancelled
    only at the deadline of `Shutdown`. A stop during a redelivery delay ends the wait instead (the
    message is not committed).
@@ -151,11 +156,20 @@ poison messages and recovering once the attempts are exhausted:
 Write your own `ErrorHandler` for anything else, e.g. skip validation errors and retry the rest
 forever with `WithRedeliveryPolicy(retry.Policy{MaxAttempts: retry.Forever, ...})`.
 
+**Fetch errors** (a broker down, a leader moving) are logged and the poll is retried with a
+growing pause. One is fatal: a batch that would decompress past franz-go's bound
+(`kgo.MaxDecompressBatchBytes`, 1 GiB by default) is never skipped, and franz-go stops fetching
+its partition — `Run` then returns an error wrapping `kgo.ErrMaxDecompress` rather than consume
+the other partitions while that one stalls unnoticed.
+
 ## Producing
 
-`Producer.Publish(ctx, msgs...)` sends messages and waits until each is acknowledged or `ctx` is
-done; `Produce(ctx, topic, key, value)` sends one. The trace context of `ctx` goes into the record
-headers. Depend on the `Publisher` interface to swap in a fake in tests.
+`Producer.Publish(ctx, msgs...)` sends messages and waits until each is acknowledged;
+`Produce(ctx, topic, key, value)` sends one. The trace context of `ctx` goes into the record
+headers. Cancelling `ctx` is best effort: it ends the wait for records not sent yet, but a record
+already in flight (the producer is idempotent) is waited for until the broker answers or the
+delivery timeout passes, so `Publish` may return after `ctx` is done. An error does not mean the
+broker rejected the record — it may have been written, and a retry may duplicate it. Depend on the `Publisher` interface to swap in a fake in tests.
 `NewJSONProducer[T](publisher, topic).Produce(ctx, key, value)` encodes values as JSON with a
 `content-type: application/json` header.
 

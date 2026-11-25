@@ -91,9 +91,18 @@ func (c *collector) got() []string {
 	return append([]string(nil), c.values...)
 }
 
-// runKafkaConsumer starts c and runs it until the returned stop is called.
+// runKafkaConsumer starts c and runs it until the returned stop is called —
+// or the test ends, also when it fails before calling stop. stop is
+// idempotent.
 func runKafkaConsumer(t *testing.T, c *kafka.Consumer) func() {
 	t.Helper()
+
+	t.Cleanup(func() { // also when Start fails
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), kafkaWait)
+		defer cancel()
+
+		_ = c.Shutdown(ctx)
+	})
 
 	require.NoError(t, c.Start(t.Context()))
 
@@ -102,15 +111,30 @@ func runKafkaConsumer(t *testing.T, c *kafka.Consumer) func() {
 
 	go func() { done <- c.Run(ctx) }()
 
-	return func() {
-		cancel()
+	var once sync.Once
 
-		sctx, scancel := context.WithTimeout(context.WithoutCancel(t.Context()), kafkaWait)
-		defer scancel()
+	stop := func() {
+		once.Do(func() {
+			cancel()
 
-		require.NoError(t, c.Shutdown(sctx))
-		require.NoError(t, <-done)
+			sctx, scancel := context.WithTimeout(context.WithoutCancel(t.Context()), kafkaWait)
+			defer scancel()
+
+			require.NoError(t, c.Shutdown(sctx))
+
+			// Shutdown bounds the drain; once it has returned, so has Run.
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(kafkaWait):
+				assert.Fail(t, "Run did not return after Shutdown")
+			}
+		})
 	}
+
+	t.Cleanup(stop)
+
+	return stop
 }
 
 func TestKafka_ConsumerContract(t *testing.T) {

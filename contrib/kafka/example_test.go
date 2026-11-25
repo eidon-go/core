@@ -36,6 +36,7 @@ func Example() {
 
 		return
 	}
+	defer shutdown(producer) // on every path; deferred calls run in reverse, so after the consumer
 
 	handled := make(chan struct{})
 	handler := kafka.HandlerFunc(func(_ context.Context, msg *kafka.Message) error {
@@ -61,6 +62,7 @@ func Example() {
 
 		return
 	}
+	defer shutdown(consumer)
 
 	err = errors.Join(
 		producer.Start(ctx),
@@ -74,21 +76,47 @@ func Example() {
 	}
 
 	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+
 	done := make(chan error, 1)
 
 	go func() { done <- consumer.Run(runCtx) }()
 
-	<-handled
+	select {
+	case <-handled:
+	case err := <-done:
+		fmt.Println("consumer stopped:", err)
+
+		return
+	case <-time.After(10 * time.Second):
+		fmt.Println("no order handled")
+
+		return
+	}
+
 	stop() // as app.App does on a signal
 
 	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	fmt.Println(<-done, consumer.Shutdown(shutdownCtx), producer.Shutdown(shutdownCtx))
+	// Shutdown bounds the drain; once it has returned, so has Run.
+	consumerErr := consumer.Shutdown(shutdownCtx)
+	fmt.Println(<-done, consumerErr, producer.Shutdown(shutdownCtx))
 
 	// Output:
 	// order 42
 	// <nil> <nil> <nil>
+}
+
+// shutdown shuts r down within 10 seconds; a repeated Shutdown returns nil.
+func shutdown(r interface {
+	Shutdown(ctx context.Context) error
+},
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_ = r.Shutdown(ctx)
 }
 
 func ExampleJSONProducer() {
