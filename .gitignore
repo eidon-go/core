@@ -8,5 +8,10 @@ internal/integration/vendor
 go.work
 go.work.sum
 
-# Personal Claude Code notes
+# Claude Code: shared config in .claude/ is committed (settings.json, agents/,
+# commands/, skills/, hooks/); personal and generated files are not.
 CLAUDE.local.md
+.claude/settings.local.json
+.claude/plans/
+.claude/worktrees/
+.claude/*.local.*
