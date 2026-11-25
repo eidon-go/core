@@ -29,3 +29,18 @@ conn, err := retry.DoValue(ctx, p, dial) // for operations returning a value
 - `Policy.Delay(attempt)` exposes the computed delay, e.g. for message redelivery delays.
 
 Integrations accept a `Policy` as an option (e.g. a connect-retry option) so callers can tune it.
+
+- `retry.ConnectPolicy()` is the default for connecting in `Start`: 10 attempts, 200ms doubling
+  up to 5s, 20% jitter — at most about 26 seconds of waiting. It is a function returning a fresh
+  copy, so no caller can change the default for the others.
+- `p.Logged(logger)` returns a copy of `p` whose `OnRetry` also logs every retry (`WarnContext`,
+  message `retrying`, with `attempt`, `delay`, `error`), after the `OnRetry` `p` already had.
+  Pass the component's logger, which already carries its name. A nil logger means
+  `slog.Default()`.
+
+```go
+// c.connectRetry comes from WithConnectRetry, defaulting to retry.ConnectPolicy().
+func (c *Client) Start(ctx context.Context) error {
+    return c.connectRetry.Logged(c.logger).Do(ctx, c.connectAndPing)
+}
+```

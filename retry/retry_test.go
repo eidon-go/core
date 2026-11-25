@@ -1,8 +1,10 @@
 package retry_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -306,4 +308,52 @@ func TestErrPermanentMessage(t *testing.T) {
 
 	assert.Equal(t, "retry: permanent error", retry.ErrPermanent.Error())
 	assert.Equal(t, 10*time.Millisecond, retry.Policy{InitialDelay: 10 * time.Millisecond}.Delay(1))
+}
+
+func TestConnectPolicy(t *testing.T) {
+	t.Parallel()
+
+	p := retry.ConnectPolicy()
+	assert.Equal(t, 10, p.MaxAttempts)
+	assert.Equal(t, 200*time.Millisecond, p.InitialDelay)
+	assert.Equal(t, 5*time.Second, p.MaxDelay)
+	assert.Nil(t, p.OnRetry)
+
+	p.MaxAttempts = 1
+	assert.Equal(t, 10, retry.ConnectPolicy().MaxAttempts, "every call returns a fresh copy")
+
+	noJitter := retry.ConnectPolicy()
+	noJitter.Jitter = 0
+
+	var total time.Duration
+	for attempt := 1; attempt < noJitter.MaxAttempts; attempt++ {
+		total += noJitter.Delay(attempt)
+	}
+
+	assert.Equal(t, 26200*time.Millisecond, total, "documented as at most about 26 seconds")
+}
+
+func TestLogged(t *testing.T) {
+	t.Parallel()
+
+	var (
+		buf   bytes.Buffer
+		calls int
+	)
+
+	p := retry.Policy{MaxAttempts: 2, OnRetry: func(context.Context, retry.Attempt) { calls++ }}
+	logged := p.Logged(slog.New(slog.NewTextHandler(&buf, nil)).With("component", "redis"))
+
+	err := logged.Do(t.Context(), func(context.Context) error { return errors.New("connection refused") })
+	require.EqualError(t, err, "connection refused")
+
+	assert.Equal(t, 1, calls, "the existing OnRetry is still called")
+	assert.Contains(
+		t,
+		buf.String(),
+		`level=WARN msg=retrying component=redis attempt=1 delay=0s error="connection refused"`,
+	)
+	assert.Equal(t, 1, bytes.Count(buf.Bytes(), []byte("retrying")))
+
+	assert.NotNil(t, retry.Policy{}.Logged(nil).OnRetry, "a nil logger means slog.Default()")
 }

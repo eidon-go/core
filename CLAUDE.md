@@ -121,6 +121,9 @@ published `go.mod` files.
   deadline; only sources of work are Runners) are documented in the package doc of
   `lifecycle/lifecycle.go` — read it before touching `app` or writing a component. `lifecycle/lifecycletest` provides
   `lifecycletest.Resource` / `lifecycletest.Runner` contract tests that every component must pass.
+  Components build on the adapters instead of their own stop state machine: clients on
+  `lifecycle.CloseOnce` / `ShutdownOnce` (`*Releaser`), servers on `lifecycle.NewServer`
+  (`ServerFuncs{Listen, Serve, Drain, Close}`, kept in an unexported field, not embedded).
 - **`app`** — drives components: ordered Start, concurrent Run, signals, readiness/health,
   bounded shutdown (Run ctx cancelled, runners shut down concurrently, then the rest in reverse
   order), lifecycle events via `app.WithObserver`
@@ -132,7 +135,8 @@ published `go.mod` files.
   JSON is built in; other formats plug in via `WithParser(func([]byte) (map[string]any, error), exts...)`.
   KV backends implement `config.KV`.
 - **`retry`** — `retry.Policy` with backoff; `OnRetry` hook for logging, `retry.Forever` only
-  bounded by ctx.
+  bounded by ctx; `retry.ConnectPolicy()` is the default connect policy and `Policy.Logged`
+  adds the standard retry log.
 
 Dependency rules between packages/modules (from `docs/contrib-guidelines.md`):
 `lifecycle` depends only on stdlib. Integration modules may import only `core/lifecycle` and

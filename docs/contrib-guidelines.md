@@ -53,6 +53,19 @@ Implement the [`lifecycle`](../lifecycle/README.md) contract and prove it with
 `lifecycletest.Resource` / `lifecycletest.Runner` in the module's tests (raise the timeout with
 `lifecycletest.WithTimeout` for container-backed components).
 
+Build on the adapters instead of writing the stop state machine yourself (see "Writing a
+component" in the lifecycle README):
+
+- **Clients** (databases, caches, producers, connections): `Shutdown` through
+  `lifecycle.CloseOnce` (a blocking `Close()`) or `lifecycle.ShutdownOnce` (a `Shutdown(ctx)`).
+- **Servers**: `lifecycle.NewServer` with `Listen`/`Serve`/`Drain`/`Close`, kept in an unexported
+  field (not embedded) and delegated to; re-export its state errors
+  (`var ErrClosed = lifecycle.ErrClosed`) instead of declaring your own, and wrap the errors
+  `Start`/`Run`/`Shutdown` return with the module's prefix (`"http2: %w"`).
+- A hand-written `Runner` is the exception, for what fits neither shape.
+
+The rules below are what the adapters implement; a hand-written component follows them in full.
+
 - Every component implements `lifecycle.Namer`. Default name: the module name (`"redis"`);
   `WithName(string)` distinguishes instances (two databases).
 - `Start(ctx)`: connect/listen/ping, typically through `retry.Policy` (see 5). On failure,
@@ -77,10 +90,12 @@ Implement the [`lifecycle`](../lifecycle/README.md) contract and prove it with
 
 ## 5. Retry
 
-- Connection retry: `WithConnectRetry(retry.Policy)`; document the default policy.
+- Connection retry: `WithConnectRetry(retry.Policy)`, defaulting to `retry.ConnectPolicy()`
+  (say so in its doc comment); a module that needs another default documents it.
 - Redelivery/backoff of messages: `WithRedeliveryPolicy(retry.Policy)` using `Policy.Delay`.
 - Reconnect loops use `retry.Forever` bounded by `ctx`; never retry forever without a context.
-- Log retries through `Policy.OnRetry` with the component's logger (`WarnContext`).
+- Log retries with the component's logger: `policy.Logged(logger)` (it keeps an `OnRetry` the
+  caller set).
 
 ## 6. Logging
 
