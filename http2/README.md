@@ -9,6 +9,7 @@ An HTTP server as a [`lifecycle`](../lifecycle/README.md) component: the port is
 requests are served in `Run`, and `Shutdown` drains in-flight requests, then force-closes what is
 left when its deadline expires. HTTP/1.1 and HTTP/2 (over TLS, or cleartext h2c), OpenTelemetry
 instrumentation on by default, opt-in Kubernetes-style probes, and a panic-recovery middleware.
+The [`client`](#client) package builds the matching outbound `*http.Client`.
 
 ```sh
 go get github.com/eidon-go/core/http2
@@ -114,3 +115,49 @@ response has not started (an informational header such as 103 Early Hints does n
 upgrades and the sendfile path of `http.ServeContent` work through it; write errors are returned
 unwrapped. Put it directly around the application handler,
 inside logging and authentication.
+
+## Client
+
+Package `http2/client` builds an `*http.Client` for service-to-service and third-party API calls:
+
+```go
+c, err := client.New(
+    client.Config{ResponseHeaderTimeout: 60 * time.Second}, // a slow upstream
+    client.WithRoundTripper(bearer(token)),
+)
+
+ctx, cancel := context.WithTimeout(ctx, 2*time.Minute) // the per-call deadline
+defer cancel()
+req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+resp, err := c.Do(req)
+```
+
+It returns a plain `*http.Client`, not a lifecycle component. The client has no client-wide
+`Timeout` on purpose: bound every call with its context, so deadlines propagate through retries
+and request chains.
+
+| `Config` field | Default | Meaning |
+|---|---|---|
+| `MaxIdleConns` | 100 | idle connections across all hosts |
+| `MaxIdleConnsPerHost` | 20 | idle connections per host (net/http's default of 2 forces reconnects) |
+| `MaxConnsPerHost` | 0 (no limit) | all connections per host |
+| `DialTimeout` | 5s | TCP connect |
+| `KeepAlive` | 30s | TCP keep-alive interval |
+| `TLSHandshakeTimeout` | 5s | TLS handshake |
+| `ResponseHeaderTimeout` | 10s | wait for the response headers after the request was written |
+| `IdleConnTimeout` | 90s | how long an idle connection stays pooled |
+| `UnencryptedHTTP2` | false | speak h2c (prior knowledge) to `http://` URLs, e.g. to an `http2.Server` with `UnencryptedHTTP2`; the client then speaks HTTP/2 only |
+
+Zero means the default; a negative duration disables the timeout. Over TLS, HTTP/2 is negotiated
+by default.
+
+| Option | Default | |
+|---|---|---|
+| `WithTLSConfig(*tls.Config)` | system roots | mTLS, private CAs; cloned |
+| `WithRoundTripper(wrap)` | — | auth headers, signing, rate limiting, retries; the first passed is the outermost |
+| `WithTransport(func(*http.Transport))` | — | escape hatch for other transport fields (proxy, compression, dialer) |
+| `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals at `New` | client spans (`{method}`), metrics and trace-context injection via otelhttp |
+| `WithOtelHTTPOptions(...otelhttp.Option)` | — | extra otelhttp options |
+
+Tracing is innermost, directly around the transport: a span covers one network round trip, and
+each retry made by a wrapper gets its own span.

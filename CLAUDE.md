@@ -27,8 +27,8 @@ imports.
    changes are still allowed). Core `v1.0.0` + `config/yaml/v1.0.0` are tagged once the main
    contrib modules (`http2`, `config/etcd`, `otel`, `grpc`) have validated the API; contrib modules
    are tagged only after that, with their `require` bumped to core `v1.0.0`.
-2. **Phase 2 — contrib modules**, one module per PR, in this order: `http2` (server; client
-   later) → `config/etcd` → `otel` → `grpc` → `jwt` → `kafka` → `nats` → `rabbitmq` → `redis` →
+2. **Phase 2 — contrib modules**, one module per PR, in this order: `http2` (server and
+   `http2/client`; done) → `config/etcd` → `otel` → `grpc` → `jwt` → `kafka` → `nats` → `rabbitmq` → `redis` →
    `sql` (as v0.x). Modules may declare a newer `go` than core when their dependencies need it
    (`http2` is go 1.26: otel ≥ v1.47 for a reachable vulnerability fix).
    Later, the same way: `river`, `sqlx` (adapters for `sql`). Each module is written to
