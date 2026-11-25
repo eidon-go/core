@@ -1,0 +1,80 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# https://docs.coderabbit.ai/reference/configuration
+language: en-US
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  collapse_walkthrough: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+    ignore_usernames:
+      - dependabot[bot]
+
+  path_filters:
+    - "!**/go.sum"
+    - "!**/testdata/**"
+
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        This is a library of Go modules consumed by other services; review it as public API.
+        - Flag breaking changes to exported identifiers of published modules (everything outside
+          internal/): removed or renamed symbols, changed signatures, changed behavior.
+        - The core module (the repository root module) must stay free of third-party dependencies.
+        - Errors are wrapped with fmt.Errorf("...: %w", err) and returned, never panicked.
+        - Every goroutine has a clear owner and stops on context cancellation or shutdown;
+          flag leaks and unbounded blocking.
+        - Exported identifiers need doc comments that explain behavior, not restate the name.
+    - path: "**/*_test.go"
+      instructions: |
+        - Tests call t.Parallel() first and use t.Context() instead of context.Background().
+        - Prefer table-driven tests; no time.Sleep-based synchronization.
+    - path: ".github/workflows/**"
+      instructions: |
+        - Inputs and event fields reach shell scripts only through env vars, never interpolated
+          into run: blocks.
+        - Keep permissions minimal per workflow/job.
+
+  pre_merge_checks:
+    title:
+      mode: warning
+      requirements: "Conventional Commits: <type>(<scope>)?: <summary>, e.g. 'feat(config): add etcd source'."
+    docstrings:
+      mode: off
+
+  tools:
+    golangci-lint:
+      enabled: true
+      config_file: .golangci.yml
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    shellcheck:
+      enabled: true
+    gitleaks:
+      enabled: true
+    osvScanner:
+      enabled: true
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "docs/contrib-guidelines.md"
+
+chat:
+  auto_reply: true

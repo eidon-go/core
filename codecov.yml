@@ -1,0 +1,39 @@
+# https://docs.codecov.com/docs/codecov-yaml
+# Validate: curl -X POST --data-binary @codecov.yml https://codecov.io/validate
+codecov:
+  require_ci_to_pass: true
+
+# Go profiles carry import paths; map them onto repository paths
+# (github.com/eidon-go/core/config/yaml/x.go -> config/yaml/x.go).
+fixes:
+  - "github.com/eidon-go/core/::"
+
+coverage:
+  precision: 1
+  round: down
+  status:
+    project:
+      default:
+        # Overall coverage may not drop by more than 1% in a PR.
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        # Lines changed in a PR must be covered at 80%.
+        target: 80%
+        threshold: 0%
+
+# One flag per module (set in CI). CI tests only the modules a PR changes, so
+# the other flags keep their last coverage from main.
+flag_management:
+  default_rules:
+    carryforward: true
+
+ignore:
+  - "**/testdata/**"
+  - "internal/integration/**"
+
+comment:
+  layout: "condensed_header, diff, flags, files"
+  require_changes: true
+  hide_project_coverage: false
