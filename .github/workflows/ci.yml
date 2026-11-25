@@ -120,9 +120,10 @@ jobs:
 
       - name: govulncheck
         if: matrix.leg == 'stable'
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+        # Pinned version (Scorecard Pinned-Dependencies); keep in sync with
+        # GOVULNCHECK_VERSION in the Makefile. The vulnerability database is
+        # always fetched fresh, only the tool itself is pinned.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 
       # Codecov flag names allow only [A-Za-z0-9_.-]: "config/yaml" -> "config-yaml".
       # Flags are carried forward (codecov.yml), so modules a PR does not touch
