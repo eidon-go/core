@@ -40,8 +40,10 @@ var errTrailingData = errors.New("unexpected data after the document")
 // document yields an empty map. Register parsers with WithParser; JSON is
 // built in (ParseJSON), YAML lives in github.com/eidon-go/core/contrib/config/yaml.
 // A Parser is called concurrently (one watched KV key per goroutine), so it
-// must be safe for concurrent use. A document must not hold two entries that
-// resolve to the same dotted key (ErrKeyCollision).
+// must be safe for concurrent use. Distinct entries of the returned map must
+// not flatten to the same dotted key, e.g. {"a": {"b": 1}, "a.b": 2}
+// (ErrKeyCollision); a key repeated in the source text is the parser's
+// business (ParseJSON keeps the last one, like encoding/json).
 type Parser func(data []byte) (map[string]any, error)
 
 // ParseJSON is the built-in Parser for ".json". Numbers are decoded as

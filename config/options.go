@@ -42,7 +42,7 @@ type options struct {
 	envPrefix    string
 	envBootstrap bool
 	logger       *slog.Logger
-	// err is an error found while applying options (e.g. a duplicate key in
+	// err is an error found while applying options (e.g. a key collision in
 	// WithDefaults); New returns it.
 	err error
 }
@@ -72,7 +72,7 @@ func WithDefaults(values map[string]any) Option {
 	return func(o *options) {
 		flat, err := flatten(values)
 		if err != nil {
-			o.err = errors.Join(o.err, fmt.Errorf("config: defaults: %w", err))
+			o.err = errors.Join(o.err, fmt.Errorf("defaults: %w", err))
 
 			return
 		}
