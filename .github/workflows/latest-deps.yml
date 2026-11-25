@@ -18,7 +18,7 @@ jobs:
     outputs:
       modules: ${{ steps.modules.outputs.modules }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: modules
         run: echo "modules=$(scripts/modules.sh --published | jq -Rsc 'split("\n") | map(select(. != ""))')" >> "$GITHUB_OUTPUT"
 
@@ -36,7 +36,7 @@ jobs:
       run:
         working-directory: ${{ matrix.module }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
