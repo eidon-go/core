@@ -54,7 +54,7 @@ type HealthResult struct {
 // HealthReport runs every registered lifecycle.Healthchecker concurrently and
 // returns one result per checker, in registration order, whatever the app's
 // own state. Components that do not implement lifecycle.Healthchecker are not
-// included.
+// included. A Healthcheck that panics is reported as ErrHealthcheckPanicked.
 func (a *App) HealthReport(ctx context.Context) []HealthResult {
 	a.mu.Lock()
 	components := slices.Clone(a.components)
@@ -84,11 +84,23 @@ func (a *App) HealthReport(ctx context.Context) []HealthResult {
 				defer cancel()
 			}
 
-			results[idx].Err = checker.Healthcheck(checkCtx)
+			results[idx].Err = runCheck(checkCtx, checker)
 		})
 	}
 
 	wg.Wait()
 
 	return results
+}
+
+// runCheck calls checker.Healthcheck, turning a panic into an error: checks
+// run in their own goroutines, where an unrecovered panic ends the process.
+func runCheck(ctx context.Context, checker lifecycle.Healthchecker) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("%w: %v", ErrHealthcheckPanicked, p)
+		}
+	}()
+
+	return checker.Healthcheck(ctx) //nolint:wrapcheck // reported under the component's name
 }

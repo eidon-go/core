@@ -23,8 +23,9 @@ func main() {
 ## Lifecycle
 
 1. **Start.** Every `lifecycle.Starter` is started in registration order. If one fails (or the
-   start timeout or a signal hits), what was started — plus every component without `Start` — is
-   shut down in reverse order. A failure is returned; a signal is a clean stop.
+   start timeout or a signal hits), every component is shut down as in step 3 — the started ones,
+   the one that failed and the ones never started, since any of them may hold resources from
+   construction on. A failure is returned; a signal is a clean stop.
 2. **Run.** Every `lifecycle.Runner` runs concurrently until the context passed to `Run` is
    cancelled, a shutdown signal arrives, or any runner returns. A runner returning `nil` early is
    reported as `ErrRunnerStopped`. Without runners the app runs until the context is cancelled or

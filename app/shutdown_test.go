@@ -2,7 +2,9 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,3 +107,82 @@ func TestShutdown_RunnerReturningAfterForceCloseIsNotStuck(t *testing.T) {
 	require.ErrorIs(t, err, app.ErrShutdownTimeout, "the forced Shutdown is reported")
 	assert.NotContains(t, err.Error(), "still running", "Run returned within the force-close grace")
 }
+
+// ctxWorker follows the contract by stopping when its ctx is cancelled.
+type ctxWorker struct {
+	running  chan struct{}
+	returned atomic.Bool
+}
+
+func newCtxWorker() *ctxWorker { return &ctxWorker{running: make(chan struct{})} }
+
+func (w *ctxWorker) Run(ctx context.Context) error {
+	close(w.running)
+	<-ctx.Done()
+	w.returned.Store(true)
+
+	return nil
+}
+
+func (w *ctxWorker) Shutdown(context.Context) error { return nil }
+
+// The shutdown delay must keep contract-following runners running: they stop
+// only when shutdown starts, after the delay.
+func TestShutdownDelay_KeepsRunnersRunning(t *testing.T) {
+	t.Parallel()
+
+	w := newCtxWorker()
+
+	a := newApp(app.WithShutdownDelay(300 * time.Millisecond))
+	a.Add(w)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	<-w.running
+	cancel()
+
+	eventually(t, func() bool { return errors.Is(a.Healthcheck(t.Context()), app.ErrNotReady) })
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, w.returned.Load(), "runner must keep running during the delay")
+
+	require.NoError(t, wait(t, done))
+	assert.True(t, w.returned.Load())
+}
+
+func TestShutdownDelay_EndsWhenRunnerFails(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+	fail := make(chan struct{})
+	r := &failOnSignal{fail: fail, err: errBoom}
+
+	a := newApp(app.WithShutdownDelay(time.Hour))
+	a.Add(r)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	eventually(t, func() bool { return a.Healthcheck(t.Context()) == nil })
+	cancel()
+	eventually(t, func() bool { return errors.Is(a.Healthcheck(t.Context()), app.ErrNotReady) })
+	close(fail)
+
+	require.ErrorIs(t, wait(t, done), errBoom)
+}
+
+type failOnSignal struct {
+	fail chan struct{}
+	err  error
+}
+
+func (f *failOnSignal) Run(ctx context.Context) error {
+	select {
+	case <-f.fail:
+		return f.err
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+func (f *failOnSignal) Shutdown(context.Context) error { return nil }

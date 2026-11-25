@@ -95,7 +95,7 @@ func TestServerContract(t *testing.T) {
 ```
 
 `lifecycletest.Resource` checks Shutdown without Start, Shutdown with a cancelled context,
-Start→Shutdown, a repeated Shutdown, and that Healthcheck returns before Start and after
+Start→Shutdown, Shutdown after a Start with a cancelled context, a repeated Shutdown, and that Healthcheck returns before Start and after
 Shutdown; `lifecycletest.Runner` adds: Run blocks until Shutdown and then returns nil, Run blocks
 until its context is cancelled, Run after Shutdown returns nil promptly, the `app.App` stop order
 (cancel, then Shutdown with an already expired context: Run must return within a second), and

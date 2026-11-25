@@ -19,14 +19,20 @@
 // app.App drives a component through these phases:
 //
 //  1. Start: Starter.Start is called once, in registration order, before any
-//     Run. If Start returns an error, the component must release whatever it
-//     acquired itself: its Shutdown is not called.
+//     Run. If a Start returns an error (or ctx is done), the startup stops
+//     and every registered component is shut down as in phase 3 — the
+//     started ones, the one that failed and the ones never started — since
+//     a component may hold resources from construction on (a preset
+//     listener, a client built in its constructor).
 //  2. Run: Runner.Run is called at most once, concurrently for all runners.
 //     It blocks until the runner is stopped (see below).
 //  3. Shutdown: the ctx passed to Run is cancelled first; then Shutdown is
 //     called at most once per component — on every runner concurrently, then,
 //     once their Run has returned, on the other components in reverse
 //     registration order.
+//
+// Shutdown must therefore be safe in every state: never started, after a
+// failed Start, after Start, during or after Run, and when called again.
 //
 // For a Runner, the cancellation of Run's ctx and the Shutdown call that
 // follows are one stop request:
@@ -51,7 +57,7 @@
 //
 // Code that drives components without app.App follows the same order:
 // cancelling Run's ctx alone need not release resources or bound a drain, so
-// always call Shutdown, with a deadline.
+// always call Shutdown, with a deadline — also when Start has failed.
 //
 // When the ctx passed to Shutdown is done, app.App waits only a short grace
 // period (100ms) for it to force-close, and another one for Run to return,
@@ -85,9 +91,10 @@ type Resource interface {
 // pinging, running migrations, warming caches.
 //
 // app.App calls Start once per component, in registration order, before any
-// Runner.Run. If Start fails, App stops the startup, shuts down everything
-// started so far in reverse order and returns the error. A Start that fails
-// must clean up after itself: its Shutdown is not called.
+// Runner.Run. If Start fails, App stops the startup, shuts down every
+// registered component (including this one and those never started) and
+// returns the error. A failed Start therefore need not release what it has
+// acquired: Shutdown does, and must cope with that state.
 type Starter interface {
 	// Start performs startup work. It must honor ctx: ctx is cancelled on a
 	// shutdown signal or when the start timeout of app.App expires.

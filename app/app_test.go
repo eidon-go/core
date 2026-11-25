@@ -362,7 +362,7 @@ func TestRun_HangingShutdownIsAbandoned(t *testing.T) {
 	assert.Contains(t, rec.list(), "shutdown first", "later components still get Shutdown")
 }
 
-func TestRun_StartFailureRollsBack(t *testing.T) {
+func TestRun_StartFailureShutsDownEveryComponent(t *testing.T) {
 	t.Parallel()
 
 	rec := &recorder{}
@@ -383,13 +383,15 @@ func TestRun_StartFailureRollsBack(t *testing.T) {
 	require.ErrorContains(t, err, "start failing: no connection")
 
 	events := rec.list()
-	require.Len(t, events, 7)
+	require.Len(t, events, 9)
 	assert.Equal(t, []string{"start first", "start failing"}, events[:2])
-	// Runners first, concurrently (they were constructed, so they are shut
-	// down), then the rest in reverse; failing and not-started are never shut
-	// down.
+	// Runners first, concurrently, then the rest in reverse — including the
+	// one that failed and the one never started: any of them may hold
+	// resources from construction or a partial Start.
 	assert.ElementsMatch(t, []string{"shutdown http", "shutdown grpc"}, events[2:4])
-	assert.Equal(t, []string{"shutdown later", "shutdown plain", "shutdown first"}, events[4:])
+	assert.Equal(t, []string{
+		"shutdown later", "shutdown not-started", "shutdown failing", "shutdown plain", "shutdown first",
+	}, events[4:])
 }
 
 func TestRun_CancelDuringStartIsCleanStop(t *testing.T) {
@@ -818,4 +820,57 @@ func TestZeroValueAndNilLogger(t *testing.T) {
 
 	require.NoError(t, zero.Run(cancelled(t)))
 	assert.Equal(t, int32(1), calls.Load())
+}
+
+// Cancelling right after the app is running must always be a clean stop,
+// whichever way the runners' return is observed.
+func TestRun_CancelWhileRunningIsAlwaysClean(t *testing.T) {
+	t.Parallel()
+
+	for range 100 {
+		w1, w2 := newCtxWorker(), newCtxWorker()
+
+		a := newApp()
+		a.Add(w1, w2)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := runAsync(ctx, a)
+
+		<-w1.running
+		<-w2.running
+		cancel()
+
+		require.NoError(t, wait(t, done))
+	}
+}
+
+type nop struct{}
+
+func (*nop) Shutdown(context.Context) error { return nil }
+
+type holder struct{ v any }
+
+func (holder) Shutdown(context.Context) error { return nil }
+
+func TestAdd_DuplicateDetectionEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	assert.NotPanics(t, func() { newApp().Add(&nop{}, &nop{}) }, "distinct zero-size pointers may share an address")
+	assert.NotPanics(t, func() { newApp().Add(holder{[]int{1}}, holder{[]int{2}}) }, "values are never compared")
+	assert.NotPanics(t, func() { newApp().Add(holder{1}, holder{1}) }, "equal values are distinct components")
+}
+
+func TestRun_GroupWithoutStartersIsShutDownAfterStartFailure(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	errStart := errors.New("refused")
+	failing := &starter{resource: resource{name: "db", rec: rec}, startErr: errStart}
+	plain := &resource{name: "cache", rec: rec}
+
+	a := newApp()
+	a.Add(failing, lifecycle.GroupNamed("infra", plain))
+
+	require.ErrorIs(t, wait(t, runAsync(t.Context(), a)), errStart)
+	assert.Contains(t, rec.list(), "shutdown cache", "a group without starters holds resources and must be shut down")
 }

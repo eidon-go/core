@@ -100,6 +100,26 @@ type panickingShutdown struct{}
 
 func (panickingShutdown) Shutdown(context.Context) error { panic("boom") }
 
+// halfStarted assumes a failed Start is never followed by Shutdown: a Start
+// that fails leaves a nil client, which Shutdown dereferences.
+type halfStarted struct{ client *struct{ closed bool } }
+
+func (h *halfStarted) Start(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	h.client = &struct{ closed bool }{}
+
+	return nil
+}
+
+func (h *halfStarted) Shutdown(context.Context) error {
+	h.client.closed = true
+
+	return nil
+}
+
 func TestChecksDetectViolations(t *testing.T) {
 	t.Parallel()
 
@@ -117,6 +137,7 @@ func TestChecksDetectViolations(t *testing.T) {
 		{"Shutdown ignores cancelled ctx", checkShutdownCancelled(ctx, stuckShutdown{}, short)},
 		{"second Shutdown fails", checkShutdownTwice(ctx, &closedOnce{}, short)},
 		{"Shutdown panics", checkShutdownWithoutStart(ctx, panickingShutdown{}, short)},
+		{"Shutdown after failed Start panics", checkShutdownAfterCancelledStart(ctx, &halfStarted{}, short)},
 		{"expired Shutdown after cancel hangs", checkCancelThenExpiredShutdown(ctx, stuckShutdownRunner{}, short)},
 		{
 			"cancel and Shutdown close twice",

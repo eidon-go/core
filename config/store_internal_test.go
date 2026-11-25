@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,4 +108,52 @@ func TestKV_WatchedDocumentWithCollisionKeepsPreviousValues(t *testing.T) {
 
 	kv.Set("/flags.json", []byte(`{"limit.max": 7}`))
 	eventually(t, func() bool { return limit() == 7 })
+}
+
+// Lists in a WithDefaults or FromMap literal are copied: changing the
+// caller's slice afterwards does not change the config.
+func TestFlatten_CopiesLists(t *testing.T) {
+	t.Parallel()
+
+	hosts := []string{"a", "b"}
+	ports := []int{1, 2}
+	nested := map[string]any{"name": "x"}
+	inner := []any{"y"}
+
+	flat, err := flatten(map[string]any{
+		"hosts": hosts,
+		"srv":   map[string]any{"ports": ports},
+		"items": []any{nested, inner},
+	})
+	require.NoError(t, err)
+
+	hosts[0] = "changed"
+	ports[0] = 99
+	nested["name"] = "changed"
+	inner[0] = "changed"
+
+	assert.Equal(t, []string{"a", "b"}, flat["hosts"])
+	assert.Equal(t, []int{1, 2}, flat["srv.ports"])
+	assert.Equal(t, []any{map[string]any{"name": "x"}, []any{"y"}}, flat["items"])
+}
+
+func TestStore_EnvNameComputedOnce(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+
+	name := func(key string) string {
+		calls.Add(1)
+
+		return "APP_" + key
+	}
+
+	s := newStore(func(string) (string, bool) { return "", false }, name, nil)
+
+	for range 3 {
+		_, _ = s.lookup("http.port")
+	}
+
+	assert.Equal(t, int32(1), calls.Load())
+	assert.Equal(t, "APP_http.port", s.envVar("http.port"))
 }

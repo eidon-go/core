@@ -73,6 +73,9 @@ func newOptions(opts []Option) options {
 //   - Shutdown without Start succeeds.
 //   - Shutdown with an already cancelled ctx returns promptly (any error).
 //   - Start followed by Shutdown succeeds.
+//   - Start with an already cancelled ctx returns promptly (any error), and
+//     the Shutdown that follows succeeds: app.App shuts down every component
+//     after a failed startup, including the one whose Start failed.
 //   - A second Shutdown succeeds (Shutdown is idempotent).
 //   - Healthcheck returns promptly (any result) before Start and after
 //     Shutdown.
@@ -93,6 +96,10 @@ func Resource(t *testing.T, newResource func(t *testing.T) lifecycle.Resource, o
 
 	t.Run("StartThenShutdown", func(t *testing.T) {
 		fail(t, checkStartThenShutdown(t.Context(), newResource(t), o.timeout))
+	})
+
+	t.Run("ShutdownAfterCancelledStart", func(t *testing.T) {
+		fail(t, checkShutdownAfterCancelledStart(t.Context(), newResource(t), o.timeout))
 	})
 
 	t.Run("ShutdownTwice", func(t *testing.T) {
@@ -179,6 +186,25 @@ func checkStartThenShutdown(ctx context.Context, r lifecycle.Resource, timeout t
 	}
 
 	return within("Shutdown after Start", timeout, func() error { return r.Shutdown(ctx) })
+}
+
+func checkShutdownAfterCancelledStart(ctx context.Context, r lifecycle.Resource, timeout time.Duration) error {
+	if s, ok := r.(lifecycle.Starter); ok {
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+
+		// Start may fail (typically) or succeed; hanging is not acceptable.
+		err := within("Start with a cancelled ctx", timeout, func() error {
+			_ = s.Start(cancelled)
+
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return within("Shutdown after a cancelled Start", timeout, func() error { return r.Shutdown(ctx) })
 }
 
 func checkShutdownTwice(ctx context.Context, r lifecycle.Resource, timeout time.Duration) error {

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/eidon-go/core/lifecycle"
+	"github.com/eidon-go/core/lifecycle/lifecycletest"
 )
 
 type fakeResource struct {
@@ -234,4 +235,40 @@ func TestGroup_ShutsDownNonEmptyNestedGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, outer.called)
 	assert.True(t, inner.called)
+}
+
+func TestGroup_ExposesOnlyMembersInterfaces(t *testing.T) {
+	t.Parallel()
+
+	var log []string
+
+	plain := lifecycle.Group(&fakeResource{})
+	_, isStarter := plain.(lifecycle.Starter)
+	_, isChecker := plain.(lifecycle.Healthchecker)
+
+	assert.False(t, isStarter)
+	assert.False(t, isChecker)
+
+	both := lifecycle.Group(&member{name: "a", log: &log}, &checkedResource{name: "b"})
+	_, isStarter = both.(lifecycle.Starter)
+	_, isChecker = both.(lifecycle.Healthchecker)
+
+	assert.True(t, isStarter)
+	assert.True(t, isChecker)
+
+	var nilMember *member
+
+	onlyNil := lifecycle.Group(nilMember)
+	_, isStarter = onlyNil.(lifecycle.Starter)
+	assert.False(t, isStarter, "nil members do not count")
+}
+
+func TestGroup_Contract(t *testing.T) {
+	t.Parallel()
+
+	lifecycletest.Resource(t, func(*testing.T) lifecycle.Resource {
+		var log []string
+
+		return lifecycle.GroupNamed("infra", &member{name: "db", log: &log}, &checkedResource{name: "cache"})
+	})
 }
