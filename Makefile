@@ -5,6 +5,9 @@
 MODULES   := $(shell scripts/modules.sh)
 PUBLISHED := $(shell scripts/modules.sh --published)
 
+# Keep in sync with the govulncheck step of .github/workflows/ci.yml.
+GOVULNCHECK_VERSION := v1.10.0
+
 # Runs a command in every directory of a module list:
 #   $(call each,<modules>,<command>)
 define each
@@ -54,7 +57,7 @@ tidy-check: ## Fail if go mod tidy would change any module
 
 .PHONY: vuln
 vuln: ## Run govulncheck in every published module
-	$(call each,$(PUBLISHED),go run golang.org/x/vuln/cmd/govulncheck@latest ./...)
+	$(call each,$(PUBLISHED),go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...)
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (requires Docker)
