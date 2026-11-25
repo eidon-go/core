@@ -52,6 +52,54 @@ func (stuckShutdown) Shutdown(context.Context) error {
 	return nil
 }
 
+// stuckShutdownRunner stops on ctx, but its Shutdown ignores ctx.
+type stuckShutdownRunner struct{ stuckShutdown }
+
+func (stuckShutdownRunner) Run(ctx context.Context) error {
+	<-ctx.Done()
+
+	return nil
+}
+
+// closedOnce fails a second Shutdown: not idempotent.
+type closedOnce struct{ closed bool }
+
+func (c *closedOnce) Shutdown(context.Context) error {
+	if c.closed {
+		return errors.New("already closed")
+	}
+
+	c.closed = true
+
+	return nil
+}
+
+// doubleStopRunner stops both on ctx and on Shutdown by closing the same
+// channel without a guard: cancellation and Shutdown together panic.
+type doubleStopRunner struct{ stop chan struct{} }
+
+func (r *doubleStopRunner) Run(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		close(r.stop)
+	case <-r.stop:
+	}
+
+	return nil
+}
+
+func (r *doubleStopRunner) Shutdown(context.Context) error {
+	<-r.stop // waits for Run's stop, then closes it again
+	close(r.stop)
+
+	return nil
+}
+
+// panickingShutdown panics in Shutdown.
+type panickingShutdown struct{}
+
+func (panickingShutdown) Shutdown(context.Context) error { panic("boom") }
+
 func TestChecksDetectViolations(t *testing.T) {
 	t.Parallel()
 
@@ -67,6 +115,13 @@ func TestChecksDetectViolations(t *testing.T) {
 		{"Run errors after Shutdown", checkShutdownStopsRun(ctx, &erroringRunner{stop: make(chan struct{})}, short)},
 		{"Run after Shutdown hangs", checkRunAfterShutdown(ctx, deafRunner{}, short)},
 		{"Shutdown ignores cancelled ctx", checkShutdownCancelled(ctx, stuckShutdown{}, short)},
+		{"second Shutdown fails", checkShutdownTwice(ctx, &closedOnce{}, short)},
+		{"Shutdown panics", checkShutdownWithoutStart(ctx, panickingShutdown{}, short)},
+		{"expired Shutdown after cancel hangs", checkCancelThenExpiredShutdown(ctx, stuckShutdownRunner{}, short)},
+		{
+			"cancel and Shutdown close twice",
+			checkConcurrentCancelAndShutdown(ctx, &doubleStopRunner{stop: make(chan struct{})}, short),
+		},
 	}
 
 	for _, tt := range tests {

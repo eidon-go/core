@@ -30,15 +30,18 @@ func main() {
    reported as `ErrRunnerStopped`. Without runners the app runs until the context is cancelled or
    a signal arrives.
 3. **Shutdown.** Readiness fails at once; after the optional shutdown delay (skipped when a
-   runner failed), under one timeout: runners are shut down in reverse order (which makes their
-   `Run` return), the app waits for every `Run` to return, then the other components are shut
-   down in reverse order.
+   runner failed), under one timeout: the context of every `Run` is cancelled, every runner is
+   shut down concurrently (which makes its `Run` return), the app waits for every `Run` to
+   return, then the other components are shut down in reverse order. Runners shut down
+   concurrently so that one server's drain does not eat into another's budget; they may depend
+   on resources, not on each other.
 
 Every `Shutdown` call is bounded: once the timeout has expired a component still gets 100ms to
 force-close, and is then abandoned (its goroutine leaks) and reported with `ErrShutdownTimeout`.
-Runners still running at the deadline are reported the same way. So `ctx`-less closes such as a
-pool's `Close()` cannot hang the process — but the phase can overrun the timeout by up to 100ms
-per component still pending; size the timeout (and the Kubernetes termination grace period)
+Runners whose `Run` has not returned 100ms after that are reported the same way. So `ctx`-less
+closes such as a pool's `Close()` cannot hang the process — but the phase can overrun the timeout
+by up to 200ms for the runners (force-close grace, then the grace for `Run` to return) plus 100ms
+per other component still pending; size the timeout (and the Kubernetes termination grace period)
 accordingly.
 
 During the shutdown delay runners keep running with their context intact; only readiness fails.
@@ -72,6 +75,12 @@ programming errors.
 Ordering patterns: telemetry first (flushed last), configuration and clients next, then
 producers, then consumers and servers (stopped first).
 
+Only **sources of work** — servers, consumers, schedulers — are runners. Runners are stopped
+together, so nothing may depend on a runner while it drains. Whatever the runners use while
+draining — a producer with a background flush loop, a client with a refresh loop — is a plain
+`lifecycle.Resource` (`Starter` for its goroutines): it is shut down only after every `Run` has
+returned.
+
 ## Health
 
 `Healthcheck(ctx)` reports **readiness**: `ErrNotReady` before `Run`, while starting and from the
@@ -91,7 +100,7 @@ app.WithObserver(func(ctx context.Context, e app.Event) {
 ```
 
 Observers are called synchronously and possibly concurrently (Run events come from each runner's
-goroutine); keep them fast and safe for concurrent use. A Shutdown event is reported when App
+goroutine, and runners are shut down concurrently); keep them fast and safe for concurrent use. A Shutdown event is reported when App
 stops waiting — for an abandoned Shutdown that is before the call returns — and the Run event of
 an abandoned runner may arrive after `App.Run` has returned.
 

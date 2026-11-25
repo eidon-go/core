@@ -225,11 +225,12 @@ func TestRun_CleanStopOrder(t *testing.T) {
 	cancel()
 
 	require.NoError(t, wait(t, done))
-	assert.Equal(t, []string{
-		"start db",
-		"shutdown http", "shutdown grpc", // runners first, reverse order
-		"shutdown cache", "shutdown db", // then resources, reverse order
-	}, rec.list())
+
+	events := rec.list()
+	require.Len(t, events, 5)
+	assert.Equal(t, "start db", events[0])
+	assert.ElementsMatch(t, []string{"shutdown http", "shutdown grpc"}, events[1:3], "runners first, concurrently")
+	assert.Equal(t, []string{"shutdown cache", "shutdown db"}, events[3:], "then resources, reverse order")
 }
 
 func TestRun_ShutdownMakesServerReturn(t *testing.T) {
@@ -372,19 +373,23 @@ func TestRun_StartFailureRollsBack(t *testing.T) {
 	notStarted := &starter{resource: resource{name: "not-started", rec: rec}}
 	later := &resource{name: "later", rec: rec}
 	srv := newServer("http", rec)
+	grpcSrv := newServer("grpc", rec)
 
 	a := newApp()
-	a.Add(first, plain, failing, notStarted, later, srv)
+	a.Add(first, plain, failing, notStarted, later, srv, grpcSrv)
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, errStart)
 	require.ErrorContains(t, err, "start failing: no connection")
-	assert.Equal(t, []string{
-		"start first", "start failing",
-		// runners first (http was constructed, so it is shut down), then the
-		// rest in reverse; failing and not-started are never shut down.
-		"shutdown http", "shutdown later", "shutdown plain", "shutdown first",
-	}, rec.list())
+
+	events := rec.list()
+	require.Len(t, events, 7)
+	assert.Equal(t, []string{"start first", "start failing"}, events[:2])
+	// Runners first, concurrently (they were constructed, so they are shut
+	// down), then the rest in reverse; failing and not-started are never shut
+	// down.
+	assert.ElementsMatch(t, []string{"shutdown http", "shutdown grpc"}, events[2:4])
+	assert.Equal(t, []string{"shutdown later", "shutdown plain", "shutdown first"}, events[4:])
 }
 
 func TestRun_CancelDuringStartIsCleanStop(t *testing.T) {

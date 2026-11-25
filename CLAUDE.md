@@ -22,8 +22,11 @@ imports.
 
 ## Status and roadmap
 
-1. **Done:** core + `config/yaml` merged, CI green. Nothing is tagged yet — first tags are core
-   `v1.0.0` (possibly `v1.0.0-rc.1` first), then `config/yaml/v1.0.0`.
+1. **Done:** core + `config/yaml` merged, CI green. Core `v1.0.0-rc.1` is tagged. Contrib modules
+   are written against rc.N (cut rc.2, rc.3… when a module needs core API changes — breaking
+   changes are still allowed). Core `v1.0.0` + `config/yaml/v1.0.0` are tagged once the main
+   contrib modules (`http2`, `config/etcd`, `otel`, `grpc`) have validated the API; contrib modules
+   are tagged only after that, with their `require` bumped to core `v1.0.0`.
 2. **Phase 2 — contrib modules**, one module per PR, in this order: `config/etcd` → `otel` →
    `http2` → `grpc` → `jwt` → `kafka` → `nats` → `rabbitmq` → `redis` → `sql` (as v0.x).
    Later, the same way: `river`, `sqlx` (adapters for `sql`). Each module is written to
@@ -104,13 +107,15 @@ published `go.mod` files.
 
 - **`lifecycle`** — the central contract every component implements: `Resource` (Shutdown, every
   component), optional `Starter` (Start), `Runner` (long-running Run), `Healthchecker`, `Namer`;
-  `Group` / `GroupNamed` combine resources. The precise phase semantics (start order, Run may be
-  called after Shutdown began, Shutdown idempotent and safe without Start/Run, 100ms grace after
-  ctx deadline) are documented in the package doc of `lifecycle/lifecycle.go` — read it before
-  touching `app` or writing a component. `lifecycle/lifecycletest` provides
+  `Group` / `GroupNamed` combine resources. The precise phase semantics (start order; cancel of
+  Run's ctx + Shutdown = one stop — Run may drain, Shutdown bounds it, side effects once; Run may
+  be called after Shutdown began; Shutdown idempotent and safe without Start/Run; 100ms grace
+  after ctx deadline; only sources of work are Runners) are documented in the package doc of
+  `lifecycle/lifecycle.go` — read it before touching `app` or writing a component. `lifecycle/lifecycletest` provides
   `lifecycletest.Resource` / `lifecycletest.Runner` contract tests that every component must pass.
 - **`app`** — drives components: ordered Start, concurrent Run, signals, readiness/health,
-  bounded reverse-order shutdown (runners first), lifecycle events via `app.WithObserver`
+  bounded shutdown (Run ctx cancelled, runners shut down concurrently, then the rest in reverse
+  order), lifecycle events via `app.WithObserver`
   (metrics/traces come from the observer, not from wrapping components — wrappers hide optional
   interfaces).
 - **`config`** — layered config with priority `env > watched KV keys > KV keys > files > defaults`;
