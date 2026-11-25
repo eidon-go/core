@@ -13,6 +13,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"math/rand/v2"
 	"time"
@@ -40,6 +41,31 @@ func (e *permanentError) Unwrap() []error { return []error{e.err, ErrPermanent} 
 // Forever as Policy.MaxAttempts retries until the operation succeeds, returns
 // a non-retryable error or ctx is done.
 const Forever = -1
+
+// The values of ConnectPolicy.
+const (
+	connectAttempts     = 10
+	connectInitialDelay = 200 * time.Millisecond
+	connectMultiplier   = 2
+	connectMaxDelay     = 5 * time.Second
+	connectJitter       = 0.2
+)
+
+// ConnectPolicy returns the policy integrations use by default to connect in
+// Start: 10 attempts, delays from 200ms doubling up to 5s, 20% jitter — at
+// most about 26 seconds of waiting, enough for a dependency that starts with
+// the service, short enough for a misconfiguration to fail the startup
+// visibly. It is a function, not a variable, so that no caller can change it
+// for the others.
+func ConnectPolicy() Policy {
+	return Policy{ //nolint:exhaustruct_v5 // no RetryIf/OnRetry by default
+		MaxAttempts:  connectAttempts,
+		InitialDelay: connectInitialDelay,
+		Multiplier:   connectMultiplier,
+		MaxDelay:     connectMaxDelay,
+		Jitter:       connectJitter,
+	}
+}
 
 // Policy describes how an operation is retried. The zero value makes a single
 // attempt (no retries). Policy is a value type: copy and adjust it freely.
@@ -86,6 +112,33 @@ type Attempt struct {
 	Err error
 	// Delay is the wait before the next attempt.
 	Delay time.Duration
+}
+
+// Logged returns a copy of p whose OnRetry also logs every retry with
+// logger.WarnContext ("retrying", with attempt, delay and error), after
+// calling the OnRetry p already has. Pass the component's logger: it already
+// carries the component's name. A nil logger means slog.Default().
+//
+//	err := c.connectRetry.Logged(c.logger).Do(ctx, c.ping)
+func (p Policy) Logged(logger *slog.Logger) Policy {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	next := p.OnRetry
+
+	p.OnRetry = func(ctx context.Context, a Attempt) {
+		if next != nil {
+			next(ctx, a)
+		}
+
+		logger.WarnContext(ctx, "retrying",
+			slog.Int("attempt", a.Number),
+			slog.Duration("delay", a.Delay),
+			slog.Any("error", a.Err))
+	}
+
+	return p
 }
 
 // Do calls operation until it succeeds, returns a non-retryable error, the
