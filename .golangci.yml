@@ -93,6 +93,8 @@ linters:
           - err113
           - gosec
           - bodyclose
+          # Test fakes return ctx.Err() and the like as-is on purpose.
+          - wrapcheck
 formatters:
   enable:
     - gci

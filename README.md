@@ -5,43 +5,50 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A Go framework for bootstrapping production services around one lifecycle contract
-(`Resource` / `Runner`) and one option pattern.
+and functional options.
 
 The repository holds several Go modules. The **core** module is small, stable and depends only on
-`gopkg.in/yaml.v3` and `golang.org/x/sync`. Every integration (etcd, OpenTelemetry, HTTP, gRPC, Kafka,
-SQL, …) is a **separate module with its own version**, so a service pulls in only the dependencies of
-the integrations it actually imports.
+`go.yaml.in/yaml/v3` (Go 1.25+). Every integration (etcd, OpenTelemetry, HTTP, gRPC, Kafka, SQL, …)
+is a **separate module with its own version**, so a service pulls in only the dependencies of the
+integrations it actually imports.
 
 ## Modules
 
-| Module | Import path | Purpose |
+| Module | Import path | Packages |
 |---|---|---|
-| core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — `Resource`/`Runner` contracts and groups; [`app`](./app/README.md) — the application runner (signals, ordered startup and shutdown); [`di`](./di/README.md) — configuration (yaml, env, remote KV) and the bootstrap container; `retry` — bounded startup retry |
+| core | `github.com/eidon-go/core` | [`lifecycle`](./lifecycle/README.md) — component contracts (`Resource`, `Starter`, `Runner`, `Healthchecker`, `Namer`); [`app`](./app/README.md) — runs components: ordered start, signals, bounded reverse-order shutdown, health; [`config`](./config/README.md) — layered configuration (defaults, files, KV, env) with hot reload; [`retry`](./retry/README.md) — retry policies with backoff |
 
 Integration modules are added one by one after the core API is reviewed.
 
-## Core concepts
-
-`core` revolves around small interfaces in [`lifecycle`](./lifecycle/README.md):
+## Example
 
 ```go
-type Resource interface {
-    Shutdown(ctx context.Context) error
-}
+func main() {
+    ctx := context.Background()
 
-type Runner interface {
-    Resource
-    Run(ctx context.Context) error
+    cfg, err := config.New(ctx, config.WithFiles("config.yaml"), config.WithEnvPrefix("APP"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    a := app.New(app.WithShutdownTimeout(30 * time.Second))
+    a.Add(cfg, db, cache)          // dependencies first; db.Start connects with retry
+    a.Add(grpcServer, httpServer)  // runners
+
+    if err := a.Run(ctx); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
-`app.App` runs every `Runner`, handles SIGINT/SIGTERM and shuts everything down in reverse order of
-registration. See the package READMEs for details.
+`app.App` starts the components in order, runs the runners until SIGINT/SIGTERM (or a runner
+fails), then shuts everything down in reverse order under one timeout. See the package READMEs
+for the contracts.
 
 ## Versioning
 
 - Every module follows semver independently.
-- Core tags: `vX.Y.Z`. Integration tags: `<module>/vX.Y.Z` (e.g. `kafka/v1.4.0`, `di/etcd/v1.0.0`).
+- Core tags: `vX.Y.Z`. Integration tags: `<module>/vX.Y.Z` (e.g. `kafka/v1.4.0`, `config/etcd/v1.0.0`).
   Major versions ≥ 2 use the `/vN` module path suffix.
 - An integration's `go.mod` requires the **minimum** core version (and minimum dependency versions)
   it needs, so upgrading an integration never forces upgrades elsewhere.

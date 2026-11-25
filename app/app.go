@@ -1,21 +1,26 @@
-// Package app provides the top-level orchestrator that ties every
-// lifecycle.Runner and lifecycle.Resource registered by a service into a
-// single managed lifecycle: signal-aware startup, errgroup-based run, and
-// two-phase LIFO shutdown with a bounded timeout.
+// Package app runs the components of a service — every lifecycle.Resource
+// registered with Add — through one managed lifecycle:
 //
-// A typical main.go looks like:
+//  1. Start: every lifecycle.Starter is started in registration order. A
+//     failure shuts down what was started and Run returns the error.
+//  2. Run: every lifecycle.Runner runs concurrently until the context passed
+//     to Run is cancelled, a shutdown signal arrives (SIGINT, SIGTERM by
+//     default), or any runner returns.
+//  3. Shutdown: under one timeout, runners are shut down in reverse
+//     registration order (which makes their Run return), App waits for their
+//     Run to return, then the remaining resources are shut down in reverse
+//     registration order.
+//
+// A typical main:
 //
 //	func main() {
 //	    a := app.New(app.WithShutdownTimeout(30 * time.Second))
-//	    a.Add(otelProvider, db, redisClient)   // Resources
-//	    a.Add(grpcServer, httpServer)          // Runners
-//	    if err := a.Run(); err != nil {
+//	    a.Add(telemetry, db, cache) // resources, in dependency order
+//	    a.Add(grpcServer, httpServer)
+//	    if err := a.Run(context.Background()); err != nil {
 //	        log.Fatal(err)
 //	    }
 //	}
-//
-// See the package README.md for the full semantics of the two-phase lifecycle
-// and the rationale for LIFO shutdown ordering.
 package app
 
 import (
@@ -26,85 +31,95 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/eidon-go/core/lifecycle"
 )
 
-// defaultShutdownTimeout is the upper bound on the Shutdown phase when the
-// caller has not supplied one via WithShutdownTimeout.
-const defaultShutdownTimeout = 30 * time.Second
+// Errors returned by Run.
+var (
+	// ErrAlreadyStarted is returned when Run is called more than once.
+	ErrAlreadyStarted = errors.New("app: already started")
+	// ErrRunnerStopped is the cause reported when a Runner's Run returns nil
+	// before shutdown was requested.
+	ErrRunnerStopped = errors.New("runner stopped unexpectedly")
+	// ErrShutdownTimeout is reported when runners did not return from Run
+	// before the shutdown timeout expired.
+	ErrShutdownTimeout = errors.New("app: shutdown timed out")
+)
 
-// App is the top-level lifecycle orchestrator. It collects Runner and
-// Resource components via Add, starts all Runners when Run is called, and
-// shuts them down in reverse registration order when the context is
-// cancelled (typically by SIGINT/SIGTERM).
+// DefaultShutdownTimeout bounds the shutdown phase unless WithShutdownTimeout
+// sets another value.
+const DefaultShutdownTimeout = 30 * time.Second
+
+// App is the lifecycle orchestrator. Create it with New; the zero value is
+// also usable and behaves like New() without options.
 //
-// App is safe for single-goroutine use during setup. Add must not be called
-// after Run — doing so is a programming error and will panic.
+// Add is meant for setup and must not be called after Run. Healthcheck,
+// HealthReport and Logger are safe for concurrent use at any time.
 type App struct {
-	logger          *slog.Logger
-	signals         []os.Signal
-	shutdownTimeout time.Duration
+	logger             *slog.Logger
+	signals            []os.Signal
+	signalsSet         bool
+	startTimeout       time.Duration
+	shutdownTimeout    time.Duration
+	healthcheckTimeout time.Duration
 
-	mu        sync.Mutex
-	started   bool
-	runners   []lifecycle.Runner
-	resources []lifecycle.Resource
+	mu         sync.Mutex
+	started    bool
+	components []lifecycle.Resource
 }
 
-// Option configures an App. Options are applied in order by New.
+// Option configures an App.
 type Option func(*App)
 
-// WithLogger injects a *slog.Logger that App will use for lifecycle events
-// (startup, shutdown order, errors). As a convenience it also calls
-// slog.SetDefault so third-party libraries and the stdlib log package route
-// through the same handler.
-//
-// If no logger is provided, App uses slog.Default().
+// WithLogger sets the logger for lifecycle events. nil means slog.Default().
+// App never changes the process-wide default logger; call slog.SetDefault in
+// main if you want that.
 func WithLogger(l *slog.Logger) Option {
-	return func(a *App) {
-		a.logger = l
-		slog.SetDefault(l)
-	}
+	return func(a *App) { a.logger = l }
 }
 
-// WithShutdownTimeout overrides the default 30-second shutdown budget. The
-// timeout bounds the total time allowed for the shutdown phase — Runners and
-// Resources share this single deadline, applied via context.WithTimeout in
-// Run.
-//
-// Setting a timeout shorter than any individual component's graceful-stop
-// duration will cause that component to be force-closed — this is the correct
-// behavior for bounded-duration shutdowns, but callers should size the
-// timeout accordingly.
+// WithShutdownTimeout sets the budget for the whole shutdown phase, shared by
+// every component. Values <= 0 mean DefaultShutdownTimeout.
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(a *App) { a.shutdownTimeout = d }
 }
 
-// WithSignals overrides the default signal set (SIGINT, SIGTERM) that
-// triggers App shutdown. Pass an empty slice to disable signal-driven
-// shutdown entirely — the app will then only stop when Run's context (if
-// supplied via an external mechanism) is cancelled.
-func WithSignals(sigs ...os.Signal) Option {
-	return func(a *App) { a.signals = sigs }
+// WithStartTimeout bounds the start phase (all Starter.Start calls together).
+// Values <= 0 mean no limit other than the context passed to Run.
+func WithStartTimeout(d time.Duration) Option {
+	return func(a *App) { a.startTimeout = d }
 }
 
-// New creates an App with the given options. Defaults:
+// WithSignals sets the OS signals that trigger shutdown (default SIGINT and
+// SIGTERM). WithSignals() with no arguments disables signal handling; the app
+// then stops only when the context passed to Run is cancelled or a runner
+// returns.
 //
-//   - Logger: slog.Default()
-//   - Shutdown timeout: 30 seconds
-//   - Signals: SIGINT, SIGTERM
-func New(opts ...Option) *App {
-	a := &App{ //nolint:exhaustruct_v5 // mu, started, runners, resources have valid zero values
-		logger:          slog.Default(),
-		signals:         []os.Signal{os.Interrupt, syscall.SIGTERM},
-		shutdownTimeout: defaultShutdownTimeout,
+// After the first signal the default signal behavior is restored, so a second
+// Ctrl+C terminates a shutdown that hangs.
+func WithSignals(sigs ...os.Signal) Option {
+	return func(a *App) {
+		a.signals = slices.Clone(sigs)
+		a.signalsSet = true
 	}
+}
+
+// WithHealthcheckTimeout bounds each component's Healthcheck call in
+// Healthcheck and HealthReport. Values <= 0 mean no limit other than the
+// caller's context.
+func WithHealthcheckTimeout(d time.Duration) Option {
+	return func(a *App) { a.healthcheckTimeout = d }
+}
+
+// New creates an App. Defaults: slog.Default() logger, SIGINT and SIGTERM,
+// DefaultShutdownTimeout, no start or healthcheck timeout.
+func New(opts ...Option) *App {
+	a := &App{} //nolint:exhaustruct_v5 // zero values are the documented defaults
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -112,214 +127,411 @@ func New(opts ...Option) *App {
 	return a
 }
 
-// Add registers one or more components. Each argument must implement
-// lifecycle.Runner or lifecycle.Resource. Runners go to the runners slice
-// (Run + Shutdown); pure Resources go to the resources slice (Shutdown only).
-// Since Runner embeds Resource, the type switch checks Runner first to avoid
-// double-registration.
+// Add registers components in dependency order: a component should be added
+// after the components it uses. Start runs in this order, shutdown in reverse.
+// A component that implements lifecycle.Runner is run; every component is shut
+// down.
 //
-// Add panics if a component implements neither interface — this indicates a
-// programming error at startup and there is no reasonable recovery. The
-// panic message includes the component's type for easy diagnosis.
-//
-// Add must not be called after Run. Calling it concurrently with Run is
-// undefined behavior.
-//
-// Prefer AddRunner and AddResource when the component's role is known at
-// the call site — they give compile-time type safety.
-func (a *App) Add(components ...any) {
+// Add panics if a component is nil (including a typed nil pointer) or if it is
+// called after Run: both are programming errors.
+func (a *App) Add(components ...lifecycle.Resource) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.started {
-		panic("app.App.Add: called after Run")
+		panic("app: Add called after Run")
 	}
 
-	for _, c := range components {
-		switch v := c.(type) {
-		case lifecycle.Runner:
-			a.runners = append(a.runners, v)
-		case lifecycle.Resource:
-			a.resources = append(a.resources, v)
-		default:
-			panic(fmt.Sprintf(
-				"app.App.Add: %T implements neither lifecycle.Runner nor lifecycle.Resource",
-				c,
-			))
+	for i, c := range components {
+		if lifecycle.IsNil(c) {
+			panic(fmt.Sprintf("app: Add: component %d (%T) is nil", i, c))
 		}
 	}
+
+	a.components = append(a.components, components...)
 }
 
-// AddRunner registers one or more Runners. Equivalent to Add with
-// compile-time type safety — the compiler rejects non-Runner arguments.
+// Run starts, runs and shuts down every registered component (see the package
+// documentation) and blocks until shutdown completes.
 //
-// Must not be called after Run; panics otherwise.
-func (a *App) AddRunner(runners ...lifecycle.Runner) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.started {
-		panic("app.App.AddRunner: called after Run")
+// Run returns nil after a clean stop: ctx cancelled or a signal received, and
+// every component shut down without error. Otherwise it returns the cause —
+// a Start error, a Runner error or ErrRunnerStopped — joined with any
+// shutdown errors and ErrShutdownTimeout. Run may be called only once;
+// later calls return ErrAlreadyStarted.
+func (a *App) Run(ctx context.Context) error {
+	components, err := a.begin()
+	if err != nil {
+		return err
 	}
 
-	a.runners = append(a.runners, runners...)
-}
+	logger := a.Logger()
 
-// AddResource registers one or more Resources. Equivalent to Add with
-// compile-time type safety — the compiler rejects non-Resource arguments.
-//
-// Note: a lifecycle.Runner is also a lifecycle.Resource (Runner embeds
-// Resource), so passing a Runner here registers it as Resource-only —
-// its Run method will NOT be invoked. Use AddRunner when Run is required.
-//
-// Must not be called after Run; panics otherwise.
-func (a *App) AddResource(resources ...lifecycle.Resource) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	ctx, stopSignals := a.notifyContext(ctx)
+	defer stopSignals()
 
-	if a.started {
-		panic("app.App.AddResource: called after Run")
+	logger.InfoContext(ctx, "app starting", slog.Int("components", len(components)))
+
+	live, startErr := a.start(ctx, components)
+	if startErr != nil {
+		if ctx.Err() != nil {
+			// Stopped by ctx or a signal during startup: a clean stop.
+			logger.InfoContext(ctx, "app stopped during startup", slog.Any("err", startErr))
+
+			startErr = nil
+		} else {
+			logger.ErrorContext(ctx, "app startup failed", slog.Any("err", startErr))
+		}
+
+		return errors.Join(startErr, a.shutdown(ctx, live, nil))
 	}
 
-	a.resources = append(a.resources, resources...)
+	return a.runAndShutdown(ctx, live)
 }
 
-// Run starts every registered Runner concurrently, installs signal handlers,
-// and blocks until:
-//
-//  1. A signal from WithSignals is received, OR
-//  2. A Runner's Run method returns a non-nil error, OR
-//  3. All Runners complete normally (rare — typically only in tests).
-//
-// On any of these, Run begins the shutdown phase:
-//
-//   - A fresh context with WithShutdownTimeout deadline is created.
-//   - Runners have Shutdown called in reverse registration order (so
-//     frontends stop accepting traffic before backends are closed).
-//   - Resources then have Shutdown called in reverse registration order.
-//   - All shutdown errors, plus the original run error (if any), are joined
-//     and returned via errors.Join.
-//
-// A context.Canceled from the first phase is treated as normal termination
-// and not included in the returned error.
-func (a *App) Run() error {
+// Healthcheck runs every registered lifecycle.Healthchecker concurrently and
+// returns nil if all are healthy, or the joined errors, each prefixed with the
+// component's name. It satisfies lifecycle.Healthchecker, so an App can back a
+// /readyz endpoint directly.
+func (a *App) Healthcheck(ctx context.Context) error {
+	var errs []error
+
+	for _, r := range a.HealthReport(ctx) {
+		if r.Err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", r.Name, r.Err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// HealthResult is the outcome of one component's health check.
+type HealthResult struct {
+	// Name is lifecycle.NameOf(component).
+	Name string
+	// Err is nil when the component is healthy.
+	Err error
+}
+
+// HealthReport runs every registered lifecycle.Healthchecker concurrently and
+// returns one result per checker, in registration order. Components that do
+// not implement lifecycle.Healthchecker are not included.
+func (a *App) HealthReport(ctx context.Context) []HealthResult {
 	a.mu.Lock()
-	a.started = true
-	runners := a.runners
-	resourceCount := len(a.resources)
+	components := slices.Clone(a.components)
 	a.mu.Unlock()
 
-	ctx, stop := signal.NotifyContext(context.Background(), a.signals...)
-	defer stop()
+	var checkers []lifecycle.Healthchecker
 
-	a.logger.InfoContext(ctx, "app starting",
-		slog.Int("runners", len(runners)),
-		slog.Int("resources", resourceCount),
-	)
+	results := make([]HealthResult, 0, len(components))
 
-	g, gctx := errgroup.WithContext(ctx)
-	for _, r := range runners {
-		g.Go(func() error {
-			if err := r.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-				return fmt.Errorf("%T: %w", r, err)
+	for _, c := range components {
+		if hc, ok := c.(lifecycle.Healthchecker); ok {
+			checkers = append(checkers, hc)
+			results = append(results, HealthResult{Name: lifecycle.NameOf(c), Err: nil})
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	for idx, checker := range checkers {
+		wg.Go(func() {
+			checkCtx := ctx
+
+			if a.healthcheckTimeout > 0 {
+				var cancel context.CancelFunc
+
+				checkCtx, cancel = context.WithTimeout(ctx, a.healthcheckTimeout)
+				defer cancel()
 			}
 
-			return nil
+			results[idx].Err = checker.Healthcheck(checkCtx)
 		})
 	}
 
-	runErr := g.Wait()
+	wg.Wait()
 
-	// If g.Wait returned because of a runner error (not signal), the
-	// signal-aware ctx may still be live. We proceed to shutdown regardless —
-	// a failed runner is a trigger to stop the rest cleanly.
-	a.logger.Info("app shutting down", slog.Any("runErr", runErr))
+	return results
+}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
+// Logger returns the logger set with WithLogger, or slog.Default().
+func (a *App) Logger() *slog.Logger {
+	if a.logger == nil {
+		return slog.Default()
+	}
+
+	return a.logger
+}
+
+// begin marks the app as started and snapshots the registered components.
+func (a *App) begin() ([]lifecycle.Resource, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.started {
+		return nil, ErrAlreadyStarted
+	}
+
+	a.started = true
+
+	return slices.Clone(a.components), nil
+}
+
+// notifyContext layers the configured signals on top of ctx. After the first
+// signal it restores the default behavior, so a second signal kills the
+// process even if shutdown hangs.
+func (a *App) notifyContext(ctx context.Context) (context.Context, func()) {
+	sigs := a.signals
+	if !a.signalsSet {
+		sigs = []os.Signal{os.Interrupt, syscall.SIGTERM}
+	}
+
+	// signal.NotifyContext without signals would relay every signal
+	// (including SIGURG used by the runtime), so "no signals" must skip it.
+	if len(sigs) == 0 {
+		return ctx, func() {}
+	}
+
+	sigCtx, stop := signal.NotifyContext(ctx, sigs...)
+	unregister := context.AfterFunc(sigCtx, stop)
+
+	return sigCtx, func() {
+		unregister()
+		stop()
+	}
+}
+
+// start calls Start on every Starter in registration order. It returns the
+// components that must be shut down: everything up to the last successful
+// Start, plus every non-Starter (those were constructed by the caller and
+// hold resources whether or not startup completed).
+func (a *App) start(ctx context.Context, components []lifecycle.Resource) ([]lifecycle.Resource, error) {
+	if a.startTimeout > 0 {
+		var cancel context.CancelFunc
+
+		ctx, cancel = context.WithTimeout(ctx, a.startTimeout)
+		defer cancel()
+	}
+
+	live := make([]lifecycle.Resource, 0, len(components))
+
+	for idx, c := range components {
+		s, ok := c.(lifecycle.Starter)
+		if !ok {
+			live = append(live, c)
+
+			continue
+		}
+
+		if err := s.Start(ctx); err != nil {
+			for _, rest := range components[idx+1:] {
+				if _, isStarter := rest.(lifecycle.Starter); !isStarter {
+					live = append(live, rest)
+				}
+			}
+
+			return live, fmt.Errorf("start %s: %w", lifecycle.NameOf(c), err)
+		}
+
+		live = append(live, c)
+	}
+
+	return live, nil
+}
+
+type runResult struct {
+	idx    int // index in the runners slice
+	runner lifecycle.Runner
+	err    error
+}
+
+// runAndShutdown runs every Runner until ctx is done or one of them returns,
+// then shuts everything down.
+func (a *App) runAndShutdown(ctx context.Context, components []lifecycle.Resource) error {
+	logger := a.Logger()
+
+	var runners []lifecycle.Runner
+
+	for _, c := range components {
+		if r, ok := c.(lifecycle.Runner); ok {
+			runners = append(runners, r)
+		}
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	results := make(chan runResult, len(runners))
+
+	var wg sync.WaitGroup
+
+	for i, r := range runners {
+		wg.Go(func() {
+			results <- runResult{idx: i, runner: r, err: r.Run(runCtx)}
+		})
+	}
+
+	allDone := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		close(allDone)
+	}()
+
+	logger.InfoContext(ctx, "app running", slog.Int("runners", len(runners)))
+
+	wait := &runWait{runners: runners, results: results, done: allDone, first: -1}
+
+	var cause error
+
+	// With no runners, results never receives: the app runs until ctx is done.
+	select {
+	case <-ctx.Done():
+		logger.InfoContext(ctx, "app stopping", slog.String("reason", "context done or signal"))
+	case res := <-results:
+		wait.first = res.idx
+		cause = runErr(res, true)
+		logger.ErrorContext(ctx, "app stopping: runner stopped",
+			slog.String("component", lifecycle.NameOf(res.runner)),
+			slog.Any("err", cause),
+		)
+	}
+
+	cancelRun()
+
+	return errors.Join(cause, a.shutdown(ctx, components, wait))
+}
+
+// runWait lets shutdown wait for runners between the two shutdown phases.
+type runWait struct {
+	runners []lifecycle.Runner
+	results <-chan runResult
+	done    <-chan struct{}
+	// first is the index of the runner whose return triggered shutdown
+	// (already reported), or -1.
+	first int
+}
+
+// shutdown shuts components down under one timeout: runners in reverse
+// order, then (if wait is set) waits for their Run to return, then every
+// other component in reverse order.
+func (a *App) shutdown(ctx context.Context, components []lifecycle.Resource, wait *runWait) error {
+	timeout := a.shutdownTimeout
+	if timeout <= 0 {
+		timeout = DefaultShutdownTimeout
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 
-	shutdownErr := a.shutdown(shutdownCtx)
+	var errs []error
 
-	if runErr != nil || shutdownErr != nil {
-		return errors.Join(runErr, shutdownErr)
+	for _, c := range slices.Backward(components) {
+		if _, ok := c.(lifecycle.Runner); ok {
+			errs = append(errs, a.shutdownOne(shutdownCtx, c, "runner"))
+		}
+	}
+
+	if wait != nil {
+		errs = append(errs, wait.collect(shutdownCtx)...)
+	}
+
+	for _, c := range slices.Backward(components) {
+		if _, ok := c.(lifecycle.Runner); !ok {
+			errs = append(errs, a.shutdownOne(shutdownCtx, c, "resource"))
+		}
+	}
+
+	err := errors.Join(errs...)
+	if err != nil {
+		a.Logger().ErrorContext(shutdownCtx, "app stopped with errors", slog.Any("err", err))
+	} else {
+		a.Logger().InfoContext(shutdownCtx, "app stopped")
+	}
+
+	return err
+}
+
+func (a *App) shutdownOne(ctx context.Context, c lifecycle.Resource, kind string) error {
+	if err := c.Shutdown(ctx); err != nil {
+		a.Logger().ErrorContext(ctx, kind+" shutdown failed",
+			slog.String("component", lifecycle.NameOf(c)),
+			slog.Any("err", err),
+		)
+
+		return fmt.Errorf("shutdown %s: %w", lifecycle.NameOf(c), err)
 	}
 
 	return nil
 }
 
-// Healthcheck aggregates every registered component that implements
-// lifecycle.Healthchecker. It returns nil if all checkers report healthy, or
-// errors.Join of every failing checker's error otherwise.
-//
-// Typical use: mount this on /readyz inside an http2.Server via
-// http2.WithHealthcheckFrom(a).
-//
-// Components that do not implement lifecycle.Healthchecker are silently
-// skipped — they contribute neither success nor failure to the result.
-//
-// Healthcheck is safe to call concurrently and at any time, including after
-// Run has returned. It does not take App-level locks — checkers are iterated
-// from the slices populated at startup.
-func (a *App) Healthcheck(ctx context.Context) error {
+// collect waits until every Run has returned or ctx expires, and returns the
+// errors runners returned after shutdown was requested, plus
+// ErrShutdownTimeout naming the runners that are still running.
+func (w *runWait) collect(ctx context.Context) []error {
+	select {
+	case <-w.done:
+	case <-ctx.Done():
+	}
+
+	// Indexes, not the runners themselves: a Runner may be a non-comparable
+	// type and cannot be a map key.
+	returned := make([]bool, len(w.runners))
+	if w.first >= 0 {
+		returned[w.first] = true
+	}
+
+	errs := w.drain(returned)
+
+	var stuck []string
+
+	for idx, r := range w.runners {
+		if !returned[idx] {
+			stuck = append(stuck, lifecycle.NameOf(r))
+		}
+	}
+
+	if len(stuck) > 0 {
+		errs = append(errs, fmt.Errorf("%w: still running: %s", ErrShutdownTimeout, strings.Join(stuck, ", ")))
+	}
+
+	return errs
+}
+
+// drain reads the results available without blocking, marks their runners as
+// returned and returns their errors.
+func (w *runWait) drain(returned []bool) []error {
 	var errs []error
 
-	for _, r := range a.runners {
-		if hc, ok := r.(lifecycle.Healthchecker); ok {
-			if err := hc.Healthcheck(ctx); err != nil {
-				errs = append(errs, fmt.Errorf("%T: %w", r, err))
+	for {
+		select {
+		case res := <-w.results:
+			returned[res.idx] = true
+
+			if err := runErr(res, false); err != nil {
+				errs = append(errs, err)
 			}
+		default:
+			return errs
 		}
 	}
-
-	for _, r := range a.resources {
-		if hc, ok := r.(lifecycle.Healthchecker); ok {
-			if err := hc.Healthcheck(ctx); err != nil {
-				errs = append(errs, fmt.Errorf("%T: %w", r, err))
-			}
-		}
-	}
-
-	return errors.Join(errs...)
 }
 
-// Logger returns the *slog.Logger configured via WithLogger, or slog.Default()
-// if none was set. Components that want to emit lifecycle-scoped logs can
-// retrieve the app's logger here.
-func (a *App) Logger() *slog.Logger {
-	return a.logger
+// runErr turns a Run result into the error to report. Before shutdown was
+// requested (early), any return is unexpected; after it, only real errors
+// count.
+func runErr(res runResult, early bool) error {
+	switch {
+	case res.err == nil || errors.Is(res.err, context.Canceled):
+		if early {
+			return fmt.Errorf("run %s: %w", lifecycle.NameOf(res.runner), ErrRunnerStopped)
+		}
+
+		return nil
+	default:
+		return fmt.Errorf("run %s: %w", lifecycle.NameOf(res.runner), res.err)
+	}
 }
 
-// shutdown is the reverse-registration-order teardown. Runners first
-// (stop accepting work), then Resources (release connections).
-func (a *App) shutdown(ctx context.Context) error {
-	var errs []error
-
-	for _, v := range slices.Backward(a.runners) {
-		r := v
-		if err := r.Shutdown(ctx); err != nil {
-			a.logger.Error("runner shutdown failed",
-				slog.String("component", fmt.Sprintf("%T", r)),
-				slog.Any("err", err),
-			)
-			errs = append(errs, fmt.Errorf("shutdown %T: %w", r, err))
-		}
-	}
-
-	for _, v := range slices.Backward(a.resources) {
-		r := v
-		if err := r.Shutdown(ctx); err != nil {
-			a.logger.Error("resource shutdown failed",
-				slog.String("component", fmt.Sprintf("%T", r)),
-				slog.Any("err", err),
-			)
-			errs = append(errs, fmt.Errorf("shutdown %T: %w", r, err))
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-// Compile-time check that App satisfies lifecycle.Healthchecker. This lets
-// an App be passed wherever a Healthchecker is expected (e.g., as the
-// argument to http2.WithHealthcheckFrom).
+// Compile-time check: an App can be used wherever a Healthchecker is expected.
 var _ lifecycle.Healthchecker = (*App)(nil)

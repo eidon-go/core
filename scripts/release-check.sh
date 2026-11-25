@@ -3,7 +3,7 @@
 #
 #   scripts/release-check.sh <module-dir> <version>
 #   scripts/release-check.sh .       v1.2.0   ->  v1.2.0
-#   scripts/release-check.sh di/etcd v1.0.0   ->  di/etcd/v1.0.0
+#   scripts/release-check.sh config/etcd v1.0.0   ->  config/etcd/v1.0.0
 #
 # Fails if the module is not published, the version is not semver, the major
 # version does not match the module path (/vN suffix for N >= 2), the tag

@@ -1,4 +1,4 @@
-package di
+package config
 
 import (
 	"bytes"
@@ -18,11 +18,11 @@ import (
 // channels real backends return from KV.Watch.
 const fakeWatchBuffer = 16
 
-// fakeEtcdKV is an in-memory KV implementation used by the di package
+// fakeKV is an in-memory KV implementation used by the di package
 // tests. It records Close calls, supports per-key fan-out to multiple
 // watchers, and exposes Set/Delete/SetError helpers so tests can drive the
 // watcher behaviour deterministically.
-type fakeEtcdKV struct {
+type fakeKV struct {
 	mu       sync.Mutex
 	data     map[string][]byte
 	watchers map[string][]*fakeWatcher
@@ -35,11 +35,11 @@ type fakeWatcher struct {
 	done   chan struct{}
 }
 
-// Compile-time guarantee that fakeEtcdKV implements KV.
-var _ KV = (*fakeEtcdKV)(nil)
+// Compile-time guarantee that fakeKV implements KV.
+var _ KV = (*fakeKV)(nil)
 
-func newFakeEtcdKV() *fakeEtcdKV {
-	return &fakeEtcdKV{
+func newFakeKV() *fakeKV {
+	return &fakeKV{
 		data:     make(map[string][]byte),
 		watchers: make(map[string][]*fakeWatcher),
 	}
@@ -48,7 +48,7 @@ func newFakeEtcdKV() *fakeEtcdKV {
 // Get returns ErrKVKeyNotFound when key is absent, otherwise a copy of
 // the stored bytes (so callers mutating the slice do not affect future
 // Gets).
-func (f *fakeEtcdKV) Get(_ context.Context, key string) ([]byte, error) {
+func (f *fakeKV) Get(_ context.Context, key string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -63,7 +63,7 @@ func (f *fakeEtcdKV) Get(_ context.Context, key string) ([]byte, error) {
 // Watch registers a fresh subscriber for key. The returned channel is
 // closed when ctx is cancelled, when SetError is called for the key, or
 // when Close is called on the fake.
-func (f *fakeEtcdKV) Watch(ctx context.Context, key string) <-chan KVEvent {
+func (f *fakeKV) Watch(ctx context.Context, key string) <-chan KVEvent {
 	ctx, cancel := context.WithCancel(ctx)
 
 	w := &fakeWatcher{
@@ -87,7 +87,7 @@ func (f *fakeEtcdKV) Watch(ctx context.Context, key string) <-chan KVEvent {
 // Close releases the fake. Currently-open watcher channels are closed so
 // outstanding Watch goroutines unblock. Safe to call multiple times; the
 // counter increments on every call.
-func (f *fakeEtcdKV) Close() error {
+func (f *fakeKV) Close() error {
 	f.closed.Add(1)
 
 	f.mu.Lock()
@@ -107,13 +107,13 @@ func (f *fakeEtcdKV) Close() error {
 }
 
 // CloseCount reports how many times Close has been called.
-func (f *fakeEtcdKV) CloseCount() int {
+func (f *fakeKV) CloseCount() int {
 	return int(f.closed.Load())
 }
 
 // Set stores value (deep copy) under key and pushes a Put event to every
 // current subscriber for the key.
-func (f *fakeEtcdKV) Set(key string, value []byte) {
+func (f *fakeKV) Set(key string, value []byte) {
 	stored := bytes.Clone(value)
 
 	f.mu.Lock()
@@ -130,7 +130,7 @@ func (f *fakeEtcdKV) Set(key string, value []byte) {
 // or the deadline expires. Returns true if the count was reached. Used by
 // tests to avoid the race where a Set is delivered before the watcher
 // goroutine has registered its subscription.
-func (f *fakeEtcdKV) WaitForWatcher(key string, n int, timeout time.Duration) bool {
+func (f *fakeKV) WaitForWatcher(key string, n int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 
 	for {
@@ -154,7 +154,7 @@ func (f *fakeEtcdKV) WaitForWatcher(key string, n int, timeout time.Duration) bo
 // any subscriber. Used by tests that need to seed the data seen by a
 // future kv.Get (e.g. resync after a terminal stream error) without also
 // triggering a Put delivery on a still-open channel.
-func (f *fakeEtcdKV) SetData(key string, value []byte) {
+func (f *fakeKV) SetData(key string, value []byte) {
 	stored := bytes.Clone(value)
 
 	f.mu.Lock()
@@ -164,7 +164,7 @@ func (f *fakeEtcdKV) SetData(key string, value []byte) {
 
 // Delete removes the value under key and pushes a Delete event to every
 // current subscriber.
-func (f *fakeEtcdKV) Delete(key string) {
+func (f *fakeKV) Delete(key string) {
 	f.mu.Lock()
 	delete(f.data, key)
 	subs := append([]*fakeWatcher(nil), f.watchers[key]...)
@@ -178,7 +178,7 @@ func (f *fakeEtcdKV) Delete(key string) {
 // SetError pushes a terminal-error event to every current subscriber for
 // key, then closes their channels. Subsequent Watch(key) calls receive a
 // fresh channel — emulating "watcher needs to reconnect".
-func (f *fakeEtcdKV) SetError(key string, err error) {
+func (f *fakeKV) SetError(key string, err error) {
 	f.mu.Lock()
 	subs := f.watchers[key]
 	delete(f.watchers, key)
@@ -191,7 +191,7 @@ func (f *fakeEtcdKV) SetError(key string, err error) {
 }
 
 // sendEvent delivers ev on w.ch unless the watcher has already finished.
-func (f *fakeEtcdKV) sendEvent(w *fakeWatcher, ev KVEvent) {
+func (f *fakeKV) sendEvent(w *fakeWatcher, ev KVEvent) {
 	select {
 	case <-w.done:
 		return
@@ -206,7 +206,7 @@ func (f *fakeEtcdKV) sendEvent(w *fakeWatcher, ev KVEvent) {
 
 // removeWatcher detaches w from key's subscriber list and finishes it.
 // Idempotent — safe if SetError/Close already removed the watcher.
-func (f *fakeEtcdKV) removeWatcher(key string, w *fakeWatcher) {
+func (f *fakeKV) removeWatcher(key string, w *fakeWatcher) {
 	f.mu.Lock()
 
 	subs := f.watchers[key]
@@ -267,7 +267,7 @@ func finishWatcher(w *fakeWatcher) {
 func TestFakeEtcdKV_GetSetDeleteRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	f := newFakeEtcdKV()
+	f := newFakeKV()
 
 	_, err := f.Get(t.Context(), "k")
 	require.Error(t, err)
@@ -289,7 +289,7 @@ func TestFakeEtcdKV_GetSetDeleteRoundTrip(t *testing.T) {
 func TestFakeEtcdKV_SetErrorEmitsErrorAndCloses(t *testing.T) {
 	t.Parallel()
 
-	f := newFakeEtcdKV()
+	f := newFakeKV()
 	ch := f.Watch(t.Context(), "k")
 	errBoom := errors.New("boom")
 	f.SetError("k", errBoom)

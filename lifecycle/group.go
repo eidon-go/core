@@ -3,26 +3,26 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
 )
 
-// Group returns a Resource whose Shutdown calls Shutdown on every non-nil
-// resource in resources, in order, joining any errors with errors.Join.
+// Group returns a Resource that shuts down every non-nil member in reverse
+// argument order — so members passed in construction order are torn down
+// dependents-first — joining the errors with errors.Join.
 //
-// Entries that are nil — including a typed nil pointer stored in the
-// Resource interface (e.g. a struct field of concrete pointer type that was
-// never assigned) — are silently skipped. This lets callers pass struct
-// fields directly, some of which may be nil because of partial
-// construction, without a hand-written nil guard per field:
+// Nil members, including a typed nil pointer stored in the interface (a
+// struct field that was never assigned), are skipped. This lets callers pass
+// fields of a partially constructed struct without a nil guard per field:
 //
 //	func (i *Infrastructure) Shutdown(ctx context.Context) error {
-//	    return lifecycle.Group(i.Redis, i.DB, i.OTel).Shutdown(ctx)
+//	    return lifecycle.Group(i.OTel, i.DB, i.Redis).Shutdown(ctx)
 //	}
 //
-// Group is intended for aggregating an arbitrary subset of resources into
-// one rollback/teardown unit (e.g. a DI construction-failure rollback
-// path). It does not replace app.App's LIFO-ordered normal shutdown
-// sequence.
+// The returned value also implements Healthchecker: it checks every member
+// that implements Healthchecker and joins their errors, so registering a
+// Group with app.App does not hide the members' health checks.
 func Group(resources ...Resource) Resource {
 	return group(resources)
 }
@@ -33,38 +33,65 @@ type group []Resource
 func (g group) Shutdown(ctx context.Context) error {
 	var errs []error
 
-	for _, r := range g {
-		if isNilResource(r) {
+	for _, r := range slices.Backward(g) {
+		if IsNil(r) {
 			continue
 		}
 
 		if err := r.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%s: %w", NameOf(r), err))
 		}
 	}
 
 	return errors.Join(errs...)
 }
 
-// isNilResource reports whether r is nil, accounting for the classic Go
-// gotcha where a nil concrete value (most commonly a nil pointer, e.g.
-// (*redis.Client)(nil)) stored in an interface value compares != nil to the
-// untyped nil. Covers every kind reflect.IsNil accepts so a nested
-// Group() — itself a Resource backed by a slice, not a pointer — is also
-// recognized correctly rather than relying on it happening to no-op safely
-// on a nil slice receiver.
-func isNilResource(r Resource) bool {
-	if r == nil {
+// Healthcheck implements Healthchecker.
+func (g group) Healthcheck(ctx context.Context) error {
+	var errs []error
+
+	for _, r := range g {
+		if IsNil(r) {
+			continue
+		}
+
+		if hc, ok := r.(Healthchecker); ok {
+			if err := hc.Healthcheck(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", NameOf(r), err))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// IsNil reports whether v is nil, including the classic Go gotcha of a nil
+// pointer (or nil slice, map, func, chan) stored in a non-nil interface value.
+func IsNil(v any) bool {
+	if v == nil {
 		return true
 	}
 
-	switch v := reflect.ValueOf(r); v.Kind() { //nolint:exhaustive // only kinds that can be nil are relevant
+	switch rv := reflect.ValueOf(v); rv.Kind() { //nolint:exhaustive // only kinds that can be nil are relevant
 	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
-		return v.IsNil()
+		return rv.IsNil()
 	default:
 		return false
 	}
 }
 
-// Compile-time check.
-var _ Resource = group(nil)
+// NameOf returns v.Name() if v implements Namer, otherwise v's Go type
+// (e.g. "*redis.Client").
+func NameOf(v any) string {
+	if n, ok := v.(Namer); ok && !IsNil(v) {
+		return n.Name()
+	}
+
+	return fmt.Sprintf("%T", v)
+}
+
+// Compile-time checks.
+var (
+	_ Resource      = group(nil)
+	_ Healthchecker = group(nil)
+)

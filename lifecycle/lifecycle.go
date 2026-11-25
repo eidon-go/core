@@ -1,92 +1,97 @@
-// Package lifecycle defines the three core interfaces that every component
-// registered with app.App must implement in some combination: Resource for
-// stateful holders of connections or goroutines, Runner for components whose
-// primary contract is long-running background work, and Healthchecker for
-// readiness reporting.
+// Package lifecycle defines the small interfaces every component managed by
+// app.App implements in some combination:
 //
-// The package has no dependencies beyond the standard library and is designed
-// as a leaf package so every other core/* package can depend on it without
-// creating import cycles.
+//   - Resource — holds connections, pools or goroutines and releases them in
+//     Shutdown. Every component is a Resource.
+//   - Starter — optional: performs startup work (connect, ping, warm up)
+//     that must finish before the application starts serving.
+//   - Runner — a Resource whose primary contract is long-running work in Run
+//     (servers, consumers).
+//   - Healthchecker — optional: reports readiness.
+//   - Namer — optional: a human-readable name for logs, errors and health
+//     reports.
 //
-// # Resource vs Runner
+// The package depends only on the standard library, so every other module can
+// depend on it without import cycles.
 //
-// The distinction between Resource and Runner is about contract visibility,
-// not about the presence of a background goroutine:
+// # Contract
 //
-//   - Resource hides any background work as an implementation detail. The
-//     caller uses the component by invoking its methods on demand. Examples:
-//     redis client, sql DB, kafka producer, otel SDK, rabbitmq publisher.
+// app.App drives a component through these phases:
 //
-//   - Runner exposes background work as its primary contract — Run blocks
-//     until the context is cancelled. Callers register runners with app.App
-//     and block on app.Run(). Examples: HTTP/2 server, gRPC server, kafka
-//     consumer, rabbitmq consumer host.
+//  1. Start: Starter.Start is called once, in registration order, before any
+//     Run. If Start returns an error, the component must release whatever it
+//     acquired itself: its Shutdown is not called.
+//  2. Run: Runner.Run is called once, concurrently for all runners. It blocks
+//     until ctx is cancelled or Shutdown is called.
+//  3. Shutdown: Shutdown is called at most once per component, in reverse
+//     registration order, runners first. For a Runner, Shutdown may be called
+//     while Run is still running and must make Run return; Shutdown must also
+//     be safe when Run was never called (startup failed) or has already
+//     returned.
 //
-// Runner embeds Resource, so every Runner is also a Resource. app.App uses a
-// type switch on Runner first, then Resource, to dispatch components to the
-// correct lifecycle pool without double-registration.
+// Healthcheck and Name may be called at any time, concurrently with each
+// other and with Start, Run and Shutdown.
 package lifecycle
 
 import "context"
 
-// Resource is a stateful holder of connections, pools, or background
-// goroutines that does not block the caller. It participates in graceful
-// shutdown via Shutdown.
-//
-// Implementations must make Shutdown idempotent and safe to call once — the
-// app.App orchestrator calls it exactly once during shutdown. Shutdown must
-// honor the provided context: if ctx is cancelled before the component
-// finishes releasing resources, the implementation should force-close
-// (drop connections, abandon in-flight work) and return ctx.Err().
-//
-// Shutdown MUST NOT be called concurrently with other methods on the same
-// component; callers that need concurrent access must coordinate externally.
+// Resource is a stateful holder of connections, pools or background
+// goroutines. It participates in graceful shutdown via Shutdown.
 type Resource interface {
-	// Shutdown releases any resources held by the component. It should be
-	// called exactly once, typically by app.App during graceful shutdown.
-	// The provided context bounds the total time allowed for cleanup — on
-	// cancellation the implementation should abort gracefully and return
-	// ctx.Err().
+	// Shutdown releases the resources held by the component. app.App calls it
+	// at most once. ctx bounds the time allowed for a graceful release: when
+	// ctx is done, the implementation must force-close (drop connections,
+	// abandon in-flight work) and return promptly, typically with ctx.Err().
 	Shutdown(ctx context.Context) error
 }
 
-// Runner is a Resource that additionally performs long-running blocking work
-// via Run. Run blocks until ctx is cancelled or a fatal error occurs, then
-// returns. Typical implementations: HTTP/gRPC servers, kafka/rabbitmq
-// consumers.
+// Starter is an optional interface for components that need startup work
+// which must complete before the application serves: connecting with retry,
+// pinging, running migrations, warming caches.
 //
-// After Run returns, app.App will also call Shutdown to release any remaining
-// resources (accept loops, listeners, client connections). Implementations
-// must tolerate Shutdown being called after Run has already returned.
+// app.App calls Start once per component, in registration order, before any
+// Runner.Run. If Start fails, App stops the startup, shuts down everything
+// started so far in reverse order and returns the error. A Start that fails
+// must clean up after itself: its Shutdown is not called.
+type Starter interface {
+	// Start performs startup work. It must honor ctx: ctx is cancelled on a
+	// shutdown signal or when the start timeout of app.App expires.
+	Start(ctx context.Context) error
+}
+
+// Runner is a Resource that performs long-running work in Run: HTTP or gRPC
+// servers, message consumers, schedulers.
 //
-// Run and Shutdown may be called from different goroutines. Run is expected
-// to unblock promptly when its context is cancelled — relying on Shutdown to
-// force-stop is a sign of a design bug.
+// Run and Shutdown are called from different goroutines. Run returns when
+// either its ctx is cancelled or Shutdown is called — whichever comes first.
+// A server would typically map Run to Serve/ListenAndServe and Shutdown to its
+// graceful stop, which is what makes Serve return.
 type Runner interface {
 	Resource
 
-	// Run blocks until ctx is cancelled (normal termination) or until a
-	// fatal error occurs (in which case Run returns the error). Run must
-	// NOT return a non-nil error on ctx cancellation — context.Canceled
-	// is treated as success by app.App.
+	// Run blocks until ctx is cancelled or Shutdown is called, then returns
+	// nil (context.Canceled is also accepted as a clean stop). Returning
+	// before that — with an error or with nil — makes app.App shut the whole
+	// application down; an error is reported as the cause.
 	Run(ctx context.Context) error
 }
 
-// Healthchecker is an optional interface a Resource or Runner may implement
-// to report readiness. app.App.Healthcheck aggregates all registered
-// components that implement this interface and returns errors.Join of any
-// failures.
+// Healthchecker is an optional interface a component implements to report
+// readiness (e.g. for a /readyz endpoint). app.App.Healthcheck aggregates
+// every registered Healthchecker.
 //
-// Healthcheck is invoked on every /readyz request, so implementations should
-// be cheap: a cached Ping result or a lightweight connection check. If the
-// check requires network I/O, it MUST honor ctx deadlines — a slow readiness
-// probe can turn a transient degradation into a cascading outage.
-//
-// Returning nil means the component is ready to serve. Returning a non-nil
-// error means the component is not ready; the error will be surfaced in the
-// /readyz response body.
+// Healthcheck may be called frequently, concurrently with any other method,
+// including during shutdown, so it should be cheap — a cached result or a
+// lightweight ping — and must honor ctx deadlines.
 type Healthchecker interface {
-	// Healthcheck returns nil if the component is ready, or an error
-	// describing the unhealthy state. Must respect ctx deadlines.
+	// Healthcheck returns nil if the component is ready to serve, or an error
+	// describing why it is not.
 	Healthcheck(ctx context.Context) error
+}
+
+// Namer is an optional interface that gives a component a human-readable
+// name. app.App uses it in logs, errors and health reports; without it the
+// component's Go type is used, which cannot tell two instances apart.
+type Namer interface {
+	Name() string
 }

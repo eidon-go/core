@@ -1,145 +1,77 @@
 # app
 
-The top-level lifecycle orchestrator. Collects `lifecycle.Runner` and `lifecycle.Resource` components, starts runners concurrently under an `errgroup`, handles SIGINT/SIGTERM, and performs two-phase LIFO shutdown with a bounded timeout.
-
-The single entry point to the application lifecycle. Handles signal-driven shutdown, resource ordering, and healthcheck aggregation.
-
-## When to use
-
-Always — every service built on `core` should use `app.App` as the single entry point to the lifecycle. It removes ~15 lines of boilerplate from every `main.go` and enforces a consistent shutdown contract across the service.
-
-## Quickstart
+Runs the components of a service — anything implementing
+[`lifecycle.Resource`](../lifecycle/README.md) — through one managed lifecycle.
 
 ```go
-package main
-
-import (
-    "log"
-    "time"
-
-    "github.com/eidon-go/core/app"
-    coregrpc "github.com/eidon-go/core/grpc"
-    "github.com/eidon-go/core/http2"
-)
-
 func main() {
-    httpSrv := http2.NewServer(http2.Config{Port: "8080"})
-    grpcSrv := coregrpc.NewServer(coregrpc.Config{Port: "50051"})
+    a := app.New(
+        app.WithShutdownTimeout(30*time.Second),
+        app.WithStartTimeout(time.Minute),
+    )
 
-    a := app.New(app.WithShutdownTimeout(30 * time.Second))
-    a.Add(httpSrv, grpcSrv)
+    a.Add(cfg, telemetry, db, cache) // dependencies first
+    a.Add(grpcServer, httpServer)
 
-    if err := a.Run(); err != nil {
+    if err := a.Run(context.Background()); err != nil {
         log.Fatal(err)
     }
 }
 ```
 
-## API
+## Lifecycle
 
-```go
-func New(opts ...Option) *App
-func WithLogger(l *slog.Logger) Option
-func WithShutdownTimeout(d time.Duration) Option
-func WithSignals(sigs ...os.Signal) Option
+1. **Start.** Every `lifecycle.Starter` is started in registration order. If one fails, what was
+   started (plus every component without `Start`) is shut down in reverse order and `Run`
+   returns the error.
+2. **Run.** Every `lifecycle.Runner` runs concurrently until the context passed to `Run` is
+   cancelled, a shutdown signal arrives, or any runner returns. A runner returning `nil` early is
+   reported as `ErrRunnerStopped`. Without runners the app runs until the context is cancelled or
+   a signal arrives.
+3. **Shutdown.** Under one timeout: runners are shut down in reverse order (which makes their
+   `Run` return), the app waits for every `Run` to return, then the other components are shut
+   down in reverse order. Runners still running when the timeout expires are reported with
+   `ErrShutdownTimeout`.
 
-func (a *App) Add(components ...any)                        // type-switch dispatch (Runner vs Resource)
-func (a *App) AddRunner(runners ...lifecycle.Runner)        // compile-time typed
-func (a *App) AddResource(resources ...lifecycle.Resource)  // compile-time typed
-func (a *App) Run() error
-func (a *App) Healthcheck(ctx context.Context) error
-func (a *App) Logger() *slog.Logger
-```
-
-Prefer `AddRunner` / `AddResource` when the role is known at the call site — the compiler rejects mistakes instead of the runtime type switch panicking.
+`Run` returns `nil` after a clean stop; otherwise the cause joined with every shutdown error.
+It may be called once (`ErrAlreadyStarted` afterwards).
 
 ## Options
 
-- `WithLogger(*slog.Logger)` — inject a logger and also set `slog.SetDefault`. Default: `slog.Default()`.
-- `WithShutdownTimeout(time.Duration)` — upper bound on the Shutdown phase. Default: 30s.
-- `WithSignals(...os.Signal)` — signals that trigger shutdown. Default: `os.Interrupt`, `syscall.SIGTERM`. Pass an empty list to disable signal-driven shutdown (useful in tests).
+| Option | Default | |
+|---|---|---|
+| `WithLogger(*slog.Logger)` | `slog.Default()` | lifecycle logs; never changes the global logger |
+| `WithShutdownTimeout(d)` | 30s | budget for the whole shutdown phase |
+| `WithStartTimeout(d)` | none | budget for the whole start phase |
+| `WithSignals(sigs...)` | SIGINT, SIGTERM | `WithSignals()` disables signal handling |
+| `WithHealthcheckTimeout(d)` | none | per-component bound in `Healthcheck` / `HealthReport` |
 
-## `Add` — dispatch rules
+After the first signal the default signal behavior is restored, so a second Ctrl+C terminates a
+shutdown that hangs.
 
-```go
-a.Add(otelProvider, db, redisClient)   // Resources — registered for Shutdown only
-a.Add(httpServer, grpcServer)           // Runners   — registered for Run + Shutdown
-```
+## Registration
 
-Each argument must implement `lifecycle.Runner` or `lifecycle.Resource`. Since `Runner` embeds `Resource`, the type switch checks `Runner` first to avoid double-registration.
+`Add(components ...lifecycle.Resource)` registers components in dependency order. A component
+implementing `lifecycle.Runner` is run; every component is shut down. `Add` panics on a nil
+component (including a typed nil pointer) and after `Run` — both are programming errors.
 
-**`Add` panics** if a component implements neither interface or is called after `Run` — both are startup-time programming errors.
+## Health
 
-## Lifecycle semantics
-
-### Startup
-
-1. `Run` creates a signal-aware context via `signal.NotifyContext`.
-2. All registered `Runner`s are started concurrently in an `errgroup`.
-3. `Run` blocks until the first of:
-   - A signal is received, OR
-   - Any runner returns a non-nil error, OR
-   - All runners complete (rare, typically only in tests).
-
-### Shutdown (two-phase, LIFO)
-
-When `Run` unblocks, the shutdown phase begins:
-
-1. A fresh context is built with `context.WithTimeout(context.Background(), shutdownTimeout)` — **NOT** the already-cancelled run context.
-2. Every `Runner` has `Shutdown(shutdownCtx)` called in **reverse registration order**. Runners registered last shut down first — so frontends stop accepting traffic before backends are closed.
-3. Every `Resource` has `Shutdown(shutdownCtx)` called in **reverse registration order**. Typical pattern: OTel is registered first so it shuts down last, letting other components flush telemetry.
-4. All errors are joined via `errors.Join` and returned. `context.Canceled` from the run phase is treated as normal termination and omitted.
-
-### Recommended registration order
-
-```go
-a.Add(otelProvider)     // Resource: registered first → shuts down LAST
-a.Add(sqlDB)            // Resource
-a.Add(redisClient)      // Resource
-a.Add(kafkaProducer)    // Resource
-a.Add(grpcServer)       // Runner: registered before http → shuts down second
-a.Add(httpServer)       // Runner: registered last → shuts down FIRST
-```
-
-Under SIGTERM, the sequence becomes:
-
-```
-httpServer.Shutdown → grpcServer.Shutdown      (stop accepting traffic)
-   ↓
-kafkaProducer.Shutdown → redisClient.Shutdown → sqlDB.Shutdown   (close pools)
-   ↓
-otelProvider.Shutdown                                             (flush telemetry)
-```
-
-## Healthcheck aggregation
-
-```go
-err := a.Healthcheck(ctx)
-```
-
-Iterates every component that implements `lifecycle.Healthchecker` and returns `errors.Join` of all failures, or nil if all are healthy. `App` itself implements `Healthchecker`, so you can wire it into an HTTP `/readyz` handler via:
-
-```go
-httpServer := http2.NewServer(cfg, http2.WithHealthcheckFrom(a))
-```
-
-## Extending
-
-No `Unwrap` — `App` is a terminal orchestrator, not a wrapper. If you need lower-level control, build your own runner atop `errgroup` and call `Run(ctx)` from your code. But almost every case that looks like it needs that is better served by adding more `Runner`s to the same `App`.
+`Healthcheck(ctx)` runs every registered `lifecycle.Healthchecker` concurrently and joins the
+failures, each prefixed with the component's name (`lifecycle.NameOf`). `App` itself implements
+`lifecycle.Healthchecker`, so it can back a `/readyz` endpoint directly. `HealthReport(ctx)`
+returns one `HealthResult{Name, Err}` per checker for structured output.
 
 ## Testing
 
+Pass a context you control and disable signals:
+
 ```go
-// Disable signal handling so tests don't interact with the process's signals.
 a := app.New(app.WithSignals())
+a.Add(component)
 
-// Inject a short shutdown timeout to keep tests fast.
-a := app.New(app.WithShutdownTimeout(100*time.Millisecond))
+ctx, cancel := context.WithCancel(t.Context())
+go func() { done <- a.Run(ctx) }()
+// ... exercise the app ...
+cancel()
 ```
-
-See `app_test.go` for LIFO-ordering, healthcheck, and timeout tests using a `recorder`-based fake.
-
-## See also
-
-- [`core/lifecycle`](../lifecycle/README.md) — the `Resource`, `Runner`, `Healthchecker` interfaces.
-- [`core/di`](../di/README.md) — optional thin container that returns a typed `Config`/`Services` pair for a consistent DI pattern.
