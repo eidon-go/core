@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 
 	"github.com/eidon-go/core/lifecycle"
 )
@@ -117,5 +118,49 @@ func ExampleNewServer() {
 	fmt.Println(server.Shutdown(ctx), <-done) // bounds it
 
 	// Output:
+	// <nil> <nil>
+}
+
+func ExampleNewWorker() {
+	messages := make(chan string, 1)
+	messages <- "order-1"
+
+	worker := lifecycle.NewWorker(lifecycle.WorkerFuncs{
+		Run: func(stop, work context.Context) error {
+			for {
+				var msg string
+
+				select { // take new work with stop
+				case <-stop.Done():
+					return nil
+				case msg = <-messages:
+				}
+
+				// Handle it with work: a stop that begins now lets it finish,
+				// until Shutdown's deadline.
+				if err := work.Err(); err != nil {
+					return err
+				}
+
+				fmt.Println("handled", msg)
+			}
+		},
+	})
+
+	ctx := context.Background()
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+
+	go func() { done <- worker.Run(runCtx) }()
+
+	for len(messages) > 0 { // wait until the message is taken
+		runtime.Gosched()
+	}
+
+	stop()                                    // stops taking work, as app.App does on a signal
+	fmt.Println(worker.Shutdown(ctx), <-done) // bounds the work in flight
+
+	// Output:
+	// handled order-1
 	// <nil> <nil>
 }

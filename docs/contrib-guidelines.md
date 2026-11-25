@@ -62,7 +62,11 @@ component" in the lifecycle README):
   field (not embedded) and delegated to; re-export its state errors
   (`var ErrClosed = lifecycle.ErrClosed`) instead of declaring your own, and wrap the errors
   `Start`/`Run`/`Shutdown` return with the module's prefix (`"http2: %w"`).
-- A hand-written `Runner` is the exception, for what fits neither shape.
+- **Workers** (consumers, schedulers, poll loops): `lifecycle.NewWorker` with a loop that takes
+  new work with its `stop` context and handles the work in flight with its `work` context, kept
+  in an unexported field and delegated to; `Shutdown` calls the worker's `Shutdown` first, then
+  releases the client (`CloseOnce`/`ShutdownOnce`).
+- A hand-written `Runner` is the exception, for what fits none of these shapes.
 
 The rules below are what the adapters implement; a hand-written component follows them in full.
 

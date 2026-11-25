@@ -69,7 +69,7 @@ has returned.
 
 ## Writing a component
 
-Most integrations need none of this state machine: two adapters implement it once.
+Most integrations need none of this state machine: three adapters implement it once.
 
 **A client** (database, cache, producer, gRPC connection) is a `Resource`, usually a `Starter`
 that connects with retry. `CloseOnce` / `ShutdownOnce` give it an idempotent, ctx-bounded
@@ -129,7 +129,38 @@ Keep the `*Server` in an unexported field and delegate `Start`, `Run`, `Shutdown
 `Healthcheck` to it: embedding would make every method added to `Server` later part of the
 component's API.
 
-Implementing `Runner` by hand remains possible for what fits neither shape; such a component must
+**A worker** (message consumer, scheduler, poll loop) describes itself with its loop; `NewWorker`
+turns it into a `Runner` and `Healthchecker`. The loop gets two contexts: `stop`, cancelled when
+the stop begins (`Run`'s context cancelled or `Shutdown` called), for taking new work, and `work`,
+cancelled only at `Shutdown`'s deadline, for the work in flight — the message being handled, a
+final commit:
+
+```go
+lc := lifecycle.NewWorker(lifecycle.WorkerFuncs{
+    Run: func(stop, work context.Context) error {
+        for {
+            msgs, err := c.fetch(stop) // returns at once when the stop begins
+            if stop.Err() != nil {
+                return c.commit(work) // finish on work: bounded by Shutdown only
+            }
+            ...
+            c.handle(work, msgs)
+        }
+    },
+    Logger: logger, // optional: "worker stopping", "worker stopped" (forced)
+})
+```
+
+The adapter keeps the whole stop: `Run` returning once the loop has returned (`context.Canceled`
+after the stop has begun counts as `nil`), `Shutdown` waiting for it until its deadline and then
+cancelling `work` and returning — a loop that ignores `work` is abandoned, `Run` returns as well —
+`Run` after `Shutdown` returning `nil` without running the loop, `Healthcheck` (`ErrNotRunning`
+before `Run`, from the moment the stop begins and after the loop has returned), and a panic in the
+loop turned into an error. The `Worker` releases nothing: the component's `Shutdown` calls
+`Worker.Shutdown` first, then releases its client (a `Releaser`) — also when `Run` never ran.
+Connecting belongs in the component's `Start`.
+
+Implementing `Runner` by hand remains possible for what fits none of these shapes; such a component must
 follow the contract above in full and pass `lifecycletest.Runner`.
 
 ## Helpers
