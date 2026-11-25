@@ -40,11 +40,11 @@ func coerce[T ValueType](v any) (T, bool) {
 	case int64:
 		out, ok = toInt64(v)
 	case uint:
-		var n uint64
-
-		n, ok = toUint64(v)
-		ok = ok && n <= math.MaxUint
-		out = uint(n)
+		// Convert only under the bound check, so no out-of-range value is
+		// ever truncated (uint is 32 bits on 32-bit platforms).
+		if n, isUint := toUint64(v); isUint && n <= math.MaxUint {
+			out, ok = uint(n), true
+		}
 	case uint64:
 		out, ok = toUint64(v)
 	case bool:
