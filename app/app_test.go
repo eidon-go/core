@@ -61,13 +61,18 @@ type starter struct {
 	resource
 
 	startErr error
-	blockCtx bool // Start blocks until ctx is done
+	blockCtx bool          // Start blocks until ctx is done
+	entered  chan struct{} // if set, closed when a blocking Start begins
 }
 
 func (s *starter) Start(ctx context.Context) error {
 	s.rec.add("start " + s.name)
 
 	if s.blockCtx {
+		if s.entered != nil {
+			close(s.entered)
+		}
+
 		<-ctx.Done()
 
 		return ctx.Err()
@@ -398,7 +403,7 @@ func TestRun_CancelDuringStartIsCleanStop(t *testing.T) {
 	t.Parallel()
 
 	rec := &recorder{}
-	blocking := &starter{resource: resource{name: "slow", rec: rec}, blockCtx: true}
+	blocking := &starter{resource: resource{name: "slow", rec: rec}, blockCtx: true, entered: make(chan struct{})}
 	next := &starter{resource: resource{name: "next", rec: rec}}
 
 	a := newApp()
@@ -407,11 +412,12 @@ func TestRun_CancelDuringStartIsCleanStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
 
-	time.Sleep(20 * time.Millisecond)
+	<-blocking.entered
 	cancel()
 
 	require.NoError(t, wait(t, done))
-	assert.NotContains(t, rec.list(), "start next", "no Start after cancellation")
+	assert.Equal(t, []string{"start slow", "shutdown next", "shutdown slow"}, rec.list(),
+		"no Start after cancellation; the interrupted and the never-started components are shut down")
 }
 
 func TestRun_StartTimeout(t *testing.T) {
@@ -419,12 +425,14 @@ func TestRun_StartTimeout(t *testing.T) {
 
 	rec := &recorder{}
 	blocking := &starter{resource: resource{name: "slow", rec: rec}, blockCtx: true}
+	next := &resource{name: "next", rec: rec}
 
 	a := newApp(app.WithStartTimeout(50 * time.Millisecond))
-	a.Add(blocking)
+	a.Add(blocking, next)
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, []string{"start slow", "shutdown next", "shutdown slow"}, rec.list())
 }
 
 func TestRun_RunnerThatIsAlsoStarter(t *testing.T) {

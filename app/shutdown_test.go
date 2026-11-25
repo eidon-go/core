@@ -186,3 +186,41 @@ func (f *failOnSignal) Run(ctx context.Context) error {
 }
 
 func (f *failOnSignal) Shutdown(context.Context) error { return nil }
+
+// lazyClient sets its client in Start and dereferences it in Shutdown: it
+// assumes Shutdown never follows a failed or skipped Start.
+type lazyClient struct{ conn *struct{ open bool } }
+
+func (l *lazyClient) Name() string { return "lazy" }
+
+func (l *lazyClient) Start(context.Context) error {
+	l.conn = &struct{ open bool }{open: true}
+
+	return nil
+}
+
+func (l *lazyClient) Shutdown(context.Context) error {
+	l.conn.open = false
+
+	return nil
+}
+
+// A component that panics in Shutdown after a failed startup does not crash
+// the process or hide the start error, and the others are still shut down.
+func TestRun_PanickingShutdownAfterFailedStartIsReported(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	errStart := errors.New("no connection")
+	first := &resource{name: "first", rec: rec}
+	failing := &starter{resource: resource{name: "failing", rec: rec}, startErr: errStart}
+
+	a := newApp()
+	a.Add(first, failing, &lazyClient{})
+
+	err := wait(t, runAsync(t.Context(), a))
+	require.ErrorIs(t, err, errStart)
+	require.ErrorIs(t, err, app.ErrShutdownPanicked)
+	require.ErrorContains(t, err, "shutdown lazy")
+	assert.Contains(t, rec.list(), "shutdown first")
+}

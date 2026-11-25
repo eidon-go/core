@@ -18,8 +18,10 @@ type store struct {
 	defaults  map[string]any
 
 	// envNames caches envName per key (string → string): lookup runs on
-	// every read, often in a request path through Live. Keys are the ones the
-	// code reads, so the cache stays as small as that set.
+	// every read, often in a request path through Live. It holds one entry
+	// per distinct key ever read: small for keys fixed in code, but it grows
+	// with keys built at run time (tenants.<id>.limit) — a few dozen bytes per
+	// key, acceptable for config keys.
 	envNames sync.Map
 }
 

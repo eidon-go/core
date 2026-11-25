@@ -104,7 +104,9 @@ app.WithObserver(func(ctx context.Context, e app.Event) {
 Observers are called synchronously and possibly concurrently (Run events come from each runner's
 goroutine, and runners are shut down concurrently); keep them fast and safe for concurrent use. A Shutdown event is reported when App
 stops waiting — for an abandoned Shutdown that is before the call returns — and the Run event of
-an abandoned runner may arrive after `App.Run` has returned.
+an abandoned runner may arrive after `App.Run` has returned. Events do not come in pairs: after a
+failed startup every component gets a Shutdown event, including those that never got a Start or
+Run event.
 
 ## Testing
 

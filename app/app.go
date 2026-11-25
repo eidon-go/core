@@ -62,6 +62,10 @@ var (
 	// Healthcheck panicked: the panic is recovered, so a faulty check fails
 	// readiness instead of killing the process.
 	ErrHealthcheckPanicked = errors.New("app: healthcheck panicked")
+	// ErrShutdownPanicked is reported for a component whose Shutdown
+	// panicked: the panic is recovered and the other components are still
+	// shut down.
+	ErrShutdownPanicked = errors.New("app: shutdown panicked")
 )
 
 // DefaultShutdownTimeout bounds the shutdown phase unless WithShutdownTimeout

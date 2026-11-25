@@ -94,12 +94,14 @@ func (a *App) shutdownRunners(ctx context.Context, components []lifecycle.Resour
 // shutdownOne calls c.Shutdown and stops waiting forceCloseGrace after ctx
 // expires: a Shutdown that ignores ctx is abandoned (its goroutine leaks) and
 // reported with ErrShutdownTimeout, so one stuck component cannot block the
-// rest.
+// rest. A Shutdown that panics is reported as ErrShutdownPanicked: Shutdown
+// also runs after a failed startup, on components that were never started,
+// and one faulty component must not hide the start error or skip the rest.
 func (a *App) shutdownOne(ctx context.Context, c lifecycle.Resource, kind string) error {
 	done := make(chan error, 1)
 	begin := time.Now()
 
-	go func() { done <- c.Shutdown(ctx) }()
+	go func() { done <- callShutdown(ctx, c) }()
 
 	err := awaitShutdown(ctx, done, begin)
 
@@ -113,6 +115,18 @@ func (a *App) shutdownOne(ctx context.Context, c lifecycle.Resource, kind string
 	}
 
 	return nil
+}
+
+// callShutdown calls c.Shutdown, turning a panic into an error: it runs in its
+// own goroutine, where an unrecovered panic ends the process.
+func callShutdown(ctx context.Context, c lifecycle.Resource) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("%w: %v", ErrShutdownPanicked, p)
+		}
+	}()
+
+	return c.Shutdown(ctx) //nolint:wrapcheck // wrapped by shutdownOne with the component's name
 }
 
 func awaitShutdown(ctx context.Context, done <-chan error, begin time.Time) error {

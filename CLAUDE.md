@@ -114,11 +114,11 @@ published `go.mod` files.
 
 - **`lifecycle`** — the central contract every component implements: `Resource` (Shutdown, every
   component), optional `Starter` (Start), `Runner` (long-running Run), `Healthchecker`, `Namer`;
-  `Group` / `GroupNamed` combine resources. The precise phase semantics (start order; a failed startup shuts
-  down every component, started or not; cancel of
-  Run's ctx + Shutdown = one stop — Run may drain, Shutdown bounds it, side effects once; Run may
-  be called after Shutdown began; Shutdown idempotent and safe without Start/Run or after a failed Start; 100ms grace
-  after ctx deadline; only sources of work are Runners) are documented in the package doc of
+  `Group` / `GroupNamed` combine resources. The precise phase semantics (start order; a failed
+  startup shuts down every component, started or not; cancel of Run's ctx + Shutdown = one stop —
+  Run may drain, Shutdown bounds it, side effects once; Run may be called after Shutdown began;
+  Shutdown idempotent and safe without Start/Run or after a failed Start; 100ms grace after ctx
+  deadline; only sources of work are Runners) are documented in the package doc of
   `lifecycle/lifecycle.go` — read it before touching `app` or writing a component. `lifecycle/lifecycletest` provides
   `lifecycletest.Resource` / `lifecycletest.Runner` contract tests that every component must pass.
 - **`app`** — drives components: ordered Start, concurrent Run, signals, readiness/health,

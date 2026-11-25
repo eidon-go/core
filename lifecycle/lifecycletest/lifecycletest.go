@@ -75,7 +75,9 @@ func newOptions(opts []Option) options {
 //   - Start followed by Shutdown succeeds.
 //   - Start with an already cancelled ctx returns promptly (any error), and
 //     the Shutdown that follows succeeds: app.App shuts down every component
-//     after a failed startup, including the one whose Start failed.
+//     after a failed startup, including the one whose Start failed. This
+//     reaches the failure path only of a Start that honors ctx; other
+//     failures (a busy port, a refused connection) need tests of their own.
 //   - A second Shutdown succeeds (Shutdown is idempotent).
 //   - Healthcheck returns promptly (any result) before Start and after
 //     Shutdown.

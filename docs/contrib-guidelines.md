@@ -55,9 +55,9 @@ Implement the [`lifecycle`](../lifecycle/README.md) contract and prove it with
 
 - Every component implements `lifecycle.Namer`. Default name: the module name (`"redis"`);
   `WithName(string)` distinguishes instances (two databases).
-- `Start(ctx)`: connect/listen/ping, typically through `retry.Policy` (see 5). On failure, return the
-  error: `app.App` then calls `Shutdown` on every component — this one included, and those never
-  started — so `Shutdown` releases whatever a partial `Start` acquired.
+- `Start(ctx)`: connect/listen/ping, typically through `retry.Policy` (see 5). On failure,
+  return the error: `app.App` then calls `Shutdown` on every component — this one included, and
+  those never started — so `Shutdown` releases whatever a partial `Start` acquired.
 - `Run(ctx)` and `Shutdown(ctx)` are **one stop**: `app.App` cancels the ctx of `Run` first, then
   calls `Shutdown`. On cancellation `Run` stops taking new work at once and may drain the work in
   flight, without a deadline of its own; `Shutdown` starts the same stop if `Run` has not, bounds
@@ -66,8 +66,8 @@ Implement the [`lifecycle`](../lifecycle/README.md) contract and prove it with
   stop that both methods wait on. `Run` returns `nil` (map `ErrServerClosed`, `ErrClosed` and
   similar to `nil`), and promptly if `Shutdown` was called before it.
 - `Shutdown(ctx)`: graceful when possible, force-close when `ctx` is done, without blocking on
-  I/O with peers afterwards; safe without `Start` or `Run` and after a failed `Start`; idempotent (a repeated call returns
-  `nil`).
+  I/O with peers afterwards; safe without `Start` or `Run` and after a failed `Start`;
+  idempotent (a repeated call returns `nil`).
 - `Healthcheck(ctx)`: readiness only, cheap (cached state or a bounded ping), honors `ctx`.
 - Only sources of work (servers, consumers, schedulers) are `Runner`s: `app.App` stops runners
   together. Anything they use while draining — a producer with a flush loop, a client with a
