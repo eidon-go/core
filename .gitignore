@@ -7,3 +7,6 @@ internal/integration/vendor
 # Local go workspace files — consuming services should use modules, not the workspace.
 go.work
 go.work.sum
+
+# Personal Claude Code notes
+CLAUDE.local.md
