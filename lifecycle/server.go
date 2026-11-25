@@ -192,10 +192,11 @@ func (s *Server) Run(ctx context.Context) error {
 // Shutdown begins the drain, if Run's cancellation has not, and waits for it
 // until ctx is done; then it cuts the drain off (Close, in the background)
 // and returns ctx.Err(). A drain that has finished wins over an expired ctx.
-// The error of Drain goes to the first call only; later calls return nil
-// once the drain has finished, or ctx.Err() if their own ctx ends first. It
-// is safe without Start or Run; a Shutdown during Start waits for Listen.
-// Implements Resource.
+// A drain that has been cut off ends the stop: every call waiting then, and
+// every later call, returns at once. The error of Drain goes to the first
+// call only; later calls return nil, or ctx.Err() if their own ctx ends
+// before the drain finishes or is cut off. It is safe without Start or Run;
+// a Shutdown during Start waits for Listen. Implements Resource.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	first := !s.closed
@@ -206,9 +207,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-s.drained:
+	case <-s.cutoff:
+		return s.resultAfterCutoff(first)
 	default:
 		select {
 		case <-s.drained:
+		case <-s.cutoff:
+			return s.resultAfterCutoff(first)
 		case <-ctx.Done():
 			s.forceStop()
 
@@ -238,6 +243,21 @@ func (s *Server) Healthcheck(context.Context) error {
 // select on it to end their work, so that the drain finishes before the
 // Shutdown deadline instead of being cut off.
 func (s *Server) Draining() <-chan struct{} { return s.draining }
+
+// resultAfterCutoff is what a Shutdown returns once the drain has been cut
+// off by another call or by a failed Drain. drainErr may be read only once
+// drained is closed (a failed Drain closes it before cutting off).
+func (s *Server) resultAfterCutoff(first bool) error {
+	select {
+	case <-s.drained:
+		if first {
+			return s.drainErr
+		}
+	default:
+	}
+
+	return nil
+}
 
 // claimRun marks the server as running, or reports why Run must return at
 // once (with nil after Shutdown).
@@ -276,22 +296,28 @@ func (s *Server) beginStop(ctx context.Context) {
 		go func() {
 			err := protect("drain", func() error { return s.funcs.Drain(drainCtx) })
 			cutOff := drainCtx.Err() != nil
+			failed := err != nil && !cutOff
 
-			if err != nil && !cutOff {
+			if failed {
 				s.drainErr = err
-				s.forceStop()
 			}
 
 			// Logged before drained is closed, so that a Shutdown that
 			// returns has its stop logged.
-			if s.drainErr != nil {
-				s.log(ctx, "server stopped", slog.Bool("forced", true), slog.Any("error", s.drainErr))
+			if failed {
+				s.log(ctx, "server stopped", slog.Bool("forced", true), slog.Any("error", err))
 			} else {
 				s.log(ctx, "server stopped", slog.Bool("forced", cutOff))
 			}
 
 			cancel()
 			close(s.drained)
+
+			// After drained, so that a Shutdown woken by the cutoff finds
+			// drainErr; Serve may still be running and needs Close.
+			if failed {
+				s.forceStop()
+			}
 		}()
 	})
 }
