@@ -3,7 +3,7 @@ module github.com/eidon-go/core/contrib/http2
 go 1.26.0
 
 require (
-	github.com/eidon-go/core v1.0.0-rc.2
+	github.com/eidon-go/core v1.0.0-rc.4
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
