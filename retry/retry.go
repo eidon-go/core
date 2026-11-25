@@ -185,15 +185,18 @@ func (p Policy) Delay(attempt int) time.Duration {
 		d = float64(p.MaxDelay)
 	}
 
-	if d >= math.MaxInt64 {
-		d = math.MaxInt64
+	// Clamp in integers: float64(math.MaxInt64) is 2^63, and converting a
+	// float >= 2^63 to int64 is implementation-defined (negative on amd64).
+	delay := time.Duration(math.MaxInt64)
+	if d < math.MaxInt64 {
+		delay = time.Duration(d)
 	}
 
 	if j := min(max(p.Jitter, 0), 1); j > 0 {
-		d -= d * j * rand.Float64() //nolint:gosec // jitter does not need a cryptographic source
+		delay -= time.Duration(float64(delay) * j * rand.Float64()) //nolint:gosec // jitter needs no crypto source
 	}
 
-	return time.Duration(d)
+	return delay
 }
 
 // exhausted reports whether attempt was the last one allowed.
