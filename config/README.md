@@ -126,16 +126,32 @@ a.Add(cfg) // the watcher runs in cfg.Run
 - `Config` implements `lifecycle.Runner`: `Run` watches the keys until shutdown, `Shutdown`
   stops it and closes the KV. Register it with `app.App`, or call `Run`/`Shutdown` yourself.
 - Config takes ownership of the KV: `New` closes it on failure, `Shutdown` otherwise.
-- Every time a watch is opened (the first time and after a reconnect), the key is re-read, so
-  changes made between `New` and `Run` or while disconnected are not lost. If that read fails,
-  the watch is reopened with backoff until it succeeds.
+- Every watch (the first one and each one after a reconnect) starts with the key's current
+  state, then delivers its later states in order — that is the `KV.Watch` contract. So changes
+  made between `New` and `Run` or while disconnected are not lost, and values never go back to an
+  older state. If the first event is an error, not a state, or does not arrive within
+  `WithKVTimeout`, the watch is reopened with backoff.
 - A changed document replaces the key's previous values (keys removed from it disappear); a
   deleted key removes its values; an invalid document is logged and the previous values stay.
 - A failed watch reconnects with backoff (`WithWatchBackoff(initial, max)`, default 1s doubling
-  up to 30s, with jitter).
-- Every KV read is bounded by `WithKVTimeout` (default 5s). Watch errors are logged through
-  `WithLogger`.
+  up to 30s, with jitter). The backoff resets only after a healthy watch: one that delivered a
+  change after its initial state, or stayed open for at least the maximum delay after it.
+- Every KV read, and the wait for a watch's initial state, is bounded by `WithKVTimeout`
+  (default 5s). `New` reads every key once: if the backend cannot answer in time, `New` fails.
+  Watch errors are logged through `WithLogger`.
 - An environment variable overriding a key pins it: hot reload does not change it.
+
+### Writing a KV backend
+
+`Get` returns the value or an error wrapping `config.ErrKVKeyNotFound`. `Watch` must send the
+key's current state first (`KVEventPut`, or `KVEventDelete` for a missing key), then the key's
+later states in order. A backend that only sees the latest value (polling, blocking queries) may
+skip intermediate states, but never sends a state older than one already sent, and always
+follows a change with the latest state. A backend whose watch is registered asynchronously takes
+the initial state and the start of the stream from the same point of the store's history (in
+etcd, read the key and watch from the revision after that read). Report a failure as an event
+with `Err` set and close the channel. `Close` is called once, after the context of every watch
+was cancelled; it must tolerate backend goroutines that are still finishing.
 
 ## Tests
 

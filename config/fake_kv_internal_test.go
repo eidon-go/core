@@ -23,10 +23,32 @@ const fakeWatchBuffer = 16
 // watchers, and exposes Set/Delete/SetError helpers so tests can drive the
 // watcher behaviour deterministically.
 type fakeKV struct {
+	// writeMu serializes Set/Delete including their sends, so concurrent
+	// writers deliver events in the order they changed the data. It is
+	// separate from mu so a blocked send never holds mu (removeWatcher
+	// needs it to finish the watcher the send waits on).
+	writeMu  sync.Mutex
 	mu       sync.Mutex
 	data     map[string][]byte
 	watchers map[string][]*fakeWatcher
 	closed   atomic.Int32
+	gets     atomic.Int32
+
+	silent     bool // Watch withholds the initial state
+	watchCalls int
+}
+
+// WatchCalls reports how many watches have been opened.
+func (f *fakeKV) WatchCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.watchCalls
+}
+
+// GetCalls reports how many times Get was called.
+func (f *fakeKV) GetCalls() int {
+	return int(f.gets.Load())
 }
 
 type fakeWatcher struct {
@@ -49,6 +71,7 @@ func newFakeKV() *fakeKV {
 // the stored bytes (so callers mutating the slice do not affect future
 // Gets).
 func (f *fakeKV) Get(_ context.Context, key string) ([]byte, error) {
+	f.gets.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -60,9 +83,12 @@ func (f *fakeKV) Get(_ context.Context, key string) ([]byte, error) {
 	return bytes.Clone(v), nil
 }
 
-// Watch registers a fresh subscriber for key. The returned channel is
-// closed when ctx is cancelled, when SetError is called for the key, or
-// when Close is called on the fake.
+// Watch registers a fresh subscriber for key and queues the key's current
+// state as its first event, under the same lock as Set/Delete, so no change
+// falls between the state and the stream (the KV.Watch contract). With
+// silent set, the initial state is withheld, like a backend that cannot read
+// it. The returned channel is closed when ctx is cancelled, when SetError is
+// called for the key, or when Close is called on the fake.
 func (f *fakeKV) Watch(ctx context.Context, key string) <-chan KVEvent {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -73,7 +99,18 @@ func (f *fakeKV) Watch(ctx context.Context, key string) <-chan KVEvent {
 	}
 
 	f.mu.Lock()
+	f.watchCalls++
 	f.watchers[key] = append(f.watchers[key], w)
+
+	if !f.silent {
+		v, ok := f.data[key]
+		if ok {
+			w.ch <- KVEvent{Type: KVEventPut, Value: bytes.Clone(v)}
+		} else {
+			w.ch <- KVEvent{Type: KVEventDelete}
+		}
+	}
+
 	f.mu.Unlock()
 
 	go func() {
@@ -115,6 +152,9 @@ func (f *fakeKV) CloseCount() int {
 // current subscriber for the key.
 func (f *fakeKV) Set(key string, value []byte) {
 	stored := bytes.Clone(value)
+
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
 
 	f.mu.Lock()
 	f.data[key] = stored
@@ -170,9 +210,19 @@ func (f *fakeKV) SetData(key string, value []byte) {
 	f.mu.Unlock()
 }
 
+// DeleteData removes key WITHOUT pushing an event, like SetData.
+func (f *fakeKV) DeleteData(key string) {
+	f.mu.Lock()
+	delete(f.data, key)
+	f.mu.Unlock()
+}
+
 // Delete removes the value under key and pushes a Delete event to every
 // current subscriber.
 func (f *fakeKV) Delete(key string) {
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+
 	f.mu.Lock()
 	delete(f.data, key)
 	subs := append([]*fakeWatcher(nil), f.watchers[key]...)
@@ -301,6 +351,8 @@ func TestFakeEtcdKV_SetErrorEmitsErrorAndCloses(t *testing.T) {
 	ch := f.Watch(t.Context(), "k")
 	errBoom := errors.New("boom")
 	f.SetError("k", errBoom)
+
+	assert.Equal(t, KVEvent{Type: KVEventDelete}, mustReceive(t, ch), "initial state of a missing key")
 
 	ev := mustReceive(t, ch)
 	require.Error(t, ev.Err)
