@@ -73,6 +73,11 @@ component" in the lifecycle README):
   new work with its `stop` context and handles the work in flight with its `work` context, kept
   in an unexported field and delegated to; `Shutdown` calls the worker's `Shutdown` first, then
   releases the client (`CloseOnce`/`ShutdownOnce`).
+- **Message consumers** take their error strategy (`ErrorHandler`) as a required constructor
+  argument after the handler — `NewConsumer(cfg, handler, onError, opts...)`, `nil` is an
+  `ErrInvalidConfig` — never as an option with a default: stopping on a message that cannot be
+  handled stops the whole service and crash-loops on restart, so the choice must be explicit.
+  Ship a recommended strategy that goes on (dead-letter / discard) and `StopOnFailure`.
 - A hand-written `Runner` is the exception, for what fits none of these shapes.
 
 The rules below are what the adapters implement; a hand-written component follows them in full.

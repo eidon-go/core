@@ -249,8 +249,8 @@ func keys(m map[string]bool) []string {
 	return out
 }
 
-// startConsumer builds and starts a consumer and runs it; stop cancels Run's
-// ctx and shuts it down, returning Run's error.
+// startConsumer starts a consumer with kafka.StopOnFailure; see
+// startConsumerOnError.
 func startConsumer(
 	t *testing.T,
 	cfg kafka.ConsumerConfig,
@@ -259,7 +259,21 @@ func startConsumer(
 ) (*kafka.Consumer, func() error) {
 	t.Helper()
 
-	c, err := kafka.NewConsumer(cfg, h, testOptions(opts...)...)
+	return startConsumerOnError(t, cfg, h, kafka.StopOnFailure, opts...)
+}
+
+// startConsumerOnError builds and starts a consumer and runs it; stop cancels
+// Run's ctx and shuts it down, returning Run's error.
+func startConsumerOnError(
+	t *testing.T,
+	cfg kafka.ConsumerConfig,
+	h kafka.Handler,
+	onError kafka.ErrorHandler,
+	opts ...kafka.Option,
+) (*kafka.Consumer, func() error) {
+	t.Helper()
+
+	c, err := kafka.NewConsumer(cfg, h, onError, testOptions(opts...)...)
 	require.NoError(t, err)
 	shutdownOnCleanup(t, c) // also when Start fails
 	require.NoError(t, c.Start(t.Context()))

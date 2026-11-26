@@ -105,9 +105,9 @@ func (c ConsumerConfig) Validate() error {
 //     closes.
 //   - Healthcheck reports whether Run is subscribed.
 //
-// A message whose handler fails goes to the ErrorHandler (WithErrorHandler,
-// default DefaultErrorHandler): retry it in place (WithRedeliveryPolicy),
-// requeue it, reject it to the dead-letter exchange, or stop the consumer.
+// A message whose handler fails goes to the ErrorHandler given to
+// NewConsumer: retry it in place (WithRedeliveryPolicy), requeue it, reject
+// it to the dead-letter exchange, or stop the consumer.
 type Consumer struct {
 	conn         *Connection
 	cfg          ConsumerConfig
@@ -126,14 +126,25 @@ type Consumer struct {
 }
 
 // NewConsumer validates cfg and builds a consumer of conn for handler; it
-// does no network I/O.
-func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer, error) {
+// does no network I/O. onError decides what happens to a message whose
+// handler failed. There is no default, because every choice has a cost:
+// DeadLetter keeps the consumer going and moves the message to the queue's
+// dead-letter exchange, StopOnFailure stops the consumer — and with app.App
+// the whole service, which then meets the same message again after a
+// restart.
+func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError ErrorHandler,
+	opts ...Option,
+) (*Consumer, error) {
 	if conn == nil {
 		return nil, fmt.Errorf("%w: connection is nil", ErrInvalidConfig)
 	}
 
 	if lifecycle.IsNil(handler) {
 		return nil, fmt.Errorf("%w: handler is nil", ErrInvalidConfig)
+	}
+
+	if onError == nil {
+		return nil, fmt.Errorf("%w: error handler is nil", ErrInvalidConfig)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -164,7 +175,7 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, opts ...
 		name:         o.name,
 		logger:       o.logger,
 		redelivery:   o.redelivery(),
-		errorHandler: o.errorHandler,
+		errorHandler: onError,
 		tel:          newTelemetry(&o),
 		concurrency:  concurrency,
 		prefetch:     prefetch,
@@ -394,7 +405,7 @@ func (c *Consumer) handle(stop, work context.Context, d *amqp.Delivery) error {
 
 		switch {
 		case action == ErrorActionRequeue, action == ErrorActionReject:
-			c.settle(work, d, action)
+			c.release(stop, work, d, action, err)
 
 			return nil
 		case action == ErrorActionRetry && !exhausted:
@@ -471,6 +482,56 @@ func (c *Consumer) waitRedelivery(stop, work context.Context, attempt int, err e
 	// The stop may have begun just as the delay ended: no new attempt then.
 	return sleep(stop, delay) && stop.Err() == nil
 }
+
+// release requeues or rejects a failed delivery; a requeue first waits (see
+// waitRequeue), and a stop during that wait leaves the delivery to be
+// requeued when the channel closes.
+func (c *Consumer) release(stop, work context.Context, d *amqp.Delivery, action ErrorAction, err error) {
+	if action == ErrorActionRequeue && !c.waitRequeue(stop, work, d, err) {
+		return
+	}
+
+	c.settle(work, d, action)
+}
+
+// waitRequeue waits, before a requeue, for the redelivery delay of the
+// message's delivery number, so that the broker does not hand a failing
+// message straight back in a hot loop. The worker holds the message
+// meanwhile. It reports false if the stop began first.
+func (c *Consumer) waitRequeue(stop, work context.Context, d *amqp.Delivery, err error) bool {
+	n := deliveryNumber(d)
+	delay := c.redelivery.Delay(n)
+
+	if c.redelivery.OnRetry != nil {
+		c.redelivery.OnRetry(work, retry.Attempt{Number: n, Err: err, Delay: delay})
+	}
+
+	return sleep(stop, delay) && stop.Err() == nil
+}
+
+// deliveryNumber is which delivery of its message d is, counting from 1. A
+// quorum queue counts the earlier ones in the x-delivery-count header; other
+// queues only flag a redelivery, which then counts as the second.
+func deliveryNumber(d *amqp.Delivery) int {
+	switch n := d.Headers[headerDeliveryCount].(type) {
+	case int64:
+		return int(n) + 1
+	case int32:
+		return int(n) + 1
+	case int:
+		return n + 1
+	}
+
+	if d.Redelivered {
+		return 2 //nolint:mnd // the second delivery at least
+	}
+
+	return 1
+}
+
+// headerDeliveryCount is the header in which a quorum queue counts the
+// earlier deliveries of a message.
+const headerDeliveryCount = "x-delivery-count"
 
 // handleOnce calls the handler in the message's process span; a panic is an
 // error.

@@ -27,12 +27,21 @@ func newConsumer(
 ) *nats.Consumer {
 	t.Helper()
 
+	return newConsumerOnError(t, conn, cfg, h, nats.StopOnFailure, opts...)
+}
+
+func newConsumerOnError(
+	t *testing.T, conn *nats.Connection, cfg nats.ConsumerConfig, h nats.Handler, onError nats.ErrorHandler,
+	opts ...nats.Option,
+) *nats.Consumer {
+	t.Helper()
+
 	opts = append([]nats.Option{
 		nats.WithLogger(quietLogger()),
 		nats.WithRedeliveryPolicy(retry.Policy{MaxAttempts: 3, InitialDelay: time.Millisecond}),
 	}, opts...)
 
-	c, err := nats.NewConsumer(conn, cfg, h, opts...)
+	c, err := nats.NewConsumer(conn, cfg, h, onError, opts...)
 	require.NoError(t, err)
 
 	return c
@@ -207,15 +216,21 @@ func TestConsumer_Requeue(t *testing.T) {
 	conn := startConnection(t, s)
 	got := newReceived()
 
-	c := newConsumer(t, conn, ordersConsumer(), nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
-		if msg.Metadata.NumDelivered == 1 {
-			return errors.New("later")
-		}
+	c := newConsumerOnError(
+		t,
+		conn,
+		ordersConsumer(),
+		nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
+			if msg.Metadata.NumDelivered == 1 {
+				return errors.New("later")
+			}
 
-		return got.Handle(ctx, msg)
-	}), nats.WithErrorHandler(func(context.Context, *nats.Message, error) nats.ErrorAction {
-		return nats.ErrorActionRequeue
-	}))
+			return got.Handle(ctx, msg)
+		}),
+		func(context.Context, *nats.Message, error) nats.ErrorAction {
+			return nats.ErrorActionRequeue
+		},
+	)
 	runInBackground(t, c)
 	healthy(t, c)
 
@@ -235,18 +250,18 @@ func TestConsumer_DiscardTerminates(t *testing.T) {
 	var attempts atomic.Int32
 
 	got := newReceived()
-	c := newConsumer(
+	c := newConsumerOnError(
 		t,
 		conn,
 		ordersConsumer(),
 		nats.JSON(func(ctx context.Context, _ map[string]any, msg *nats.Message) error {
 			return got.Handle(ctx, msg)
 		}),
-		nats.WithErrorHandler(func(ctx context.Context, msg *nats.Message, err error) nats.ErrorAction {
+		func(ctx context.Context, msg *nats.Message, err error) nats.ErrorAction {
 			attempts.Add(1)
 
 			return nats.Discard(ctx, msg, err)
-		}),
+		},
 	)
 	runInBackground(t, c)
 	healthy(t, c)
@@ -510,19 +525,23 @@ func TestConsumer_RequeueWaitsForTheDelay(t *testing.T) {
 	const delay = 300 * time.Millisecond
 
 	deliveries := make(chan time.Time, 2)
-	c := newConsumer(t, conn, ordersConsumer(), nats.HandlerFunc(func(_ context.Context, msg *nats.Message) error {
-		deliveries <- time.Now()
+	c := newConsumerOnError(
+		t,
+		conn,
+		ordersConsumer(),
+		nats.HandlerFunc(func(_ context.Context, msg *nats.Message) error {
+			deliveries <- time.Now()
 
-		if msg.Metadata.NumDelivered == 1 {
-			return errors.New("later")
-		}
+			if msg.Metadata.NumDelivered == 1 {
+				return errors.New("later")
+			}
 
-		return nil
-	}),
-		nats.WithRedeliveryPolicy(retry.Policy{MaxAttempts: 1, InitialDelay: delay}),
-		nats.WithErrorHandler(func(context.Context, *nats.Message, error) nats.ErrorAction {
-			return nats.ErrorActionRequeue
+			return nil
 		}),
+		func(context.Context, *nats.Message, error) nats.ErrorAction {
+			return nats.ErrorActionRequeue
+		},
+		nats.WithRedeliveryPolicy(retry.Policy{MaxAttempts: 1, InitialDelay: delay}),
 	)
 	runInBackground(t, c)
 	healthy(t, c)
@@ -531,6 +550,104 @@ func TestConsumer_RequeueWaitsForTheDelay(t *testing.T) {
 
 	first, second := recv(t, deliveries), recv(t, deliveries)
 	assert.GreaterOrEqual(t, second.Sub(first), delay-50*time.Millisecond)
+}
+
+// MaxProcessingTime cancels a handler that takes too long; the message is
+// naked and delivered again.
+func TestConsumer_MaxProcessingTimeNaks(t *testing.T) {
+	t.Parallel()
+
+	s := runServer(t)
+	s.createStream(t, "ORDERS", "orders.>")
+	conn := startConnection(t, s)
+
+	cfg := ordersConsumer()
+	cfg.AckWait = time.Minute // only the nak brings the message back in the test
+	cfg.MaxProcessingTime = 100 * time.Millisecond
+
+	got := newReceived()
+	c := newConsumer(t, conn, cfg, nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
+		if msg.Metadata.NumDelivered == 1 {
+			<-ctx.Done() // hangs until the limit
+
+			return ctx.Err()
+		}
+
+		return got.Handle(ctx, msg)
+	}))
+	runInBackground(t, c)
+	healthy(t, c)
+
+	publishJS(t, s, "orders.x", "x")
+
+	assert.Equal(t, uint64(2), got.next(t).Metadata.NumDelivered)
+	settled(t, s, "ORDERS", "billing")
+}
+
+// A handler that ignores its context still cannot hold the message: past
+// MaxProcessingTime the consumer stops reporting it in progress, so the
+// server delivers it again once AckWait expires.
+func TestConsumer_MaxProcessingTimeStopsInProgress(t *testing.T) {
+	t.Parallel()
+
+	s := runServer(t)
+	s.createStream(t, "ORDERS", "orders.>")
+	conn := startConnection(t, s)
+
+	cfg := ordersConsumer()
+	cfg.AckWait = 300 * time.Millisecond
+	cfg.MaxProcessingTime = 100 * time.Millisecond
+	cfg.Concurrency = 2
+
+	release := make(chan struct{})
+
+	t.Cleanup(func() { close(release) })
+
+	got := newReceived()
+	c := newConsumer(t, conn, cfg, nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
+		if msg.Metadata.NumDelivered == 1 {
+			<-release // hung: ignores ctx
+
+			return nil
+		}
+
+		return got.Handle(ctx, msg)
+	}))
+	runInBackground(t, c)
+	healthy(t, c)
+
+	publishJS(t, s, "orders.x", "x")
+
+	assert.Equal(t, uint64(2), got.next(t).Metadata.NumDelivered, "redelivered to the other worker")
+}
+
+func TestConsumerConfig_MaxProcessingTime(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		ackWait time.Duration
+		limit   time.Duration
+		want    time.Duration
+	}{
+		{name: "default: 10 × the server's AckWait", want: 300 * time.Second},
+		{name: "default: 10 × AckWait", ackWait: 2 * time.Second, want: 20 * time.Second},
+		{name: "explicit", ackWait: 2 * time.Second, limit: time.Second, want: time.Second},
+		{name: "negative: no limit", limit: -1, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := ordersConsumer()
+			cfg.AckWait = tt.ackWait
+			cfg.MaxProcessingTime = tt.limit
+
+			require.NoError(t, cfg.Validate())
+			assert.Equal(t, tt.want, nats.ProcessingLimit(cfg))
+		})
+	}
 }
 
 func TestConsumer_ShutdownDeadlineNaksInFlight(t *testing.T) {
@@ -573,16 +690,19 @@ func TestNewConsumer_Invalid(t *testing.T) {
 
 	conn := newConnection(t, "nats://127.0.0.1:4222")
 
-	_, err := nats.NewConsumer(nil, ordersConsumer(), newReceived())
+	_, err := nats.NewConsumer(nil, ordersConsumer(), newReceived(), nats.Discard)
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 
-	_, err = nats.NewConsumer(conn, ordersConsumer(), nil)
+	_, err = nats.NewConsumer(conn, ordersConsumer(), nil, nats.Discard)
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 
-	_, err = nats.NewConsumer(conn, nats.ConsumerConfig{}, newReceived())
+	_, err = nats.NewConsumer(conn, ordersConsumer(), newReceived(), nil)
+	require.ErrorIs(t, err, nats.ErrInvalidConfig, "the error strategy is required")
+
+	_, err = nats.NewConsumer(conn, nats.ConsumerConfig{}, newReceived(), nats.Discard)
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 
-	_, err = nats.NewConsumer(conn, ordersConsumer(), newReceived(),
+	_, err = nats.NewConsumer(conn, ordersConsumer(), newReceived(), nats.Discard,
 		nats.WithStream(jetstream.StreamConfig{Name: "OTHER"}))
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 }

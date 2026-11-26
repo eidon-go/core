@@ -150,6 +150,7 @@ func TestKafka_ConsumerContract(t *testing.T) {
 		c, err := kafka.NewConsumer(
 			kafkaConsumerConfig(topic, kafkaName(t, "group")),
 			newCollector(),
+			kafka.StopOnFailure,
 			kafkaOptions()...)
 		require.NoError(t, err)
 
@@ -185,7 +186,7 @@ func TestKafka_ConsumeAndCommit(t *testing.T) {
 	}
 
 	first := newCollector()
-	c, err := kafka.NewConsumer(kafkaConsumerConfig(topic, group), first, kafkaOptions()...)
+	c, err := kafka.NewConsumer(kafkaConsumerConfig(topic, group), first, kafka.StopOnFailure, kafkaOptions()...)
 	require.NoError(t, err)
 
 	stop := runKafkaConsumer(t, c)
@@ -197,7 +198,7 @@ func TestKafka_ConsumeAndCommit(t *testing.T) {
 	require.NoError(t, producer.Produce(t.Context(), topic, []byte("key"), []byte("d")))
 
 	second := newCollector()
-	c2, err := kafka.NewConsumer(kafkaConsumerConfig(topic, group), second, kafkaOptions()...)
+	c2, err := kafka.NewConsumer(kafkaConsumerConfig(topic, group), second, kafka.StopOnFailure, kafkaOptions()...)
 	require.NoError(t, err)
 
 	stop2 := runKafkaConsumer(t, c2)

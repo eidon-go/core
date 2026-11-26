@@ -56,10 +56,9 @@ func Example() {
 		Durable:        "billing",
 		FilterSubjects: []string{"orders.created"},
 		Concurrency:    4,
-	}, handler,
+	}, handler, nats.Discard, // the error strategy is required
 		nats.WithName("billing-consumer"),
 		nats.WithStream(jetstream.StreamConfig{Name: "ORDERS", Subjects: []string{"orders.>"}}),
-		nats.WithErrorHandler(nats.Discard),
 	)
 	if err != nil {
 		fmt.Println(err)
@@ -70,7 +69,7 @@ func Example() {
 	responder, err := nats.NewSubscriber(conn, nats.SubscriberConfig{Subject: "billing.status", Queue: "billing"},
 		nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
 			return msg.Respond(ctx, &nats.Message{Data: []byte("ok")})
-		}), nats.WithName("billing-status"))
+		}), nats.Discard, nats.WithName("billing-status"))
 	if err != nil {
 		fmt.Println(err)
 
@@ -87,14 +86,14 @@ func Example() {
 // ExampleDiscard shows what Discard decides: a failed message is retried;
 // once the retries are exhausted — or at once for an error marked with
 // retry.Permanent — it is rejected: a Consumer terminates it, a Subscriber
-// drops it.
+// drops it. StopOnFailure would stop instead.
 func ExampleDiscard() {
 	ctx, msg, failed := context.Background(), &nats.Message{}, errors.New("billing is down")
 
 	fmt.Println(nats.Discard(ctx, msg, failed))
 	fmt.Println(nats.Discard(ctx, msg, errors.Join(nats.ErrRetriesExhausted, failed)))
 	fmt.Println(nats.Discard(ctx, msg, retry.Permanent(errors.New("bad order"))))
-	fmt.Println(nats.DefaultErrorHandler(ctx, msg, errors.Join(nats.ErrRetriesExhausted, failed)))
+	fmt.Println(nats.StopOnFailure(ctx, msg, errors.Join(nats.ErrRetriesExhausted, failed)))
 	// Output:
 	// retry
 	// reject

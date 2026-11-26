@@ -151,10 +151,13 @@ const (
 	ErrorActionRetry ErrorAction = iota
 
 	// ErrorActionRequeue returns the message to its queue (basic.nack with
-	// requeue), from where it is delivered again — at once, to this or
-	// another consumer, with Redelivered set. Without a delay or a bound it
-	// loops; prefer Retry, or Requeue with a quorum queue's
-	// "x-delivery-limit".
+	// requeue), from where it is delivered again, to this or another
+	// consumer, with Redelivered set. The worker first waits the redelivery
+	// policy's delay for the message's delivery number (a quorum queue's
+	// x-delivery-count; otherwise 1, or 2 once redelivered), so a failing
+	// message does not come straight back in a hot loop; a stop during the
+	// wait leaves it to be requeued when the channel closes. Bound it with a
+	// quorum queue's "x-delivery-limit" and a dead-letter exchange.
 	ErrorActionRequeue
 
 	// ErrorActionReject rejects the message (basic.nack without requeue):

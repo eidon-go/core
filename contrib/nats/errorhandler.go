@@ -7,13 +7,14 @@ import (
 	"github.com/eidon-go/core/retry"
 )
 
-// DefaultErrorHandler is the ErrorHandler of a Subscriber or a Consumer
-// without WithErrorHandler. It retries an error (see WithRedeliveryPolicy)
-// and stops the component once the attempts are exhausted or for an error
-// marked with retry.Permanent: no message is ever dropped silently. Use
-// Discard, or an ErrorHandler of your own, to go on past a message that
-// cannot be handled.
-func DefaultErrorHandler(_ context.Context, _ *Message, err error) ErrorAction {
+// StopOnFailure is an ErrorHandler that retries an error (see
+// WithRedeliveryPolicy) and stops the component once the attempts are
+// exhausted or for an error marked with retry.Permanent: no message is ever
+// dropped. Run then returns an error, so with app.App the whole service
+// stops — and a Consumer meets the same message again after a restart.
+// Prefer Discard (with an advisory listener or a dead-letter stream) in
+// production.
+func StopOnFailure(_ context.Context, _ *Message, err error) ErrorAction {
 	if final(err) {
 		return ErrorActionStop
 	}
@@ -21,7 +22,7 @@ func DefaultErrorHandler(_ context.Context, _ *Message, err error) ErrorAction {
 	return ErrorActionRetry
 }
 
-// Discard is an ErrorHandler that retries an error like DefaultErrorHandler,
+// Discard is an ErrorHandler that retries an error like StopOnFailure,
 // but once the attempts are exhausted — or at once for an error marked with
 // retry.Permanent (a message that cannot be decoded) — rejects the message:
 // a Consumer terminates it (the server publishes a MSG_TERMINATED advisory,

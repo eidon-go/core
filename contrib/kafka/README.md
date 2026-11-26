@@ -41,7 +41,7 @@ consumer, err := kafka.NewConsumer(kafka.ConsumerConfig{
     }
 
     return billing.Charge(ctx, o) // idempotent: delivery is at least once
-}), kafka.WithErrorHandler(kafka.DeadLetter(producer, "orders.dlt")))
+}), kafka.DeadLetter(producer, "orders.dlt")) // the error strategy is required: see Errors
 if err != nil {
     return err
 }
@@ -80,7 +80,6 @@ franz-go setting through `WithKgoOpts`.
 | `WithTracerProvider` / `WithMeterProvider` / `WithPropagators` | all | the otel globals at construction time |
 | `WithTelemetry` (all three from the `otel` module's `Provider` when it is not global) | all | — |
 | `WithKgoOpts(...kgo.Opt)` | all, applied last | — |
-| `WithErrorHandler(ErrorHandler)` | consumer | `DefaultErrorHandler` |
 | `WithRedeliveryPolicy(retry.Policy)` | consumer | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s |
 
 Options that change how the consumer consumes or commits (group and topic settings, commit and
@@ -136,11 +135,19 @@ handled or skipped. Offsets are committed every few seconds, when partitions are
 rebalance and when the consumer stops. Delivery is **at least once**: after a crash, a forced stop
 or a lost partition, messages handled since the last commit come again — handlers must be
 idempotent. Rebalances wait while a poll's records are handled (franz-go's
-`BlockRebalanceOnPoll`), so no offset is committed for a partition the member no longer owns; keep
-`MaxPollRecords` × handling time (with retries) well under the group's rebalance timeout
-(franz-go default 60s).
+`BlockRebalanceOnPoll`), so no offset is committed for a partition the member no longer owns. So
+that a rebalance never waits long enough to kick the member out of the group, a poll's records
+get a budget of three quarters of the rebalance timeout (`kgo.RebalanceTimeout`, 60s by default):
+once it runs out — before a record, or instead of a redelivery delay that would end past it — the
+consumer rewinds every partition to its first record not handled and lets the rebalance run; those
+records are fetched again, and a record cut off between its retries goes on with its next attempt,
+so `MaxAttempts` still bounds it.
 
-**Errors.** When the handler returns an error, the `ErrorHandler` chooses an `ErrorAction`:
+**Errors.** When the handler returns an error, the `ErrorHandler` passed to `NewConsumer` chooses
+an `ErrorAction`. There is no default: choose the strategy for production deliberately. With
+`StopOnFailure` one message that can never be handled stops the service, and it meets the same
+message again after every restart — a crash loop. `DeadLetter` keeps the service running and the
+message in a topic for later analysis.
 
 | Action | Effect |
 |---|---|
@@ -151,12 +158,16 @@ idempotent. Rebalances wait while a poll's records are handled (franz-go's
 Built-in handlers, following the usual practice of retrying transient errors, never retrying
 poison messages and recovering once the attempts are exhausted:
 
-- `DefaultErrorHandler` (the default): retry; stop once the attempts are exhausted or at once for
-  an error marked with `retry.Permanent`. No message is dropped silently.
-- `DeadLetter(publisher, topic)`: retry; once the attempts are exhausted, or at once for
-  `retry.Permanent`, publish the message to `topic` and skip it. The dead letter keeps key, value
-  and headers and adds `dlt-original-topic`, `dlt-original-partition`, `dlt-original-offset` and
-  `dlt-error`. If that publish fails, the consumer stops.
+- `DeadLetter(publisher, topic)` (recommended): retry; once the attempts are exhausted, or at
+  once for `retry.Permanent`, publish the message to `topic` and skip it. The dead letter keeps
+  key, value and headers and adds `dlt-original-topic`, `dlt-original-partition`,
+  `dlt-original-offset`, `dlt-original-timestamp` (Unix ms) and `dlt-error` (cut to
+  `MaxDLTErrorLength`, 1 KiB, so a long error cannot push the record past `max.message.bytes`). The
+  dead letter's own timestamp is the time of publishing, so the DLT's retention counts from then,
+  not from the original message. If that publish fails, the consumer stops.
+- `StopOnFailure`: retry; stop once the attempts are exhausted or at once for an error marked
+  with `retry.Permanent`. No message is ever skipped, but the service stops (see above): for
+  topics where skipping a message is worse than an outage.
 
 Write your own `ErrorHandler` for anything else, e.g. skip validation errors and retry the rest
 forever with `WithRedeliveryPolicy(retry.Policy{MaxAttempts: retry.Forever, ...})`.

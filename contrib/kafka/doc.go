@@ -5,7 +5,8 @@
 //     goes to a Handler, one at a time in partition order; only handled
 //     messages are committed; on stop the message in flight finishes and is
 //     committed. Failed messages are retried, skipped or stop the consumer,
-//     as an ErrorHandler decides (DefaultErrorHandler, DeadLetter).
+//     as the ErrorHandler given to NewConsumer decides (DeadLetter,
+//     StopOnFailure).
 //   - Producer — synchronous publishing (Publisher), flushed on Shutdown;
 //     JSONProducer on top of any Publisher.
 //   - Client — a plain franz-go client with the same lifecycle.

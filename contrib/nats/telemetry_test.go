@@ -201,9 +201,9 @@ func TestTelemetry_HandlerErrorRecorded(t *testing.T) {
 	conn := startConnection(t, s)
 	tel := newTestTelemetry()
 
-	sub := newSubscriber(t, conn, nats.SubscriberConfig{Subject: "bad"},
+	sub := newSubscriberOnError(t, conn, nats.SubscriberConfig{Subject: "bad"},
 		nats.HandlerFunc(func(context.Context, *nats.Message) error { panic("boom") }),
-		nats.WithTelemetry(tel), nats.WithErrorHandler(nats.Discard))
+		nats.Discard, nats.WithTelemetry(tel))
 	runInBackground(t, sub)
 	healthy(t, sub)
 

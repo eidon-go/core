@@ -67,7 +67,6 @@ type options struct {
 	tracerProvider   trace.TracerProvider
 	meterProvider    metric.MeterProvider
 	propagators      propagation.TextMapPropagator
-	errorHandler     ErrorHandler
 	redeliveryPolicy *retry.Policy
 	stream           *jetstream.StreamConfig
 	consumerConfig   []func(*jetstream.ConsumerConfig)
@@ -102,10 +101,6 @@ func newOptions(opts []Option) options {
 
 	if o.propagators == nil {
 		o.propagators = otel.GetTextMapPropagator()
-	}
-
-	if o.errorHandler == nil {
-		o.errorHandler = DefaultErrorHandler
 	}
 
 	return o
@@ -211,12 +206,6 @@ func WithTelemetry(telemetry Telemetry) Option {
 		o.meterProvider = telemetry.MeterProvider()
 		o.propagators = telemetry.Propagators()
 	}
-}
-
-// WithErrorHandler sets what is done with a message whose handler failed
-// (default DefaultErrorHandler). Subscriber and Consumer.
-func WithErrorHandler(h ErrorHandler) Option {
-	return func(o *options) { o.errorHandler = h }
 }
 
 // WithRedeliveryPolicy sets the attempts and delays of ErrorActionRetry

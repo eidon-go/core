@@ -423,10 +423,21 @@ func loadOptions(name string) []rabbitmq.Option {
 	}))
 }
 
-// newLoadConsumer builds a consumer of a durable queue bound to exchange.
+// newLoadConsumer builds a consumer of a durable queue bound to exchange,
+// with rabbitmq.StopOnFailure.
 func newLoadConsumer(
 	t *testing.T, conn *rabbitmq.Connection, exchange, queue string, concurrency int, h rabbitmq.Handler,
-	opts ...rabbitmq.Option,
+) *rabbitmq.Consumer {
+	t.Helper()
+
+	return newLoadConsumerOnError(t, conn, exchange, queue, concurrency, h, rabbitmq.StopOnFailure)
+}
+
+// newLoadConsumerOnError builds a consumer of a durable queue bound to
+// exchange.
+func newLoadConsumerOnError(
+	t *testing.T, conn *rabbitmq.Connection, exchange, queue string, concurrency int, h rabbitmq.Handler,
+	onError rabbitmq.ErrorHandler,
 ) *rabbitmq.Consumer {
 	t.Helper()
 
@@ -439,7 +450,7 @@ func newLoadConsumer(
 			Queues:    []rabbitmq.Queue{{Name: queue, Durable: true}},
 			Bindings:  []rabbitmq.Binding{{Queue: queue, Exchange: exchange, RoutingKey: "#"}},
 		},
-	}, h, append(loadOptions("consumer"), opts...)...)
+	}, h, onError, loadOptions("consumer")...)
 	require.NoError(t, err)
 
 	return c
@@ -716,8 +727,8 @@ func TestRabbitMQLoad_FlakyHandlers(t *testing.T) {
 		return rabbitmq.ErrorActionRetry
 	}
 
-	c := newLoadConsumer(t, newRabbitConnection(t, rabbitConfig, "consume"), exchange, queue, 16, h,
-		rabbitmq.WithErrorHandler(errorHandler))
+	c := newLoadConsumerOnError(t, newRabbitConnection(t, rabbitConfig, "consume"), exchange, queue, 16, h,
+		errorHandler)
 	stop := runRabbitConsumer(t, c)
 
 	pub := newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "publish"))

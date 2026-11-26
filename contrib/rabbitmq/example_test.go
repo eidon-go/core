@@ -65,7 +65,7 @@ func Example() {
 				{Queue: "billing.orders", Exchange: "orders", RoutingKey: "order.created"},
 			},
 		},
-	}, handler, rabbitmq.WithName("billing-consumer"))
+	}, handler, rabbitmq.DeadLetter, rabbitmq.WithName("billing-consumer")) // the error strategy is required
 	if err != nil {
 		fmt.Println(err)
 
@@ -99,7 +99,7 @@ func ExampleDeadLetter() {
 	cfg := rabbitmq.ConsumerConfig{Queue: "orders", Topology: topology}
 	fmt.Println(cfg.Validate())
 
-	// Passed to NewConsumer as rabbitmq.WithErrorHandler(rabbitmq.DeadLetter).
+	// Passed to NewConsumer as its error strategy.
 	ctx, msg, failed := context.Background(), &rabbitmq.Message{}, errors.New("billing is down")
 	fmt.Println(rabbitmq.DeadLetter(ctx, msg, failed))
 	fmt.Println(rabbitmq.DeadLetter(ctx, msg, errors.Join(rabbitmq.ErrRetriesExhausted, failed)))

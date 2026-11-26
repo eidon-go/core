@@ -56,7 +56,7 @@ func Example() {
 		Group:  "billing",
 		Topics: []string{"orders"},
 		Offset: kafka.OffsetOldest,
-	}, handler, kafka.WithErrorHandler(kafka.DeadLetter(producer, "orders.dlt")))
+	}, handler, kafka.DeadLetter(producer, "orders.dlt"))
 	if err != nil {
 		fmt.Println(err)
 
