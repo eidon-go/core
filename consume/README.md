@@ -75,3 +75,19 @@ returns `Yielded` with `Result.Attempts`; pass that back as `Delivery.Attempts` 
 comes again, and its attempts go on where they were (Kafka uses this to yield to a rebalance).
 
 `Process` may be called concurrently on one `Processor`.
+
+### Pauses that end by themselves
+
+`PauseBackoff` gives the length of a `Paused` outcome's pause for a module's `WithPauseFor`:
+
+```go
+pauses := consume.NewPauseBackoff(pauseFor, 15*time.Minute) // pauseFor 0: only Resume ends a pause
+
+length := pauses.Begin(time.Now()) // on Paused; handlers that pause together share one pause
+// ... hold the source; wait pauses.Remaining(time.Now()) or a Resume
+pauses.End(time.Now(), expired)    // expired: it ended by itself
+```
+
+A pause lasts `pauseFor`; one that begins within the length of the previous pause after that
+ended by itself lasts twice as long, up to the ceiling. A pause ended by hand does not lengthen
+the next one.
