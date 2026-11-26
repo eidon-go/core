@@ -1,7 +1,6 @@
 package nats_test
 
 import (
-	"context"
 	"crypto/tls"
 	"testing"
 	"time"
@@ -100,7 +99,7 @@ func TestConnection_TLSAgainstPlainServer(t *testing.T) {
 			)
 			require.NoError(t, err)
 
-			t.Cleanup(func() { _ = conn.Shutdown(context.Background()) })
+			shutdownLater(t, conn)
 
 			require.ErrorContains(t, conn.Start(t.Context()), "secure connection")
 		})

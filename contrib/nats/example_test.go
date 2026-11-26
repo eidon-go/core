@@ -43,8 +43,8 @@ func Example() {
 			return err
 		}
 
-		// Stored by the INVOICES stream; the message ID makes a retried
-		// publish safe.
+		// Stored by an INVOICES stream on "invoices.>", which must exist;
+		// the message ID makes a retried publish safe.
 		_, err = publisher.PublishJetStream(ctx, msg, jetstream.WithMsgID("invoice-"+order.ID))
 
 		return err

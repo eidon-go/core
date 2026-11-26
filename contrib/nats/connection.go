@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -366,8 +367,7 @@ func (c *Connection) close(ctx context.Context) error {
 
 	// No time to drain: close at once.
 	if err := ctx.Err(); err != nil {
-		nc.Close()
-		c.logger.WarnContext(ctx, "nats closed without a drain: the shutdown deadline has passed")
+		c.abort(ctx, nc, "nats closed without a drain: the shutdown deadline has passed")
 
 		return err //nolint:wrapcheck // the caller's own context error
 	}
@@ -375,23 +375,55 @@ func (c *Connection) close(ctx context.Context) error {
 	// Drain fails on a connection that is reconnecting or closed: what was
 	// buffered is lost then.
 	if err := nc.Drain(); err != nil {
-		nc.Close()
-		c.logger.InfoContext(ctx, "nats closed", slog.String("drain", err.Error()))
+		c.abort(ctx, nc, "nats closed without a drain: "+err.Error())
 
 		return nil
 	}
 
-	select {
-	case <-done:
+	// nats.go bounds the drain by Config.DrainTimeout too, but its final
+	// flush has a timeout of its own: the module enforces the bound.
+	timeout := time.NewTimer(c.cfg.DrainTimeout)
+	defer timeout.Stop()
+
+	// The closed handler may be suppressed (nats.NoCallbacksAfterClientClose):
+	// the state is polled as well.
+	poll := time.NewTicker(closedPollInterval)
+	defer poll.Stop()
+
+	for {
+		select {
+		case <-done:
+		case <-poll.C:
+			if !nc.IsClosed() {
+				continue
+			}
+		case <-timeout.C:
+			c.abort(ctx, nc, "nats drain cut off by drainTimeout")
+
+			return nil
+		case <-ctx.Done():
+			c.abort(ctx, nc, "nats drain cut off by the shutdown deadline")
+
+			return ctx.Err() //nolint:wrapcheck // the caller's own context error
+		}
+
 		c.logger.InfoContext(ctx, "nats closed")
 
 		return nil
-	case <-ctx.Done():
-		nc.Close()
-		c.logger.WarnContext(ctx, "nats drain cut off by the shutdown deadline")
-
-		return ctx.Err() //nolint:wrapcheck // the caller's own context error
 	}
+}
+
+// closedPollInterval is how often Shutdown checks whether the drain has
+// closed the connection.
+const closedPollInterval = 50 * time.Millisecond
+
+// abort closes nc without waiting: nats.go flushes what is buffered when it
+// closes, and a peer that stops reading would hold Shutdown past its bound.
+// The close finishes on its own.
+func (c *Connection) abort(ctx context.Context, nc *natsgo.Conn, msg string) {
+	go nc.Close()
+
+	c.logger.WarnContext(ctx, msg)
 }
 
 // Compile-time checks.

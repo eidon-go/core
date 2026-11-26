@@ -44,19 +44,25 @@ func (t *testTelemetry) Propagators() propagation.TextMapPropagator {
 	return propagation.TraceContext{}
 }
 
-// span returns the ended span with the name.
+// span waits for the ended span with the name and returns it.
 func (t *testTelemetry) span(tb testing.TB, name string) sdktrace.ReadOnlySpan {
 	tb.Helper()
 
-	for _, s := range t.spans.Ended() {
-		if s.Name() == name {
-			return s
+	var found sdktrace.ReadOnlySpan
+
+	require.Eventually(tb, func() bool {
+		for _, s := range t.spans.Ended() {
+			if s.Name() == name {
+				found = s
+
+				return true
+			}
 		}
-	}
 
-	tb.Fatalf("no span %q", name)
+		return false
+	}, waitFor, tick, "no span %q", name)
 
-	return nil
+	return found
 }
 
 // metric returns the metric with the name.
@@ -64,7 +70,7 @@ func (t *testTelemetry) metric(tb testing.TB, name string) metricdata.Metrics {
 	tb.Helper()
 
 	var rm metricdata.ResourceMetrics
-	require.NoError(tb, t.reader.Collect(context.Background(), &rm))
+	require.NoError(tb, t.reader.Collect(tb.Context(), &rm))
 
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {

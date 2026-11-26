@@ -92,8 +92,7 @@ type Subscriber struct {
 	proc        *processor
 	concurrency int
 
-	worker     *lifecycle.Worker
-	subscribed atomic.Bool
+	runner *runner
 }
 
 // NewSubscriber validates cfg and builds a subscriber of conn for handler;
@@ -135,7 +134,7 @@ func NewSubscriber(conn *Connection, cfg SubscriberConfig, handler Handler, opts
 		},
 		concurrency: max(cfg.Concurrency, 1),
 	}
-	s.worker = lifecycle.NewWorker(lifecycle.WorkerFuncs{Run: s.loop, Logger: s.logger})
+	s.runner = newRunner(s.loop, s.logger, wrap(ErrNotRunning))
 
 	return s, nil
 }
@@ -151,12 +150,7 @@ func (s *Subscriber) Name() string { return s.name }
 // runs, ErrAlreadyStarted when called twice, and nil at once after
 // Shutdown. Implements lifecycle.Runner.
 func (s *Subscriber) Run(ctx context.Context) error {
-	err := s.worker.Run(ctx)
-	if errors.Is(err, ErrStopped) || errors.Is(err, ErrClosed) || errors.Is(err, ErrNotStarted) {
-		return err //nolint:wrapcheck // the loop's errors carry the module prefix
-	}
-
-	return wrap(err)
+	return s.runner.run(ctx)
 }
 
 // Shutdown stops Run, if it runs, waiting for the messages held and in
@@ -164,7 +158,7 @@ func (s *Subscriber) Run(ctx context.Context) error {
 // Shutdown returns ctx.Err(). The Connection is not closed. Safe without
 // Run. Idempotent. Implements lifecycle.Resource.
 func (s *Subscriber) Shutdown(ctx context.Context) error {
-	return wrap(s.worker.Shutdown(ctx))
+	return s.runner.shutdown(ctx)
 }
 
 // Healthcheck returns nil while Run is subscribed and ErrNotRunning
@@ -172,15 +166,7 @@ func (s *Subscriber) Shutdown(ctx context.Context) error {
 // subscribed: the Connection's Healthcheck reports that. Implements
 // lifecycle.Healthchecker.
 func (s *Subscriber) Healthcheck(ctx context.Context) error {
-	if err := s.worker.Healthcheck(ctx); err != nil {
-		return wrap(err)
-	}
-
-	if !s.subscribed.Load() {
-		return wrap(ErrNotRunning)
-	}
-
-	return nil
+	return s.runner.healthcheck(ctx)
 }
 
 // loop is the worker's loop.
@@ -216,8 +202,7 @@ func (s *Subscriber) loop(stop, work context.Context) error {
 		}
 	}
 
-	s.subscribed.Store(true)
-	defer s.subscribed.Store(false)
+	defer s.runner.markSubscribed()()
 
 	s.logger.InfoContext(stop, "nats subscribed",
 		slog.String("subject", s.cfg.Subject), slog.String("queue", s.cfg.Queue))

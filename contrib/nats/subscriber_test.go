@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -150,7 +151,7 @@ func TestSubscriber_RespondWithoutReply(t *testing.T) {
 	healthy(t, sub)
 
 	require.NoError(t, newPublisher(t, conn).Publish(t.Context(), &nats.Message{Subject: "noreply"}))
-	require.ErrorIs(t, <-errs, nats.ErrNoReply)
+	require.ErrorIs(t, recv(t, errs), nats.ErrNoReply)
 }
 
 func TestSubscriber_RetryThenStop(t *testing.T) {
@@ -228,7 +229,22 @@ func TestSubscriber_StopDrainsHeldMessages(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 
-	go func() { done <- sub.Run(ctx) }()
+	var releaseOnce sync.Once
+
+	finished := make(chan struct{})
+
+	// An assertion failure must not leave the handler and Run blocked.
+	t.Cleanup(func() {
+		cancel()
+		releaseOnce.Do(func() { close(release) })
+		recv(t, finished)
+	})
+
+	go func() {
+		defer close(finished)
+
+		done <- sub.Run(ctx)
+	}()
 
 	healthy(t, sub)
 
@@ -241,18 +257,12 @@ func TestSubscriber_StopDrainsHeldMessages(t *testing.T) {
 	// the flush the first message is in the handler, the others are held by
 	// the client. The stop handles all of them.
 	require.NoError(t, conn.Conn().Flush())
-	<-inHandler
+	recv(t, inHandler)
 
 	cancel()
-	close(release)
+	releaseOnce.Do(func() { close(release) })
 
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(waitFor):
-		t.Fatal("Run did not return")
-	}
-
+	require.NoError(t, recv(t, done))
 	assert.Equal(t, int32(5), handled.Load())
 	require.NoError(t, sub.Shutdown(t.Context()))
 }
@@ -275,7 +285,7 @@ func TestSubscriber_ShutdownDeadlineCutsHandlerOff(t *testing.T) {
 	healthy(t, sub)
 
 	require.NoError(t, newPublisher(t, conn).Publish(t.Context(), &nats.Message{Subject: "slow"}))
-	<-inHandler
+	recv(t, inHandler)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()

@@ -53,6 +53,8 @@ consumer, err := nats.NewConsumer(conn, nats.ConsumerConfig{
         return err
     }
 
+    // A stream must capture invoices.requested (created beforehand, like an INVOICES stream
+    // on "invoices.>"); otherwise PublishJetStream fails with jetstream.ErrNoStreamResponse.
     _, err = publisher.PublishJetStream(ctx, msg, jetstream.WithMsgID("invoice-"+order.ID))
 
     return err

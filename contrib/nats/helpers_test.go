@@ -149,7 +149,7 @@ func newConnection(t *testing.T, url string, opts ...nats.Option) *nats.Connecti
 	}, opts...)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { _ = conn.Shutdown(context.Background()) })
+	shutdownLater(t, conn)
 
 	return conn
 }
@@ -170,7 +170,7 @@ func newPublisher(t *testing.T, conn *nats.Connection, opts ...nats.Option) *nat
 	p, err := nats.NewPublisher(conn, append([]nats.Option{nats.WithLogger(quietLogger())}, opts...)...)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	shutdownLater(t, p)
 
 	return p
 }
@@ -196,13 +196,52 @@ func runInBackground(t *testing.T, r interface {
 	t.Cleanup(func() {
 		cancel()
 
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), waitFor)
+		ctx, cancelShutdown := cleanupContext(t)
 		defer cancelShutdown()
 
-		_ = r.Shutdown(shutdownCtx)
+		_ = r.Shutdown(ctx)
 	})
 
 	return bg
+}
+
+// cleanupContext returns a context for a Shutdown in a cleanup: not
+// cancelled with the test, bounded by waitFor.
+func cleanupContext(t *testing.T) (context.Context, context.CancelFunc) {
+	t.Helper()
+
+	return context.WithTimeout(context.WithoutCancel(t.Context()), waitFor)
+}
+
+// shutdownLater shuts r down when the test ends.
+func shutdownLater(t *testing.T, r interface {
+	Shutdown(ctx context.Context) error
+},
+) {
+	t.Helper()
+
+	t.Cleanup(func() {
+		ctx, cancel := cleanupContext(t)
+		defer cancel()
+
+		_ = r.Shutdown(ctx)
+	})
+}
+
+// recv receives from ch, failing the test if nothing comes in time.
+func recv[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(waitFor):
+		t.Fatal("nothing received")
+
+		var zero T
+
+		return zero
+	}
 }
 
 // wait returns Run's error, failing the test if it does not return in time.

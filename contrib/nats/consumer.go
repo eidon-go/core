@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -41,7 +41,9 @@ type ConsumerConfig struct {
 	// message — its attempts and the redelivery delays between them — it
 	// tells the server every AckWait/2 that the message is in progress, so
 	// AckWait only matters for an instance that died or lost its
-	// connection. Default: the server's, 30s.
+	// connection. A BackOff set with WithConsumerConfig replaces it per
+	// delivery; the in-progress interval is then half its shortest entry.
+	// Default: the server's, 30s.
 	AckWait time.Duration `json:"ackWait" yaml:"ackWait"`
 
 	// MaxDeliver is how many times a message is delivered at most; then the
@@ -176,8 +178,7 @@ type Consumer struct {
 	// message is handled: half its AckWait.
 	progressEvery time.Duration
 
-	worker     *lifecycle.Worker
-	subscribed atomic.Bool
+	runner *runner
 }
 
 // NewConsumer validates cfg and builds a consumer of conn for handler; it
@@ -212,11 +213,6 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, opts ...
 
 	jsConfig := cfg.jetStreamConfig(o.consumerConfig)
 
-	ackWait := jsConfig.AckWait
-	if ackWait <= 0 {
-		ackWait = defaultAckWait
-	}
-
 	c := &Consumer{ //nolint:exhaustruct_v5 // worker is set below, state starts at zero
 		conn:     conn,
 		cfg:      cfg,
@@ -240,9 +236,9 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, opts ...
 		},
 		workers:       workers,
 		prefetch:      prefetch,
-		progressEvery: ackWait / 2, //nolint:mnd // half of it
+		progressEvery: ackDeadline(jsConfig) / 2, //nolint:mnd // half of it
 	}
-	c.worker = lifecycle.NewWorker(lifecycle.WorkerFuncs{Run: c.loop, Logger: c.logger})
+	c.runner = newRunner(c.loop, c.logger, ErrNotConnected)
 
 	return c, nil
 }
@@ -257,12 +253,7 @@ func (c *Consumer) Name() string { return c.name }
 // when it is shut down while Run consumes, ErrAlreadyStarted when called
 // twice, and nil at once after Shutdown. Implements lifecycle.Runner.
 func (c *Consumer) Run(ctx context.Context) error {
-	err := c.worker.Run(ctx)
-	if errors.Is(err, ErrStopped) || errors.Is(err, ErrClosed) || errors.Is(err, ErrNotStarted) {
-		return err //nolint:wrapcheck // the loop's errors carry the module prefix
-	}
-
-	return wrap(err)
+	return c.runner.run(ctx)
 }
 
 // Shutdown stops Run, if it runs, waiting for the messages in flight until
@@ -270,22 +261,14 @@ func (c *Consumer) Run(ctx context.Context) error {
 // acked are naked, and Shutdown returns ctx.Err(). The Connection is not
 // closed. Safe without Run. Idempotent. Implements lifecycle.Resource.
 func (c *Consumer) Shutdown(ctx context.Context) error {
-	return wrap(c.worker.Shutdown(ctx))
+	return c.runner.shutdown(ctx)
 }
 
 // Healthcheck returns nil while Run is subscribed, ErrNotConnected while it
 // creates its consumer or subscribes again, and ErrNotRunning when Run is
 // not running. Implements lifecycle.Healthchecker.
 func (c *Consumer) Healthcheck(ctx context.Context) error {
-	if err := c.worker.Healthcheck(ctx); err != nil {
-		return wrap(err)
-	}
-
-	if !c.subscribed.Load() {
-		return ErrNotConnected
-	}
-
-	return nil
+	return c.runner.healthcheck(ctx)
 }
 
 // stableSession is how long a subscription must have lasted for its loss
@@ -296,6 +279,21 @@ const stableSession = 5 * time.Second
 
 // defaultAckWait is the server's AckWait when the consumer sets none.
 const defaultAckWait = 30 * time.Second
+
+// ackDeadline returns the shortest time the server gives a delivery to be
+// acked: the smallest BackOff entry when BackOff is set (it replaces
+// AckWait, per delivery), AckWait otherwise.
+func ackDeadline(cfg jetstream.ConsumerConfig) time.Duration {
+	if len(cfg.BackOff) > 0 && slices.Min(cfg.BackOff) > 0 {
+		return slices.Min(cfg.BackOff)
+	}
+
+	if cfg.AckWait > 0 {
+		return cfg.AckWait
+	}
+
+	return defaultAckWait
+}
 
 // loop is the worker's loop: it subscribes again after every failed or lost
 // subscription until the stop.
@@ -366,8 +364,7 @@ func (c *Consumer) session(stop, work context.Context) (bool, error) {
 
 	defer iter.Stop()
 
-	c.subscribed.Store(true)
-	defer c.subscribed.Store(false)
+	defer c.runner.markSubscribed()()
 
 	c.logger.InfoContext(stop, "nats consumer subscribed",
 		slog.String("stream", c.cfg.Stream), slog.String("durable", c.cfg.Durable))

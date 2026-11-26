@@ -185,7 +185,25 @@ func TestConnection_ShutdownDeadlineClosesAtOnce(t *testing.T) {
 	cancel()
 
 	require.ErrorIs(t, conn.Shutdown(ctx), context.Canceled)
-	assert.True(t, conn.Conn().IsClosed(), "closed without a drain")
+	// Closed in the background, without a drain: Shutdown does not wait for
+	// a close that may flush to a peer.
+	require.Eventually(t, conn.Conn().IsClosed, waitFor, tick)
+}
+
+func TestConnection_ShutdownWithoutClosedCallback(t *testing.T) {
+	t.Parallel()
+
+	s := runServer(t)
+
+	// The option suppresses the closed handler; Shutdown must still see the
+	// end of the drain.
+	conn := startConnection(t, s, nats.WithConnOptions(natsgo.NoCallbacksAfterClientClose()))
+
+	ctx, cancel := context.WithTimeout(t.Context(), waitFor)
+	defer cancel()
+
+	require.NoError(t, conn.Shutdown(ctx))
+	assert.True(t, conn.Conn().IsClosed())
 }
 
 func TestConnection_InvalidSeedFile(t *testing.T) {
@@ -199,7 +217,7 @@ func TestConnection_InvalidSeedFile(t *testing.T) {
 	}, nats.WithLogger(quietLogger()), nats.WithConnectRetry(fastRetry()))
 	require.NoError(t, err)
 
-	t.Cleanup(func() { _ = conn.Shutdown(context.Background()) })
+	shutdownLater(t, conn)
 
 	err = conn.Start(t.Context())
 	require.ErrorContains(t, err, "nkeySeedFile")
@@ -239,7 +257,7 @@ func TestConnection_Credentials(t *testing.T) {
 			conn, err := nats.NewConnection(tt.cfg(srv.clientURL()), nats.WithLogger(quietLogger()))
 			require.NoError(t, err)
 
-			t.Cleanup(func() { _ = conn.Shutdown(context.Background()) })
+			shutdownLater(t, conn)
 
 			require.NoError(t, conn.Start(t.Context()))
 		})

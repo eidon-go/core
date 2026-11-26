@@ -323,7 +323,7 @@ func TestConsumer_StopFinishesInFlightAndNaksPrefetched(t *testing.T) {
 		publishJS(t, s, "orders.x", strconv.Itoa(i))
 	}
 
-	<-inHandler
+	recv(t, inHandler)
 	cancel()
 	close(release)
 
@@ -463,6 +463,43 @@ func TestConsumer_KeepsLongHandlingInProgress(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load())
 }
 
+func TestConsumer_BackOffKeepsHandlingInProgress(t *testing.T) {
+	t.Parallel()
+
+	s := runServer(t)
+	s.createStream(t, "ORDERS", "orders.>")
+	conn := startConnection(t, s)
+
+	var calls atomic.Int32
+
+	got := newReceived()
+	backOff := 300 * time.Millisecond
+
+	// BackOff replaces AckWait (30s here): the in-progress acks must follow
+	// it, or the server delivers the message again mid-handling.
+	c := newConsumer(t, conn, ordersConsumer(), nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
+		calls.Add(1)
+
+		select {
+		case <-time.After(4 * backOff):
+		case <-ctx.Done():
+		}
+
+		return got.Handle(ctx, msg)
+	}), nats.WithConsumerConfig(func(cfg *jetstream.ConsumerConfig) {
+		cfg.BackOff = []time.Duration{backOff, time.Second}
+		cfg.MaxDeliver = 3
+	}))
+	runInBackground(t, c)
+	healthy(t, c)
+
+	publishJS(t, s, "orders.x", "x")
+
+	assert.Equal(t, uint64(1), got.next(t).Metadata.NumDelivered)
+	settled(t, s, "ORDERS", "billing")
+	assert.Equal(t, int32(1), calls.Load())
+}
+
 func TestConsumer_RequeueWaitsForTheDelay(t *testing.T) {
 	t.Parallel()
 
@@ -492,7 +529,7 @@ func TestConsumer_RequeueWaitsForTheDelay(t *testing.T) {
 
 	publishJS(t, s, "orders.x", "x")
 
-	first, second := <-deliveries, <-deliveries
+	first, second := recv(t, deliveries), recv(t, deliveries)
 	assert.GreaterOrEqual(t, second.Sub(first), delay-50*time.Millisecond)
 }
 
@@ -516,7 +553,7 @@ func TestConsumer_ShutdownDeadlineNaksInFlight(t *testing.T) {
 	healthy(t, c)
 
 	publishJS(t, s, "orders.x", "x")
-	<-inHandler
+	recv(t, inHandler)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()

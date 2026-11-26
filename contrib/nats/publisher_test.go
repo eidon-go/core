@@ -158,5 +158,5 @@ func TestPublisher_ShutdownWaitsForInFlight(t *testing.T) {
 
 	require.ErrorIs(t, pub.Shutdown(ctx), context.DeadlineExceeded)
 	require.NoError(t, conn.Shutdown(t.Context()))
-	require.Error(t, <-reqDone)
+	require.Error(t, recv(t, reqDone))
 }
