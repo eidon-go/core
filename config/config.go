@@ -40,8 +40,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
+
+	"github.com/eidon-go/core/lifecycle"
 )
 
 var (
@@ -70,22 +71,10 @@ type Config struct {
 	kv     KV
 	watch  *watcher
 
-	mu        sync.Mutex
-	state     runState
-	cancelRun context.CancelFunc
-	runDone   chan struct{}
-
-	closeOnce sync.Once
-	closeErr  error
+	worker   *lifecycle.Worker   // runs the watcher
+	loopDone chan struct{}       // closed when the watcher loop has returned
+	releaser *lifecycle.Releaser // closes kv
 }
-
-type runState int
-
-const (
-	stateIdle runState = iota
-	stateRunning
-	stateStopped
-)
 
 // New loads the configuration from the sources selected by opts and returns
 // it. ctx bounds the loading only; watching (if any) happens in Run.
@@ -226,10 +215,15 @@ func newConfig(s *store, logger *slog.Logger) *Config {
 		logger = slog.Default()
 	}
 
-	return &Config{ //nolint:exhaustruct_v5 // run state starts at its zero value
-		store:  s,
-		logger: logger,
+	cfg := &Config{ //nolint:exhaustruct_v5 // kv and watch are set by load; worker and releaser below
+		store:    s,
+		logger:   logger,
+		loopDone: make(chan struct{}),
 	}
+	cfg.worker = lifecycle.NewWorker(lifecycle.WorkerFuncs{Run: cfg.watchLoop, Logger: nil})
+	cfg.releaser = lifecycle.CloseOnce(cfg.closeKV)
+
+	return cfg
 }
 
 // Name implements lifecycle.Namer.
@@ -240,35 +234,12 @@ func (c *Config) Name() string { return "config" }
 // watched keys it just waits. Run may be called once (ErrAlreadyRunning
 // afterwards); called after Shutdown it returns nil at once.
 func (c *Config) Run(ctx context.Context) error {
-	c.mu.Lock()
-
-	switch c.state {
-	case stateRunning:
-		c.mu.Unlock()
-
+	err := c.worker.Run(ctx)
+	if errors.Is(err, lifecycle.ErrAlreadyStarted) {
 		return ErrAlreadyRunning
-	case stateStopped:
-		c.mu.Unlock()
-
-		return nil
-	case stateIdle:
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	c.state, c.cancelRun, c.runDone = stateRunning, cancel, done
-	c.mu.Unlock()
-
-	defer close(done)
-	defer cancel()
-
-	if c.watch != nil {
-		c.watch.run(runCtx)
-	} else {
-		<-runCtx.Done()
-	}
-
-	return nil
+	return err //nolint:wrapcheck // watchLoop returns no error of its own
 }
 
 // Shutdown stops Run (waiting for it to return, bounded by ctx) and closes
@@ -276,41 +247,46 @@ func (c *Config) Run(ctx context.Context) error {
 // ends before the watcher stops, Shutdown returns the ctx error and the KV is
 // closed once the watcher has stopped.
 func (c *Config) Shutdown(ctx context.Context) error {
-	c.mu.Lock()
-	c.state = stateStopped
-	cancel, done := c.cancelRun, c.runDone
-	c.mu.Unlock()
+	if err := c.worker.Shutdown(ctx); err != nil {
+		// The watcher was abandoned at ctx's deadline: KV.Close must wait
+		// until it has stopped reading.
+		go func() {
+			<-c.loopDone
 
-	if cancel != nil {
-		cancel()
+			_ = c.releaser.Shutdown(context.WithoutCancel(ctx))
+		}()
 
-		select {
-		case <-done:
-		case <-ctx.Done():
-			go func() {
-				<-done
-
-				_ = c.closeKV()
-			}()
-
-			return fmt.Errorf("config: waiting for the watcher: %w", ctx.Err())
-		}
+		return fmt.Errorf("config: waiting for the watcher: %w", err)
 	}
 
-	return c.closeKV()
+	// The watcher has stopped or never ran.
+	return c.releaser.Shutdown(ctx) //nolint:wrapcheck // closeKV wraps the KV error
 }
 
-// closeKV closes the KV backend once.
+// closeKV is the release of the Releaser: it closes the KV backend, if any.
 func (c *Config) closeKV() error {
-	c.closeOnce.Do(func() {
-		if c.kv != nil {
-			if err := c.kv.Close(); err != nil {
-				c.closeErr = fmt.Errorf("config: close KV: %w", err)
-			}
-		}
-	})
+	if c.kv == nil {
+		return nil
+	}
 
-	return c.closeErr
+	if err := c.kv.Close(); err != nil {
+		return fmt.Errorf("config: close KV: %w", err)
+	}
+
+	return nil
+}
+
+// watchLoop is the loop of the Worker.
+func (c *Config) watchLoop(stop, _ context.Context) error {
+	defer close(c.loopDone)
+
+	if c.watch != nil {
+		c.watch.run(stop)
+	} else {
+		<-stop.Done()
+	}
+
+	return nil
 }
 
 // Get returns the value of key as T, or the zero value of T when the key is
