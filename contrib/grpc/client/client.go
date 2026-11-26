@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -48,10 +47,7 @@ type Conn struct {
 	name   string
 	logger *slog.Logger
 
-	mu     sync.Mutex
-	closed bool
-	done   chan struct{} // closed when Close has returned
-	err    error         // set before done is closed
+	releaser *lifecycle.Releaser
 }
 
 var (
@@ -80,12 +76,14 @@ func New(cfg Config, opts ...Option) (*Conn, error) {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 
-	return &Conn{ //nolint:exhaustruct_v5 // close state starts at its zero value
+	conn := &Conn{ //nolint:exhaustruct_v5 // releaser is set below: it closes conn
 		ClientConn: clientConn,
 		name:       o.name,
 		logger:     o.logger.With(slog.String("component", o.name)),
-		done:       make(chan struct{}),
-	}, nil
+	}
+	conn.releaser = lifecycle.CloseOnce(conn.close)
+
+	return conn, nil
 }
 
 // dialOptions assembles the grpc.DialOptions: Config, credentials, the
@@ -134,13 +132,12 @@ func (c *Conn) Name() string { return c.name }
 // fail (or wait, with grpc.WaitForReady) until it succeeds. Implements
 // lifecycle.Starter.
 func (c *Conn) Start(context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.closed {
+	if c.releaser.Closing() {
 		return ErrClosed
 	}
 
+	// Connect on a connection that a concurrent Shutdown has closed does
+	// nothing.
 	c.Connect()
 
 	return nil
@@ -152,39 +149,21 @@ func (c *Conn) Start(context.Context) error {
 // background. It is idempotent and safe without Start. Implements
 // lifecycle.Resource.
 func (c *Conn) Shutdown(ctx context.Context) error {
-	c.mu.Lock()
-	first := !c.closed
-	c.closed = true
-	c.mu.Unlock()
-
-	if first {
-		logCtx := context.WithoutCancel(ctx)
-
-		go func() {
-			// Close after the caller's own Close reports "closing": not a failure.
-			switch err := c.Close(); {
-			case err == nil:
-				c.logger.InfoContext(logCtx, "grpc client closed", slog.String("target", c.Target()))
-			case status.Code(err) != codes.Canceled:
-				c.err = err
-			}
-
-			close(c.done)
-		}()
+	if err := c.releaser.Shutdown(ctx); err != nil {
+		return fmt.Errorf("grpc/client: shutdown: %w", err)
 	}
 
-	select {
-	case <-c.done:
-	default:
-		select {
-		case <-c.done:
-		case <-ctx.Done():
-			return fmt.Errorf("grpc/client: shutdown: %w", ctx.Err())
-		}
-	}
+	return nil
+}
 
-	if c.err != nil && first {
-		return fmt.Errorf("grpc/client: shutdown: %w", c.err)
+// close is the release of the Releaser: it runs once, in the background.
+func (c *Conn) close() error {
+	// Close after the caller's own Close reports "closing": not a failure.
+	switch err := c.Close(); {
+	case err == nil:
+		c.logger.InfoContext(context.Background(), "grpc client closed", slog.String("target", c.Target()))
+	case status.Code(err) != codes.Canceled:
+		return err //nolint:wrapcheck // Shutdown wraps it
 	}
 
 	return nil

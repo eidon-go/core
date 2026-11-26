@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"path"
 	"sync"
-	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -57,9 +56,7 @@ type Provider struct {
 	// every signal is off.
 	sdk []signalProvider
 
-	shutdownOnce sync.Once
-	stopping     atomic.Bool
-	stopped      chan struct{} // closed when the first Shutdown returns
+	releaser *lifecycle.Releaser
 }
 
 // signalProvider is an SDK tracer, meter or logger provider with the name of
@@ -107,15 +104,17 @@ func newProvider(cfg Config, o *options) (*Provider, error) {
 		return nil, fmt.Errorf("%w: WithTLSConfig needs an https endpoint, got %q", ErrInvalidConfig, cfg.Endpoint)
 	}
 
-	p := &Provider{ //nolint:exhaustruct_v5 // providers are set below, shutdown state starts at zero
+	p := &Provider{ //nolint:exhaustruct_v5 // providers and releaser are set below
 		name:           o.name,
 		logger:         o.logger.With(slog.String("component", o.name)),
 		propagators:    o.propagators,
 		tracerProvider: tracenoop.NewTracerProvider(),
 		meterProvider:  metricnoop.NewMeterProvider(),
 		loggerProvider: lognoop.NewLoggerProvider(),
-		stopped:        make(chan struct{}),
 	}
+	p.releaser = lifecycle.ShutdownOnce(func(ctx context.Context) error {
+		return p.each("shutdown", func(sp signalProvider) error { return sp.sdk.Shutdown(ctx) })
+	})
 
 	if !o.anySignal(cfg) {
 		return p, nil
@@ -160,7 +159,7 @@ func (p *Provider) Propagators() propagation.TextMapPropagator { return p.propag
 // globals return from then on, but not what those early tracers and meters
 // use.
 func (p *Provider) SetGlobal() {
-	if p.stopping.Load() {
+	if p.releaser.Closing() {
 		return
 	}
 
@@ -193,26 +192,12 @@ func (p *Provider) ForceFlush(ctx context.Context) error {
 // concurrent call waits for it until its own ctx is done, and calls after it
 // return nil.
 func (p *Provider) Shutdown(ctx context.Context) error {
-	first := false
-
-	p.shutdownOnce.Do(func() {
-		first = true
-
-		p.stopping.Store(true)
-	})
-
-	if !first {
-		select {
-		case <-p.stopped:
-			return nil
-		case <-ctx.Done():
-			return fmt.Errorf("otel: shutdown: %w", ctx.Err())
-		}
+	err := p.releaser.Shutdown(ctx)
+	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return fmt.Errorf("otel: shutdown: %w", err)
 	}
 
-	defer close(p.stopped)
-
-	return p.each("shutdown", func(sp signalProvider) error { return sp.sdk.Shutdown(ctx) })
+	return err //nolint:wrapcheck // the errors of the SDK shutdowns carry the otel prefix already
 }
 
 // build creates the SDK provider of every signal that is on. A built provider
