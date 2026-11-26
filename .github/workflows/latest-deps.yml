@@ -49,7 +49,19 @@ jobs:
           go mod tidy
           git diff --stat -- go.mod
 
-      - name: Build and test
+      - name: Build
+        run: go build ./...
+
+      # Test-only tools that lag behind a dependency: the code above was built
+      # against the latest version, the tests run against the newest one the
+      # tool supports. Drop an entry once the tool catches up.
+      # - contrib/sql: pgxmock v4.9 does not compile with pgx >= v5.11
+      #   (pgx.Rows.TypeMap, pgx.BatchResults.Tx).
+      - name: Hold back dependencies for test tools
+        if: matrix.module == 'contrib/sql'
         run: |
-          go build ./...
-          go test -race -count=1 -timeout=5m -short ./...
+          go mod edit -require=github.com/jackc/pgx/v5@v5.10.0
+          go mod tidy
+
+      - name: Test
+        run: go test -race -count=1 -timeout=5m -short ./...

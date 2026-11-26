@@ -35,6 +35,7 @@ core.
 | contrib/otel | `github.com/eidon-go/core/contrib/otel` | [OpenTelemetry SDK setup](./contrib/otel/README.md): traces, metrics and logs over OTLP/HTTP, resource attributes, globals on request, flushed on shutdown |
 | contrib/grpc | `github.com/eidon-go/core/contrib/grpc` | [gRPC server](./contrib/grpc/README.md): graceful drain, keepalive and connection-age config, TLS, health service from app readiness, OpenTelemetry, panic-recovery interceptors; [client](./contrib/grpc/README.md#client) (`contrib/grpc/client`): TLS by default, load balancing, keepalive, OpenTelemetry, closed on shutdown |
 | contrib/kafka | `github.com/eidon-go/core/contrib/kafka` | [Kafka](./contrib/kafka/README.md) on franz-go: consumer group with in-flight drain on stop, commit of handled messages only, retry/skip/stop error policy with dead-letter topic; synchronous producer flushed on shutdown, JSON producer; OpenTelemetry |
+| contrib/sql | `github.com/eidon-go/core/contrib/sql` | [SQL databases](./contrib/sql/README.md): `database/sql` (any driver) and PostgreSQL on pgxpool ([`contrib/sql/pgx`](./contrib/sql/pgx/README.md)) with one transaction manager — nested modes (join with rollback-only, savepoint, separate transaction, forbid), isolation and read-only options, after-commit callbacks; typed `Get`/`Select`/`Exec` helpers over raw SQL or squirrel; sqlc-compatible queriers; OpenTelemetry. Starts at v0.x |
 
 ```sh
 go get github.com/eidon-go/core
@@ -57,7 +58,6 @@ to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `life
 | `contrib/nats` | NATS client and consumer | planned |
 | `contrib/rabbitmq` | RabbitMQ publisher and consumer | planned |
 | `contrib/redis` | Redis client | planned |
-| `contrib/sql` | `database/sql` and pgx (`contrib/sql/pgx`) with a shared transaction manager, typed `Get`/`Select`/`Exec` helpers and after-commit hooks; starts at v0.x | planned |
 
 Later, on the same scheme: adapters for `sql` such as `river` and `sqlx`.
 

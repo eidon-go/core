@@ -25,15 +25,16 @@ imports.
 
 ## Status and roadmap
 
-1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.5` is the latest tag.
-   Contrib modules are written against rc.N (cut rc.4… when a module needs core API changes —
+1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.6` is the latest tag.
+   Contrib modules are written against rc.N (cut rc.7… when a module needs core API changes —
    breaking changes are still allowed). Core `v1.0.0` + `contrib/config/yaml/v1.0.0` are tagged
-   once the main contrib modules (`http2`, `config/etcd`, `otel`, `grpc`) have validated the API;
-   contrib modules are tagged only after that, with their `require` bumped to core `v1.0.0`.
+   once the main contrib modules (`http2`, `config/etcd`, `otel`, `grpc`, `kafka`, `sql`) have
+   validated the API; contrib modules are tagged only after that, with their `require` bumped to
+   core `v1.0.0`.
 2. **Phase 2 — contrib modules** (all under `contrib/`), one module per PR, in this order:
    `http2` (server and `http2/client`; done) → `config/etcd` (done) → `otel` (done) → `grpc` (server and `grpc/client`; done) → `kafka` (done; first
-   `lifecycle.Worker` user) → `jwt` → `nats` → `rabbitmq` → `redis` → `sql` (as v0.x). Modules may declare a newer `go` than core
-   when their dependencies need it (`contrib/http2` is go 1.26: otel ≥ v1.47 for a reachable
+   `lifecycle.Worker` user) → `sql` (done; `sql` + `sql/pgx`, as v0.x) → `jwt` → `nats` → `rabbitmq` → `redis`. Modules may declare a newer `go` than core
+   when their dependencies need it (`contrib/http2` and `contrib/sql` are go 1.26: otel ≥ v1.47 for a reachable
    vulnerability fix). Later, the same way: `river`, `sqlx` (adapters for `sql`). Each module is written to
    `docs/contrib-guidelines.md` and ships with `lifecycletest` checks, a README, `Example*` tests
    and its own tag. The checklist is in `CONTRIBUTING.md` ("Adding an integration module"); when
@@ -43,20 +44,23 @@ imports.
    `integration` job run them (Docker needed). A module that adds tests there adds its `require`
    and `replace` to `internal/integration/go.mod`.
 
-### Planned `sql` module (key decisions)
+### `sql` module (key decisions)
 
 - One module `contrib/sql` with two packages: `sql` (database/sql) and `sql/pgx` (pgxpool).
-  `sql/pgx` is a package, not a module — scany v2 already pulls pgx/v5. Shared transaction core
-  in `contrib/sql/internal/txcore` (not public).
+  `sql/pgx` is a package, not a module — scany v2 already pulls pgx/v5. Shared code in
+  `contrib/sql/internal/txcore` (transactions, generic over the tx type) and `internal/scan`.
 - Scanning: scany v2 behind a public `Scanner` interface (`WithScanner`). No sqlx (separate adapter
   module later), no squirrel dependency (helpers take a structural `Builder`; `sql.Dollar` /
   `sql.Question` structurally satisfy squirrel's `PlaceholderFormat`).
 - `Transactor` (`WithTx`, `OnCommit`) and `QuerierProvider` are small interfaces; nested `WithTx`
-  defaults to `Join` + rollback-only, other modes via `WithTxMode`. `Get/Select/Exec[T]` helpers
-  work in both worlds.
-- `New(cfg, opts...)` does no I/O; open + ping with `WithConnectRetry` in `Start`. `DB` is
+  defaults to `Join` + rollback-only, other modes via `WithTxMode`. The tx context key is per `DB`.
+  `TxOption`/`ManagerOption`/`TxMode`/errors live in `sql` and are reused by `sql/pgx`.
+- No I/O in constructors: `sql.New` opens the pool (`sql.Open` does not connect) and `Start` pings
+  with `WithConnectRetry`; `pgx.New` builds the pool config and `Start` creates the pool. `DB` is
   `Starter`/`Resource`/`Healthchecker`/`Namer`. Pool users (River) must be registered after the
   DB so they shut down first.
+- pgxmock v4.9 does not compile with pgx ≥ v5.11, so the module requires pgx v5.10.0 and
+  `latest-deps.yml` holds pgx there for its tests; bump both once pgxmock catches up.
 
 ## Settled decisions — don't reopen
 
