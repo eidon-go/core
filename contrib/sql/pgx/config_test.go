@@ -81,3 +81,42 @@ func TestConfig_DataSource(t *testing.T) {
 	assert.Equal(t, uint16(6432), parsed.ConnConfig.Port)
 	assert.Equal(t, "billing api", parsed.ConnConfig.RuntimeParams["application_name"])
 }
+
+// FuzzConfig_DataSource checks that any user, password and database survive
+// DataSource's quoting through pgx's parser unchanged, and that New never
+// puts the password into an error. Run the fuzzer with:
+//
+//	go test -run '^$' -fuzz FuzzConfig_DataSource ./pgx/
+func FuzzConfig_DataSource(f *testing.F) {
+	for _, seed := range []string{
+		"secret", "it's", `back\slash`, `\'`, "'", "''", `\\'`, "a b", " lead", "trail ",
+		"=", "a=b c=d", "password='x'", "x' host='evil", "ünïcödé", "\t\n\r", "?&#%",
+		"postgres://u:p@h/db",
+	} {
+		f.Add(seed, seed, seed)
+	}
+
+	f.Fuzz(func(t *testing.T, user, password, database string) {
+		cfg := corepgx.Config{Host: "localhost", User: user, Password: password, Database: database, SSLMode: "disable"}
+
+		parsed, err := pgxpool.ParseConfig(cfg.DataSource())
+		require.NoError(t, err)
+
+		// Empty values are left out: pgx fills them from PG* and the OS.
+		if user != "" {
+			assert.Equal(t, user, parsed.ConnConfig.User)
+		}
+
+		if password != "" {
+			assert.Equal(t, password, parsed.ConnConfig.Password)
+		}
+
+		if database != "" {
+			assert.Equal(t, database, parsed.ConnConfig.Database)
+		}
+
+		if _, err := corepgx.New(cfg); err != nil && len(password) >= 4 {
+			assert.NotContains(t, err.Error(), password, "the password leaked")
+		}
+	})
+}
