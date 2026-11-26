@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
@@ -37,34 +38,41 @@ type telemetry struct {
 func newTelemetry(o *options) *telemetry {
 	meter := o.meterProvider.Meter(instrumentationName)
 
-	tel := &telemetry{ //nolint:exhaustruct_v5 // instruments are set below
+	return &telemetry{
 		tracer:      o.tracerProvider.Tracer(instrumentationName),
 		propagators: o.propagators,
+		sent: counter(meter, "messaging.client.sent.messages",
+			"Number of messages a producer attempted to send to the broker."),
+		consumed: counter(meter, "messaging.client.consumed.messages",
+			"Number of messages that were delivered to the application."),
+		duration: histogram(meter, "messaging.process.duration", "Duration of processing operation."),
 	}
+}
 
-	var err error
-
-	// A failed instrument is a no-op instrument; the error goes to the otel
-	// error handler.
-	if tel.sent, err = meter.Int64Counter("messaging.client.sent.messages",
-		metric.WithUnit("{message}"),
-		metric.WithDescription("Number of messages a producer attempted to send to the broker.")); err != nil {
+// counter creates a message counter. The error of a failed one goes to the
+// otel error handler and a no-op takes its place: a provider may return nil
+// with its error.
+func counter(meter metric.Meter, name, description string) metric.Int64Counter {
+	c, err := meter.Int64Counter(name, metric.WithUnit("{message}"), metric.WithDescription(description))
+	if err != nil || c == nil {
 		otel.Handle(err)
+
+		return noop.Int64Counter{} //nolint:exhaustruct_v5 // the embedded interface is unused
 	}
 
-	if tel.consumed, err = meter.Int64Counter("messaging.client.consumed.messages",
-		metric.WithUnit("{message}"),
-		metric.WithDescription("Number of messages that were delivered to the application.")); err != nil {
+	return c
+}
+
+// histogram creates a duration histogram in seconds, like counter.
+func histogram(meter metric.Meter, name, description string) metric.Float64Histogram {
+	h, err := meter.Float64Histogram(name, metric.WithUnit("s"), metric.WithDescription(description))
+	if err != nil || h == nil {
 		otel.Handle(err)
+
+		return noop.Float64Histogram{} //nolint:exhaustruct_v5 // the embedded interface is unused
 	}
 
-	if tel.duration, err = meter.Float64Histogram("messaging.process.duration",
-		metric.WithUnit("s"),
-		metric.WithDescription("Duration of processing operation.")); err != nil {
-		otel.Handle(err)
-	}
-
-	return tel
+	return h
 }
 
 // destination returns the semantic-convention name of an exchange.
@@ -99,15 +107,16 @@ func (t *telemetry) startPublish(ctx context.Context, msg *Message) (context.Con
 	ctx, span := t.tracer.Start(ctx, "publish "+dest, //nolint:spancheck // ended by endPublish
 		trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(attrs...))
 
-	headers := make(amqp.Table, len(msg.Headers)+1)
-	maps.Copy(headers, msg.Headers)
+	headers := toTable(msg.Headers, 1)
 	t.propagators.Inject(ctx, tableCarrier(headers))
 
 	return ctx, span, headers //nolint:spancheck // ended by endPublish
 }
 
-// endPublish ends the span of a publish and counts the message.
-func (t *telemetry) endPublish(ctx context.Context, span trace.Span, msg *Message, err error) {
+// endPublish ends the span of a publish and, if it was handed to a channel
+// (attempted), counts the message as sent: a message that never got that
+// far (no connection) is not producer traffic.
+func (t *telemetry) endPublish(ctx context.Context, span trace.Span, msg *Message, attempted bool, err error) {
 	attrs := []attribute.KeyValue{
 		semconv.MessagingSystemRabbitMQ,
 		semconv.MessagingOperationName("publish"),
@@ -121,7 +130,10 @@ func (t *telemetry) endPublish(ctx context.Context, span trace.Span, msg *Messag
 	}
 
 	span.End()
-	t.sent.Add(ctx, 1, metric.WithAttributes(attrs...))
+
+	if attempted {
+		t.sent.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
 }
 
 // startProcess starts the span of the processing of a consumed message, a

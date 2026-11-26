@@ -22,9 +22,12 @@ type Message struct {
 	Body []byte
 
 	// Headers are the application headers. The value types AMQP tables
-	// allow: string, []byte, bool, the integer and float types,
-	// time.Time, nested map[string]any and []any. The trace context is
-	// added to them when publishing (the caller's map is not changed).
+	// allow: string, []byte, bool, int, int8, int16, int32, int64, uint8,
+	// uint16, uint32, float32, float64, time.Time, amqp.Decimal, nil, and
+	// nested map[string]any (or amqp.Table) and []any of these — not uint
+	// or uint64. Publish fails on another type. The trace context is added
+	// to them when publishing (the caller's map is not changed). On a
+	// consumed message nested tables are amqp.Table.
 	Headers map[string]any
 
 	// ContentType and ContentEncoding describe Body ("application/json").

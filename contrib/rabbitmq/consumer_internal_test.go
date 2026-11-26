@@ -35,7 +35,7 @@ func newTestConsumer(t *testing.T, conn *Connection, cfg ConsumerConfig, h Handl
 	c, err := NewConsumer(conn, cfg, h, append([]Option{WithLogger(discard)}, opts...)...)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { _ = c.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = c.Shutdown(cleanupContext(t)) })
 
 	return c
 }
@@ -131,7 +131,7 @@ func TestConsumer_HandlesAndAcks(t *testing.T) {
 	require.NoError(t, c.Healthcheck(t.Context()))
 
 	cancel()
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 
 	acked, requeued, rejected := broker.snapshot()
 	assert.Len(t, acked, 2)
@@ -170,7 +170,7 @@ func TestConsumer_RetriesInPlace(t *testing.T) {
 	require.Eventually(t, func() bool { return len(h.handled()) == 1 }, 5*time.Second, time.Millisecond)
 
 	cancel()
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 
 	acked, requeued, _ := broker.snapshot()
 	assert.Len(t, acked, 1)
@@ -190,7 +190,7 @@ func TestConsumer_StopsWhenRetriesAreExhausted(t *testing.T) {
 
 	broker.deliver(t, body("a"))
 
-	err := <-done
+	err := receive(t, done)
 	require.ErrorIs(t, err, ErrStopped)
 	require.ErrorIs(t, err, errHandler)
 	require.ErrorIs(t, err, ErrRetriesExhausted)
@@ -261,7 +261,7 @@ func TestConsumer_ErrorActions(t *testing.T) {
 			}, 5*time.Second, time.Millisecond)
 
 			cancel()
-			require.NoError(t, <-done)
+			require.NoError(t, receive(t, done))
 
 			acked, requeued, rejected := broker.snapshot()
 			assert.Empty(t, acked)
@@ -284,7 +284,7 @@ func TestConsumer_PanicsAreErrors(t *testing.T) {
 
 	broker.deliver(t, body("a"))
 
-	err := <-done
+	err := receive(t, done)
 	require.ErrorIs(t, err, ErrStopped)
 	assert.Contains(t, err.Error(), "handler panicked: boom")
 }
@@ -330,7 +330,7 @@ func TestConsumer_DrainsOnStop(t *testing.T) {
 	require.ErrorIs(t, c.Healthcheck(t.Context()), ErrNotRunning)
 
 	close(release)
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 	assert.False(t, handlerCtxDone.Load(), "the handler's context lives through the stop")
 
 	acked, requeued, _ := broker.snapshot()
@@ -372,7 +372,7 @@ func TestConsumer_ShutdownDeadlineCutsOffTheHandler(t *testing.T) {
 	defer cancel()
 
 	require.ErrorIs(t, c.Shutdown(ctx), context.DeadlineExceeded)
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 
 	require.Eventually(t, func() bool {
 		_, requeued, _ := broker.snapshot()
@@ -412,7 +412,7 @@ func TestConsumer_SubscribesAgainAfterAReconnect(t *testing.T) {
 	require.NoError(t, c.Healthcheck(t.Context()))
 
 	cancel()
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 
 	assert.Equal(t, []string{"before", "after"}, h.handled())
 	assert.Len(t, broker.declared, 6, "the topology is declared on every subscription")
@@ -439,7 +439,7 @@ func TestConsumer_RetriesAFailedSubscription(t *testing.T) {
 	require.Eventually(t, func() bool { return len(h.handled()) == 1 }, 5*time.Second, time.Millisecond)
 
 	cancel()
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 }
 
 func TestConsumer_Concurrency(t *testing.T) {
@@ -480,7 +480,7 @@ func TestConsumer_Concurrency(t *testing.T) {
 	}, 5*time.Second, time.Millisecond)
 
 	cancel()
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 	assert.Equal(t, []int{workers}, broker.prefetch, "prefetch defaults to the concurrency")
 }
 
@@ -498,7 +498,7 @@ func TestConsumer_ConnectionStates(t *testing.T) {
 
 	broker.consumer(t)
 	require.NoError(t, conn2.Shutdown(t.Context()))
-	require.ErrorIs(t, <-done, ErrClosed)
+	require.ErrorIs(t, receive(t, done), ErrClosed)
 }
 
 func TestConsumer_TracesTheProcessAsAChildOfThePublish(t *testing.T) {
@@ -538,7 +538,7 @@ func TestConsumer_TracesTheProcessAsAChildOfThePublish(t *testing.T) {
 	require.Eventually(t, func() bool { return len(recorder.Ended()) == 2 }, 5*time.Second, time.Millisecond)
 
 	cancel()
-	require.NoError(t, <-done)
+	require.NoError(t, receive(t, done))
 
 	spans := recorder.Ended()
 	publish, process := spans[0], spans[1]
@@ -599,6 +599,46 @@ func TestNewConsumer_Invalid(t *testing.T) {
 		"queues[0]: name", "bindings[0]: queue", "bindings[0]: exchange",
 	} {
 		assert.Contains(t, err.Error(), want)
+	}
+}
+
+// basic.qos carries a 16-bit prefetch: a larger one, or a default taken from
+// a larger concurrency, is a configuration error, not a failure at every
+// subscription.
+func TestConsumerConfig_PrefetchLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     ConsumerConfig
+		wantErr bool
+	}{
+		{name: "largest", cfg: ConsumerConfig{Queue: "q", Prefetch: maxPrefetch}},
+		{name: "too large", cfg: ConsumerConfig{Queue: "q", Prefetch: maxPrefetch + 1}, wantErr: true},
+		{
+			name:    "default from concurrency",
+			cfg:     ConsumerConfig{Queue: "q", Concurrency: maxPrefetch + 1},
+			wantErr: true,
+		},
+		{
+			name: "explicit prefetch below a large concurrency",
+			cfg:  ConsumerConfig{Queue: "q", Concurrency: maxPrefetch + 1, Prefetch: 10},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.cfg.Validate()
+			if tt.wantErr {
+				require.ErrorIs(t, err, ErrInvalidConfig)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
 	}
 }
 

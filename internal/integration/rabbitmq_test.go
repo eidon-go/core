@@ -151,8 +151,10 @@ func (c *rabbitCollector) wait(t *testing.T, n int) []string {
 	return got
 }
 
-// runRabbitConsumer runs c; the returned stop cancels Run and waits for it.
-func runRabbitConsumer(t *testing.T, c *rabbitmq.Consumer) func() {
+// runRabbitConsumer runs c; the returned stop cancels Run, waits for it
+// (bounded by rabbitWait) and returns the first error of Shutdown and Run.
+// It may be called from any goroutine: it does not fail the test itself.
+func runRabbitConsumer(t *testing.T, c *rabbitmq.Consumer) func() error {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -160,21 +162,32 @@ func runRabbitConsumer(t *testing.T, c *rabbitmq.Consumer) func() {
 
 	go func() { done <- c.Run(ctx) }()
 
-	var once sync.Once
+	var (
+		once    sync.Once
+		stopErr error
+	)
 
-	stop := func() {
+	stop := func() error {
 		once.Do(func() {
 			cancel()
 
 			sctx, scancel := context.WithTimeout(context.WithoutCancel(t.Context()), rabbitWait)
 			defer scancel()
 
-			require.NoError(t, c.Shutdown(sctx))
-			require.NoError(t, <-done)
+			stopErr = c.Shutdown(sctx)
+
+			select {
+			case err := <-done:
+				stopErr = errors.Join(stopErr, err)
+			case <-time.After(rabbitWait):
+				stopErr = errors.Join(stopErr, errors.New("Run did not return after Shutdown"))
+			}
 		})
+
+		return stopErr
 	}
 
-	t.Cleanup(stop)
+	t.Cleanup(func() { assert.NoError(t, stop()) })
 
 	require.Eventually(t, func() bool { return c.Healthcheck(t.Context()) == nil },
 		rabbitWait, 10*time.Millisecond, "consumer not subscribed")
@@ -298,8 +311,49 @@ func TestRabbitMQ_PublishAndConsume(t *testing.T) {
 
 	assert.ElementsMatch(t, bodies, collector.wait(t, len(bodies)))
 
-	stop()
+	require.NoError(t, stop())
 	assert.Zero(t, readyMessages(t, rawChannel(t, rabbitConfig), queue), "every message acked")
+}
+
+// gate holds a handler until it is released, or until the handler's ctx is
+// done; the test releases it on cleanup too, so that a failed assertion
+// does not leave the handler blocked.
+type gate struct {
+	entered, release chan struct{}
+	enterOnce        sync.Once
+	releaseOnce      sync.Once
+}
+
+func newGate(t *testing.T) *gate {
+	t.Helper()
+
+	g := &gate{entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(g.open)
+
+	return g
+}
+
+// wait marks the handler as entered and blocks until open or ctx is done.
+func (g *gate) wait(ctx context.Context) {
+	g.enterOnce.Do(func() { close(g.entered) })
+
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+	}
+}
+
+func (g *gate) open() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+// waitEntered waits for the handler to enter the gate, bounded by rabbitWait.
+func (g *gate) waitEntered(t *testing.T) {
+	t.Helper()
+
+	select {
+	case <-g.entered:
+	case <-time.After(rabbitWait):
+		require.FailNow(t, "the handler did not start")
+	}
 }
 
 // On stop the message in flight finishes and is acked; the prefetched ones
@@ -310,14 +364,13 @@ func TestRabbitMQ_DrainOnStop(t *testing.T) {
 
 	exchange, queue := rabbitName(t, "x"), rabbitName(t, "q")
 	pub := newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "publish"))
-	entered, release := make(chan struct{}), make(chan struct{})
+	g := newGate(t)
 
 	var handled []string
 
 	h := rabbitmq.HandlerFunc(func(ctx context.Context, msg *rabbitmq.Message) error {
 		if len(handled) == 0 {
-			close(entered)
-			<-release
+			g.wait(ctx)
 		}
 
 		if ctx.Err() != nil {
@@ -337,18 +390,21 @@ func TestRabbitMQ_DrainOnStop(t *testing.T) {
 	stop := runRabbitConsumer(t, c)
 
 	publishBodies(t, pub, exchange, "a", "b", "c")
-	<-entered
+	g.waitEntered(t)
 
-	stopped := make(chan struct{})
+	stopped := make(chan error, 1)
 
-	go func() {
-		stop()
-		close(stopped)
-	}()
+	go func() { stopped <- stop() }()
 
 	require.Eventually(t, func() bool { return c.Healthcheck(t.Context()) != nil }, rabbitWait, time.Millisecond)
-	close(release)
-	<-stopped
+	g.open()
+
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(2 * rabbitWait):
+		require.FailNow(t, "the consumer did not stop")
+	}
 
 	assert.Equal(t, []string{"a"}, handled)
 
@@ -429,10 +485,9 @@ func TestRabbitMQ_HandlerPublishesDuringDrain(t *testing.T) {
 	pub, err := rabbitmq.NewPublisher(publishConn, rabbitOptions("publisher")...)
 	require.NoError(t, err)
 
-	entered, release := make(chan struct{}), make(chan struct{})
+	g := newGate(t)
 	h := rabbitmq.HandlerFunc(func(ctx context.Context, msg *rabbitmq.Message) error {
-		close(entered)
-		<-release
+		g.wait(ctx)
 
 		return pub.Publish(ctx, &rabbitmq.Message{RoutingKey: out, Body: msg.Body}) // default exchange
 	})
@@ -459,11 +514,21 @@ func TestRabbitMQ_HandlerPublishesDuringDrain(t *testing.T) {
 	// Published on a connection of its own: the app's are not shared.
 	other := newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "test"))
 	publishBodies(t, other, exchange, "order-1")
-	<-entered
+	g.waitEntered(t)
 
 	cancel() // the app stops: the consumer drains first
-	close(release)
-	require.NoError(t, <-ran)
+
+	// Release the handler only once the drain has begun, so that it
+	// publishes during the drain, not before it.
+	require.Eventually(t, func() bool { return c.Healthcheck(t.Context()) != nil }, rabbitWait, time.Millisecond)
+	g.open()
+
+	select {
+	case err := <-ran:
+		require.NoError(t, err)
+	case <-time.After(2 * rabbitWait):
+		require.FailNow(t, "the app did not stop")
+	}
 
 	ch := rawChannel(t, rabbitConfig)
 	assert.Zero(t, readyMessages(t, ch, in), "acked")

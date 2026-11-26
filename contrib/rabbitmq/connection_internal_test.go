@@ -26,20 +26,12 @@ func TestConnection_StartRetriesUntilTheBrokerAnswers(t *testing.T) {
 	t.Parallel()
 
 	broker := newFakeBroker()
-	broker.setDialErr(errBroker)
+	broker.failDials = 3
 	conn := newTestConnection(t, broker, false)
-
-	go func() {
-		for broker.dialCount() < 3 {
-			time.Sleep(time.Millisecond)
-		}
-
-		broker.setDialErr(nil)
-	}()
 
 	require.NoError(t, conn.Start(t.Context()))
 	require.NoError(t, conn.Healthcheck(t.Context()))
-	assert.GreaterOrEqual(t, broker.dialCount(), 4)
+	assert.Equal(t, 4, broker.dialCount())
 }
 
 func TestConnection_StartFailsWhenTheRetriesAreExhausted(t *testing.T) {

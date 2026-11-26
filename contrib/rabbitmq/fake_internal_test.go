@@ -20,6 +20,7 @@ type fakeBroker struct {
 	mu sync.Mutex
 
 	dialErr    error // returned by dial while set
+	failDials  int   // the first failDials dials fail with errBroker
 	dials      int
 	conn       *fakeConn
 	declareErr error
@@ -68,6 +69,10 @@ func (b *fakeBroker) dial(ctx context.Context, _ string, _ amqp.Config) (amqpCon
 
 	if b.dialErr != nil {
 		return nil, b.dialErr
+	}
+
+	if b.dials <= b.failDials {
+		return nil, errBroker
 	}
 
 	b.conn = &fakeConn{broker: b}
@@ -570,11 +575,42 @@ func newTestConnection(t *testing.T, b *fakeBroker, start bool, opts ...Option) 
 	conn, err := NewConnection(Config{Host: "localhost"}, opts...)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { _ = conn.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = conn.Shutdown(cleanupContext(t)) })
 
 	if start {
 		require.NoError(t, conn.Start(t.Context()))
 	}
 
 	return conn
+}
+
+// testWait bounds every wait of the tests for a result.
+const testWait = 5 * time.Second
+
+// cleanupContext is the context of a Shutdown in a cleanup: t.Context() is
+// already cancelled then, and a wait without a bound would hang a failed
+// test.
+func cleanupContext(t *testing.T) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), testWait)
+	t.Cleanup(cancel)
+
+	return ctx
+}
+
+// receive returns the next value of ch, failing the test after testWait.
+func receive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(testWait):
+		require.FailNow(t, "no result within the test wait")
+
+		var zero T
+
+		return zero
+	}
 }

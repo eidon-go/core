@@ -22,7 +22,7 @@ func newTestPublisher(t *testing.T, conn *Connection, opts ...Option) *Publisher
 	pub, err := NewPublisher(conn, append([]Option{WithLogger(discard)}, opts...)...)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { _ = pub.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = pub.Shutdown(cleanupContext(t)) })
 
 	return pub
 }
@@ -101,7 +101,7 @@ func TestPublisher_NotConfirmedWhenTheConnectionIsLost(t *testing.T) {
 
 	require.Eventually(t, func() bool { return broker.heldCount() == 1 }, 5*time.Second, time.Millisecond)
 	broker.drop()
-	require.ErrorIs(t, <-got, ErrNotConfirmed)
+	require.ErrorIs(t, receive(t, got), ErrNotConfirmed)
 
 	// The next Publish goes out on a channel of the new connection.
 	broker.releaseConfirms(true)
@@ -129,7 +129,7 @@ func TestPublisher_WaitsForTheConnection(t *testing.T) {
 	go func() { got <- pub.Publish(t.Context(), &Message{RoutingKey: "q"}) }()
 
 	broker.setDialErr(nil)
-	require.NoError(t, <-got)
+	require.NoError(t, receive(t, got))
 	assert.Len(t, broker.publishedMessages(), 1)
 }
 
@@ -170,8 +170,8 @@ func TestPublisher_ShutdownWaitsForConfirms(t *testing.T) {
 	}
 
 	broker.releaseConfirms(true)
-	require.NoError(t, <-published)
-	require.NoError(t, <-shut)
+	require.NoError(t, receive(t, published))
+	require.NoError(t, receive(t, shut))
 	require.ErrorIs(
 		t,
 		pub.Publish(t.Context(), &Message{RoutingKey: "q"}),
@@ -197,7 +197,7 @@ func TestPublisher_ShutdownDeadlineFailsTheWaitingPublish(t *testing.T) {
 
 	require.ErrorIs(t, pub.Shutdown(ctx), context.DeadlineExceeded)
 
-	err := <-published
+	err := receive(t, published)
 	require.ErrorIs(t, err, ErrNotConfirmed, "the caller's ctx was not cancelled: %v", err)
 	require.NotErrorIs(t, err, context.Canceled)
 }

@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	// ErrInvalidConfig is wrapped by every error from Validate and by the
-	// constructors for invalid arguments.
+	// ErrInvalidConfig is wrapped by every error from Validate, by the
+	// constructors for invalid arguments and by Publish for an invalid
+	// message (a nil one, a header value AMQP cannot carry).
 	ErrInvalidConfig = errors.New("rabbitmq: invalid config")
 
 	// ErrNotStarted is returned while the Connection has not been started:

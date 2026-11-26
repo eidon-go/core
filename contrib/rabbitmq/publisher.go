@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel/trace"
@@ -14,10 +15,13 @@ import (
 )
 
 // Publisher publishes messages on a channel of its Connection in confirm
-// mode: Publish returns once the broker has taken responsibility for every
-// message (persisted it, for persistent messages on durable queues). It is a
-// Resource and Namer; it has no goroutines of its own, and opens its
-// channel on the first Publish.
+// mode: Publish returns once the broker has accepted every message
+// (basic.ack). A confirm is acceptance, not a crash-durability guarantee:
+// for a durable classic queue the broker may confirm a persistent message
+// that a consumer acked before it reached the disk, and it does not fsync
+// before confirming; quorum queues confirm once a majority has the message.
+// It is a Resource and Namer; it has no goroutines of its own, and opens
+// its channel on the first Publish.
 //
 // Publish is safe for concurrent use; all Publish calls share the channel.
 // Messages that the broker cannot route (no queue bound for the routing key)
@@ -82,10 +86,14 @@ func (p *Publisher) Name() string { return p.name }
 // refuses fails with ErrNacked. One whose channel closed before its confirm
 // — a lost connection, a channel error, or Shutdown giving up waiting —
 // fails with ErrNotConfirmed (joined with the broker's *amqp.Error, if it
-// gave one): it may have been delivered, so a retry may duplicate it. When
-// ctx is done while waiting for a confirm, the error wraps ctx.Err() and the
-// message may still be delivered. It returns ErrClosed after Shutdown and
-// ErrNotStarted before the connection is started.
+// gave one): it may have been delivered, so a retry may duplicate it. So
+// does a message whose write to the connection failed. A nack that the
+// broker sends just before it closes the channel cannot be told apart from
+// the close by amqp091 either: that message fails with ErrNotConfirmed too
+// (it was not confirmed). When ctx is done while waiting for a confirm, the
+// error wraps ctx.Err() and the message may still be delivered. It returns
+// ErrClosed after Shutdown and ErrNotStarted before the connection is
+// started.
 //
 // On a connection the broker has blocked (a memory or disk alarm) Publish
 // may wait past ctx: amqp091 opens channels without a context — on the first
@@ -129,10 +137,10 @@ func (p *Publisher) Publish(ctx context.Context, msgs ...*Message) error {
 	for _, msg := range msgs {
 		spanCtx, span, headers := p.tel.startPublish(ctx, msg)
 
-		ch, conf, err := p.send(spanCtx, msg, headers, pinned)
+		ch, conf, attempted, err := p.send(spanCtx, msg, headers, pinned)
 		if err != nil {
 			err = p.aborted(callerCtx, err, wrap(ErrClosed))
-			p.tel.endPublish(spanCtx, span, msg, err)
+			p.tel.endPublish(spanCtx, span, msg, attempted, err)
 			firstErr = err
 
 			break
@@ -146,7 +154,7 @@ func (p *Publisher) Publish(ctx context.Context, msgs ...*Message) error {
 	for _, w := range waiting {
 		spanCtx := trace.ContextWithSpan(ctx, w.span)
 		err := p.aborted(callerCtx, awaitConfirm(spanCtx, pinned, w.conf), ErrNotConfirmed)
-		p.tel.endPublish(spanCtx, w.span, w.msg, err)
+		p.tel.endPublish(spanCtx, w.span, w.msg, true, err)
 
 		if firstErr == nil {
 			firstErr = err
@@ -190,43 +198,64 @@ func (p *Publisher) aborted(callerCtx context.Context, err, abortErr error) erro
 	return err
 }
 
-// send publishes msg on pinned or, without one, on the confirm channel — a
-// new one if the current one closed before the message was sent.
+// send publishes msg on pinned or, without one, on the confirm channel. It
+// opens a new channel only when the current one was closed before the
+// message was sent (amqp.ErrClosed): a failed write may have reached the
+// broker, so it is not retried but reported as ErrNotConfirmed. attempted
+// reports whether the message was handed to a channel.
 func (p *Publisher) send(
 	ctx context.Context, msg *Message, headers amqp.Table, pinned *confirmChannel,
-) (*confirmChannel, confirmation, error) {
+) (*confirmChannel, confirmation, bool, error) {
 	pub := msg.publishing(headers)
+	dest := destination(msg.Exchange)
+
+	// amqp091 would fail on it too, but with an error that a failed write
+	// cannot be told apart from.
+	if err := headers.Validate(); err != nil {
+		return nil, nil, false, fmt.Errorf("%w: headers of a message to %q: %w", ErrInvalidConfig, dest, err)
+	}
 
 	for {
 		ch := pinned
 		if ch == nil {
 			var err error
 			if ch, err = p.channel(ctx); err != nil {
-				return nil, nil, err
+				return nil, nil, false, err
 			}
 		}
 
 		conf, err := ch.publish(ctx, msg.Exchange, msg.RoutingKey, pub)
 		if err == nil {
-			return ch, conf, nil
+			return ch, conf, true, nil
 		}
 
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, nil, fmt.Errorf("rabbitmq: publish: %w", ctxErr)
+		if again, attempted, failure := p.sendFailed(ctx, ch, pinned != nil, dest, err); !again {
+			return nil, nil, attempted, failure
 		}
+	}
+}
 
-		closed := errors.Is(err, amqp.ErrClosed) || ch.isClosed()
-
-		switch {
-		case closed && pinned != nil:
-			return nil, nil, fmt.Errorf("rabbitmq: publish to %q: channel closed: %w",
-				destination(msg.Exchange), ch.closeErr())
-		case !closed:
-			return nil, nil, fmt.Errorf("rabbitmq: publish to %q: %w", destination(msg.Exchange), err)
-		}
-
-		// The channel closed before the message was sent: not delivered.
+// sendFailed classifies the error of a send on ch: again when the message
+// was not sent and may go on a new channel; otherwise attempted (the message
+// was handed to the channel) and the error to return.
+func (p *Publisher) sendFailed(
+	ctx context.Context, ch *confirmChannel, pinned bool, dest string, err error,
+) (bool, bool, error) {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Checked before the write: not sent.
+		return false, false, fmt.Errorf("rabbitmq: publish: %w", err)
+	case errors.Is(err, amqp.ErrClosed) && pinned:
+		// Not sent, and the batch must not move to another channel.
+		return false, true, fmt.Errorf("rabbitmq: publish to %q: channel closed: %w", dest, ch.closeErr(ctx))
+	case errors.Is(err, amqp.ErrClosed):
+		// Closed before the message was sent: not delivered, send again.
 		p.drop(ch)
+
+		return true, false, nil
+	default:
+		// The write failed: it may have reached the broker. Not retried.
+		return false, true, fmt.Errorf("rabbitmq: publish to %q: %w", dest, errors.Join(ErrNotConfirmed, err))
 	}
 }
 
@@ -353,7 +382,7 @@ func awaitConfirm(ctx context.Context, ch *confirmChannel, conf confirmation) er
 	case acked:
 		return nil
 	case ch.isClosed():
-		return ch.closeErr()
+		return ch.closeErr(ctx)
 	default:
 		return ErrNacked
 	}
@@ -378,14 +407,24 @@ func newConfirmChannel(ch amqpChannel) *confirmChannel {
 	}
 }
 
+// closeReasonWait bounds the wait for the reason of a channel that is
+// closing: amqp091 marks a channel closed before it hands the reason to the
+// close listeners (and releases the confirms after that).
+const closeReasonWait = time.Second
+
 // closeErr returns ErrNotConfirmed, joined with the broker's reason for
-// closing the channel if it gave one. amqp091 hands the reason to the close
-// listeners before it releases the confirms, so it is known by then.
-func (c *confirmChannel) closeErr() error {
+// closing the channel if it gave one. Call it once the channel is closed;
+// it waits for the reason until ctx is done, at most closeReasonWait. The
+// wait is under mu, so that one caller takes the reason and the others see
+// it.
+func (c *confirmChannel) closeErr(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if !c.known {
+		timer := time.NewTimer(closeReasonWait)
+		defer timer.Stop()
+
 		select {
 		case reason, ok := <-c.closes:
 			c.known = true
@@ -393,7 +432,8 @@ func (c *confirmChannel) closeErr() error {
 			if ok {
 				c.reason = reason
 			}
-		default:
+		case <-ctx.Done():
+		case <-timer.C:
 		}
 	}
 

@@ -49,12 +49,21 @@ consumer, err := rabbitmq.NewConsumer(consumeConn, rabbitmq.ConsumerConfig{
     Queue:       "billing.orders",
     Concurrency: 4,
     Topology: rabbitmq.Topology{
-        Exchanges: []rabbitmq.Exchange{{Name: "orders", Kind: rabbitmq.ExchangeTopic, Durable: true}},
-        Queues: []rabbitmq.Queue{{Name: "billing.orders", Durable: true, Args: map[string]any{
-            "x-queue-type":           "quorum",
-            "x-dead-letter-exchange": "orders.dlx",
-        }}},
-        Bindings: []rabbitmq.Binding{{Queue: "billing.orders", Exchange: "orders", RoutingKey: "order.created"}},
+        Exchanges: []rabbitmq.Exchange{
+            {Name: "orders", Kind: rabbitmq.ExchangeTopic, Durable: true},
+            {Name: "orders.dlx", Kind: rabbitmq.ExchangeFanout, Durable: true}, // dead letters
+        },
+        Queues: []rabbitmq.Queue{
+            {Name: "billing.orders", Durable: true, Args: map[string]any{
+                "x-queue-type":           "quorum",
+                "x-dead-letter-exchange": "orders.dlx", // without it, a rejected message is dropped
+            }},
+            {Name: "billing.orders.dead", Durable: true},
+        },
+        Bindings: []rabbitmq.Binding{
+            {Queue: "billing.orders", Exchange: "orders", RoutingKey: "order.created"},
+            {Queue: "billing.orders.dead", Exchange: "orders.dlx"},
+        },
     },
 }, rabbitmq.JSON(func(ctx context.Context, o Order, _ *rabbitmq.Message) error {
     return billing.Charge(ctx, o) // idempotent: delivery is at least once

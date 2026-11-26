@@ -112,17 +112,18 @@ func (r realChannel) qos(prefetchCount int) error {
 
 func (r realChannel) exchangeDeclare(ex Exchange) error {
 	//nolint:wrapcheck // wrapped by the caller
-	return r.ch.ExchangeDeclare(ex.Name, ex.Kind, ex.Durable, ex.AutoDelete, ex.Internal, false, ex.Args)
+	return r.ch.ExchangeDeclare(ex.Name, ex.Kind, ex.Durable, ex.AutoDelete, ex.Internal, false, toTable(ex.Args, 0))
 }
 
 func (r realChannel) queueDeclare(q Queue) error {
-	_, err := r.ch.QueueDeclare(q.Name, q.Durable, q.AutoDelete, q.Exclusive, false, q.Args)
+	_, err := r.ch.QueueDeclare(q.Name, q.Durable, q.AutoDelete, q.Exclusive, false, toTable(q.Args, 0))
 
 	return err //nolint:wrapcheck // wrapped by the caller
 }
 
-func (r realChannel) queueBind(b Binding) error {
-	return r.ch.QueueBind(b.Queue, b.RoutingKey, b.Exchange, false, b.Args) //nolint:wrapcheck // wrapped by the caller
+func (r realChannel) queueBind(bind Binding) error {
+	//nolint:wrapcheck // wrapped by the caller
+	return r.ch.QueueBind(bind.Queue, bind.RoutingKey, bind.Exchange, false, toTable(bind.Args, 0))
 }
 
 func (r realChannel) consume(queue, tag string, exclusive bool, args amqp.Table) (<-chan amqp.Delivery, error) {

@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -20,6 +21,9 @@ import (
 	"github.com/eidon-go/core/retry"
 )
 
+// maxPrefetch is the largest prefetch count basic.qos carries.
+const maxPrefetch = 65535
+
 // ConsumerConfig describes what a Consumer consumes.
 type ConsumerConfig struct {
 	// Queue to consume from. Required.
@@ -36,7 +40,8 @@ type ConsumerConfig struct {
 
 	// Prefetch is the number of messages the broker delivers ahead of the
 	// acks (basic.qos). Default: Concurrency. A larger value hides network
-	// latency; on stop the prefetched messages are requeued.
+	// latency; on stop the prefetched messages are requeued. At most 65535
+	// (an AMQP short), the default included.
 	Prefetch int `json:"prefetch" yaml:"prefetch"`
 
 	// Exclusive asks to be the queue's only consumer.
@@ -65,6 +70,13 @@ func (c ConsumerConfig) Validate() error {
 
 	if c.Prefetch < 0 {
 		errs = append(errs, fmt.Errorf("%w: prefetch must not be negative", ErrInvalidConfig))
+	}
+
+	// basic.qos carries the prefetch as a 16-bit count: a larger one fails
+	// on every subscription, so reject it here, the default included.
+	if prefetch := cmp.Or(c.Prefetch, c.Concurrency); prefetch > maxPrefetch {
+		errs = append(errs, fmt.Errorf("%w: prefetch %d (or concurrency, its default) is above %d",
+			ErrInvalidConfig, prefetch, maxPrefetch))
 	}
 
 	if err := c.Topology.Validate(); err != nil {
@@ -283,7 +295,7 @@ func (c *Consumer) subscribe(ch amqpChannel, tag string) (<-chan amqp.Delivery, 
 		return nil, fmt.Errorf("rabbitmq: set prefetch: %w", err)
 	}
 
-	deliveries, err := ch.consume(c.cfg.Queue, tag, c.cfg.Exclusive, c.cfg.Args)
+	deliveries, err := ch.consume(c.cfg.Queue, tag, c.cfg.Exclusive, toTable(c.cfg.Args, 0))
 	if err != nil {
 		return nil, fmt.Errorf("rabbitmq: consume %q: %w", c.cfg.Queue, err)
 	}
