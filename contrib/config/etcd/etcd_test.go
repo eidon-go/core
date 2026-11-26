@@ -10,8 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eidon-go/core/contrib/config/etcd"
 )
@@ -226,24 +230,51 @@ func TestNew_UnreachableGetHonorsContext(t *testing.T) {
 func TestNew_TracesCalls(t *testing.T) {
 	t.Parallel()
 
-	recorder := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	tests := []struct {
+		name string
+		opts func(tp trace.TracerProvider) []etcd.Option
+	}{
+		{"WithTracerProvider", func(tp trace.TracerProvider) []etcd.Option {
+			return []etcd.Option{etcd.WithTracerProvider(tp)}
+		}},
+		{"WithTelemetry", func(tp trace.TracerProvider) []etcd.Option {
+			return []etcd.Option{etcd.WithTelemetry(nil), etcd.WithTelemetry(telemetry{tp: tp})}
+		}},
+	}
 
-	kv, err := etcd.New(etcd.Config{Endpoints: []string{"127.0.0.1:1"}}, etcd.WithTracerProvider(tp))
-	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, kv.Close()) })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
+			recorder := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 
-	_, err = kv.Get(ctx, "/k")
-	require.Error(t, err)
+			kv, err := etcd.New(etcd.Config{Endpoints: []string{"127.0.0.1:1"}}, tt.opts(tp)...)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, kv.Close()) })
 
-	spans := recorder.Ended()
-	require.NotEmpty(t, spans)
-	assert.Equal(t, "etcdserverpb.KV/Range", spans[0].Name())
-	assert.Equal(t, codes.Error, spans[0].Status().Code)
+			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer cancel()
+
+			_, err = kv.Get(ctx, "/k")
+			require.Error(t, err)
+
+			spans := recorder.Ended()
+			require.NotEmpty(t, spans)
+			assert.Equal(t, "etcdserverpb.KV/Range", spans[0].Name())
+			assert.Equal(t, codes.Error, spans[0].Status().Code)
+		})
+	}
 }
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{ tp trace.TracerProvider }
+
+func (t telemetry) TracerProvider() trace.TracerProvider { return t.tp }
+
+func (telemetry) MeterProvider() metric.MeterProvider { return noop.NewMeterProvider() }
+
+func (telemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }
 
 func TestNewFromClient(t *testing.T) {
 	t.Parallel()

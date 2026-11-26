@@ -247,8 +247,13 @@ func TestClient_WithTelemetry(t *testing.T) {
 
 	rec := tracetest.NewSpanRecorder()
 
-	c, err := client.New(client.Config{},
-		client.WithTelemetry(telemetry{tp: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))}))
+	c, err := client.New(
+		client.Config{},
+		client.WithTelemetry(
+			nil,
+		),
+		client.WithTelemetry(telemetry{tp: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))}),
+	)
 	require.NoError(t, err)
 
 	assert.Equal(t, http.StatusNoContent, get(t, c, srv.URL).status)

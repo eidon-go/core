@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -502,7 +504,8 @@ func TestConsumer_ProcessSpan(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 	tracing := []kafka.Option{kafka.WithTracerProvider(tp), kafka.WithPropagators(propagation.TraceContext{})}
 
-	p := newProducer(t, brokers, tracing...)
+	// The producer gets its providers from WithTelemetry, the consumer one by one.
+	p := newProducer(t, brokers, kafka.WithTelemetry(nil), kafka.WithTelemetry(telemetry{tp: tp}))
 
 	ctx, parent := tp.Tracer("test").Start(t.Context(), "request")
 	require.NoError(t, p.Produce(ctx, testTopic, nil, []byte("a")))
@@ -534,3 +537,12 @@ func TestConsumer_ProcessSpan(t *testing.T) {
 	assert.Contains(t, names, testTopic+" publish")
 	assert.Contains(t, names, testTopic+" process")
 }
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{ tp trace.TracerProvider }
+
+func (t telemetry) TracerProvider() trace.TracerProvider { return t.tp }
+
+func (telemetry) MeterProvider() metric.MeterProvider { return noop.NewMeterProvider() }
+
+func (telemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }

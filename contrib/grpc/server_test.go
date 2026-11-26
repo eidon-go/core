@@ -14,15 +14,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -652,6 +655,35 @@ func TestServer_Tracing(t *testing.T) {
 	ended := rec.Ended()
 	require.Len(t, ended, 1, "health RPCs are not traced")
 	assert.Equal(t, "test.Test/Wait", ended[0].Name())
+}
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{ tp trace.TracerProvider }
+
+func (t telemetry) TracerProvider() trace.TracerProvider { return t.tp }
+
+func (telemetry) MeterProvider() metric.MeterProvider { return metricnoop.NewMeterProvider() }
+
+func (telemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }
+
+// With WithTelemetry alone, the server continues the trace of the call.
+func TestServer_WithTelemetry(t *testing.T) {
+	t.Parallel()
+
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+
+	srv, ts := newServer(t, grpcsrv.WithTelemetry(nil), grpcsrv.WithTelemetry(telemetry{tp: tp}))
+	serve(t.Context(), t, srv)
+	close(ts.release)
+
+	ctx := metadata.AppendToOutgoingContext(t.Context(), "traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+	require.NoError(t, invoke(ctx, dial(t, srv)))
+
+	require.Eventually(t, func() bool { return len(rec.Ended()) == 1 }, testTimeout, time.Millisecond)
+	assert.Equal(t, traceID, rec.Ended()[0].SpanContext().TraceID().String(), "the incoming trace context is kept")
 }
 
 func TestServer_WithApp(t *testing.T) {

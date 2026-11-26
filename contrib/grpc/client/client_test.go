@@ -297,7 +297,7 @@ func TestConn_TracePropagationWithTelemetry(t *testing.T) {
 	serverSpans := tracetest.NewSpanRecorder()
 
 	srv, _ := startServer(t, grpcsrv.WithTelemetry(telemetry{spans: serverSpans}))
-	conn := newConn(t, plaintext(srv), client.WithTelemetry(telemetry{spans: clientSpans}))
+	conn := newConn(t, plaintext(srv), client.WithTelemetry(nil), client.WithTelemetry(telemetry{spans: clientSpans}))
 
 	require.NoError(t, echo(t.Context(), conn, nil))
 	require.Eventually(t, func() bool {

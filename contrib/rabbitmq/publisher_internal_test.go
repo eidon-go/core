@@ -8,9 +8,12 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/lifecycle/lifecycletest"
@@ -37,14 +40,23 @@ func TestPublisher_Lifecycle(t *testing.T) {
 	})
 }
 
+// testTelemetry stands in for the Provider of the otel module.
+type testTelemetry struct{ tp trace.TracerProvider }
+
+func (t testTelemetry) TracerProvider() trace.TracerProvider { return t.tp }
+
+func (testTelemetry) MeterProvider() metric.MeterProvider { return noop.NewMeterProvider() }
+
+func (testTelemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }
+
 func TestPublisher_Publish(t *testing.T) {
 	t.Parallel()
 
 	broker := newFakeBroker()
 	recorder := tracetest.NewSpanRecorder()
 	pub := newTestPublisher(t, newTestConnection(t, broker, true),
-		WithTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))),
-		WithPropagators(propagation.TraceContext{}))
+		WithTelemetry(nil),
+		WithTelemetry(testTelemetry{tp: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))}))
 
 	headers := map[string]any{"tenant": "acme"}
 	first, err := JSONMessage("orders", "order.created", map[string]int{"id": 1})
