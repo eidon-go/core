@@ -159,3 +159,112 @@ func TestReleaser_PanicsOnNilRelease(t *testing.T) {
 	assert.Panics(t, func() { lifecycle.CloseOnce(nil) })
 	assert.Panics(t, func() { lifecycle.ShutdownOnce(nil) })
 }
+
+func TestReleaser_ContextIsCancelledBeforeRelease(t *testing.T) {
+	t.Parallel()
+
+	var r *lifecycle.Releaser
+
+	var causeInRelease error
+
+	r = lifecycle.ShutdownOnce(func(context.Context) error {
+		causeInRelease = context.Cause(r.Context()) //nolint:contextcheck // the close signal under test
+
+		return nil
+	})
+
+	require.NoError(t, r.Context().Err())
+	assert.False(t, r.Closing())
+
+	require.NoError(t, r.Shutdown(t.Context()))
+
+	require.ErrorIs(t, causeInRelease, lifecycle.ErrClosed)
+	assert.True(t, r.Closing())
+}
+
+func TestReleaser_Do(t *testing.T) {
+	t.Parallel()
+
+	errConnect := errors.New("connection refused")
+
+	tests := []struct {
+		name string
+		fn   func(ctx context.Context) error
+		want error
+	}{
+		{name: "success", fn: func(context.Context) error { return nil }, want: nil},
+		{name: "failure", fn: func(context.Context) error { return errConnect }, want: errConnect},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := lifecycle.CloseOnce(func() error { return nil })
+
+			err := r.Do(t.Context(), tt.fn)
+			if tt.want == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestReleaser_DoAfterShutdown(t *testing.T) {
+	t.Parallel()
+
+	r := lifecycle.CloseOnce(func() error { return nil })
+	require.NoError(t, r.Shutdown(t.Context()))
+
+	called := false
+	err := r.Do(t.Context(), func(context.Context) error {
+		called = true
+
+		return nil
+	})
+
+	require.ErrorIs(t, err, lifecycle.ErrClosed)
+	assert.False(t, called)
+}
+
+func TestReleaser_ShutdownEndsDo(t *testing.T) {
+	t.Parallel()
+
+	r := lifecycle.CloseOnce(func() error { return nil })
+	started := make(chan struct{})
+	result := make(chan error, 1)
+
+	var cause error
+
+	go func() {
+		result <- r.Do(t.Context(), func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			cause = context.Cause(ctx)
+
+			return ctx.Err()
+		})
+	}()
+
+	<-started
+	require.NoError(t, r.Shutdown(t.Context()))
+
+	require.ErrorIs(t, <-result, lifecycle.ErrClosed)
+	assert.ErrorIs(t, cause, lifecycle.ErrClosed)
+}
+
+func TestReleaser_DoKeepsCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	r := lifecycle.CloseOnce(func() error { return nil })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := r.Do(ctx, func(ctx context.Context) error { return ctx.Err() })
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, lifecycle.ErrClosed)
+}

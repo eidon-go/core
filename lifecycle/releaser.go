@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 )
 
 // Releaser releases a resource once and implements Shutdown for it, so that a
@@ -29,16 +28,27 @@ import (
 // later ones return nil once the release has finished, as Resource requires.
 // A panic in the release is recovered and returned as its error.
 //
+// A component that connects in Start runs the connect through Do, so that a
+// Shutdown during Start ends it at once:
+//
+//	func (c *Client) Start(ctx context.Context) error {
+//	    return c.releaser.Do(ctx, func(ctx context.Context) error {
+//	        return c.connectPolicy.Do(ctx, c.pool.Ping)
+//	    })
+//	}
+//
 // A Releaser is created by ShutdownOnce or CloseOnce; the zero value is not
 // usable.
 type Releaser struct {
 	release    func(ctx context.Context) error
 	background bool // release ignores ctx: run it in its own goroutine
 
-	once    sync.Once
-	closing atomic.Bool
-	done    chan struct{} // closed when the release has returned
-	err     error         // set before done is closed
+	closing       context.Context //nolint:containedctx // the close signal, see Context
+	cancelClosing context.CancelCauseFunc
+
+	once sync.Once
+	done chan struct{} // closed when the release has returned
+	err  error         // set before done is closed
 }
 
 // ShutdownOnce returns a Releaser for a release function that honors ctx,
@@ -49,7 +59,7 @@ func ShutdownOnce(release func(ctx context.Context) error) *Releaser {
 		panic("lifecycle: ShutdownOnce: nil release")
 	}
 
-	return &Releaser{release: release, done: make(chan struct{})} //nolint:exhaustruct_v5 // state starts at zero
+	return newReleaser(release, false)
 }
 
 // CloseOnce returns a Releaser for a blocking Close without ctx (database
@@ -61,10 +71,18 @@ func CloseOnce(closeFn func() error) *Releaser {
 		panic("lifecycle: CloseOnce: nil close")
 	}
 
+	return newReleaser(func(context.Context) error { return closeFn() }, true)
+}
+
+func newReleaser(release func(ctx context.Context) error, background bool) *Releaser {
+	closing, cancel := context.WithCancelCause(context.Background())
+
 	return &Releaser{ //nolint:exhaustruct_v5 // state starts at zero
-		release:    func(context.Context) error { return closeFn() },
-		background: true,
-		done:       make(chan struct{}),
+		release:       release,
+		background:    background,
+		closing:       closing,
+		cancelClosing: cancel,
+		done:          make(chan struct{}),
 	}
 }
 
@@ -78,7 +96,7 @@ func (r *Releaser) Shutdown(ctx context.Context) error {
 	r.once.Do(func() {
 		first = true
 
-		r.closing.Store(true)
+		r.cancelClosing(ErrClosed)
 	})
 
 	switch {
@@ -108,7 +126,44 @@ func (r *Releaser) Shutdown(ctx context.Context) error {
 // Closing reports whether Shutdown has been called. It is advisory: a Start
 // or a method that checks it to refuse work races with a concurrent
 // Shutdown, so the work it lets through must still cope with the release.
-func (r *Releaser) Closing() bool { return r.closing.Load() }
+func (r *Releaser) Closing() bool { return r.closing.Err() != nil }
+
+// Context returns a context that the first Shutdown cancels, with the cause
+// ErrClosed, before the release starts. It is the stop signal of work the
+// component runs on its own, such as a reconnect loop; it carries no values
+// and no deadline.
+func (r *Releaser) Context() context.Context { return r.closing }
+
+// Do runs operation with a context derived from ctx that the first Shutdown cancels
+// (cause ErrClosed) before the release starts, so that a connect in Start ends
+// when the component is shut down. It returns ErrClosed without calling
+// operation once Shutdown has been called, ErrClosed if operation fails after
+// Shutdown was called, and operation's error otherwise. An operation that
+// succeeds is not undone: the caller that keeps what it made must still cope
+// with a concurrent release.
+func (r *Releaser) Do(ctx context.Context, operation func(ctx context.Context) error) error {
+	if r.Closing() {
+		return ErrClosed
+	}
+
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
+	stop := context.AfterFunc(r.closing, func() { //nolint:contextcheck // the close signal, not a parent context
+		cancel(ErrClosed)
+	})
+	defer stop()
+
+	if err := operation(ctx); err != nil {
+		if r.Closing() {
+			return ErrClosed
+		}
+
+		return err
+	}
+
+	return nil
+}
 
 // Done returns a channel that is closed when the release has finished.
 func (r *Releaser) Done() <-chan struct{} { return r.done }

@@ -88,7 +88,9 @@ The rules below are what the adapters implement; a hand-written component follow
   `WithName(string)` distinguishes instances (two databases).
 - `Start(ctx)`: connect/listen/ping, typically through `retry.Policy` (see 5). On failure,
   return the error: `app.App` then calls `Shutdown` on every component — this one included, and
-  those never started — so `Shutdown` releases whatever a partial `Start` acquired.
+  those never started — so `Shutdown` releases whatever a partial `Start` acquired. A `Start`
+  that retries runs them through `Releaser.Do`, so that a `Shutdown` during `Start` ends them
+  with `ErrClosed` (no `closing` context of the component's own).
 - `Run(ctx)` and `Shutdown(ctx)` are **one stop**: `app.App` cancels the ctx of `Run` first, then
   calls `Shutdown`. On cancellation `Run` stops taking new work at once and may drain the work in
   flight, without a deadline of its own; `Shutdown` starts the same stop if `Run` has not, bounds
