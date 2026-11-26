@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/retry"
 )
 
@@ -68,6 +69,7 @@ type options struct {
 	meterProvider    metric.MeterProvider
 	propagators      propagation.TextMapPropagator
 	redeliveryPolicy *retry.Policy
+	transientPolicy  *retry.Policy
 	stream           *jetstream.StreamConfig
 	consumerConfig   []func(*jetstream.ConsumerConfig)
 }
@@ -122,6 +124,14 @@ func (o *options) redelivery() retry.Policy {
 	}
 
 	return DefaultRedeliveryPolicy()
+}
+
+func (o *options) transient() retry.Policy {
+	if o.transientPolicy != nil {
+		return *o.transientPolicy
+	}
+
+	return consume.TransientPolicy()
 }
 
 // WithName sets the component name used in logs, errors and health reports
@@ -216,6 +226,17 @@ func WithTelemetry(telemetry Telemetry) Option {
 // Consumer.
 func WithRedeliveryPolicy(p retry.Policy) Option {
 	return func(o *options) { o.redeliveryPolicy = &p }
+}
+
+// WithTransientPolicy sets the waits after a handler error marked with
+// consume.Transient — a dependency that is down — before the same attempt is
+// made again, without counting it or asking the ErrorHandler (default
+// consume.TransientPolicy(): 1s doubling up to 30s, until the stop). Once
+// its MaxAttempts transient failures in a row are reached, the error counts
+// as a failed attempt; a zero Policy counts it at once. Subscriber and
+// Consumer.
+func WithTransientPolicy(p retry.Policy) Option {
+	return func(o *options) { o.transientPolicy = &p }
 }
 
 // WithStream makes the Consumer create the stream from cfg, or update it to

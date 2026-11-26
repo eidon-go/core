@@ -81,6 +81,7 @@ franz-go setting through `WithKgoOpts`.
 | `WithTelemetry` (all three from the `otel` module's `Provider` when it is not global) | all | — |
 | `WithKgoOpts(...kgo.Opt)` | all, applied last | — |
 | `WithRedeliveryPolicy(retry.Policy)` | consumer | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s |
+| `WithTransientPolicy(retry.Policy)` | consumer | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop |
 
 Options that change how the consumer consumes or commits (group and topic settings, commit and
 rebalance callbacks) passed through `WithKgoOpts` break its guarantees.
@@ -168,6 +169,15 @@ poison messages and recovering once the attempts are exhausted:
 - `StopOnFailure`: retry; stop once the attempts are exhausted or at once for an error marked
   with `retry.Permanent`. No message is ever skipped, but the service stops (see above): for
   topics where skipping a message is worse than an outage.
+
+**Transient errors.** An error of a dependency rather than of the message — a database that is
+down — is marked with `consume.Transient(err)` (package `github.com/eidon-go/core/consume`). The
+consumer then waits with the transient policy (`WithTransientPolicy`, default
+`consume.TransientPolicy()`: 1s doubling up to 30s, until the stop) and makes the same attempt
+again, without counting it or asking the `ErrorHandler`: an outage neither dead-letters every
+message nor stops the consumer. The partition waits meanwhile, and a wait past the poll's budget
+yields to a rebalance like a redelivery delay. Once the policy's `MaxAttempts` transient failures in
+a row are reached, the error counts as a failed attempt.
 
 Write your own `ErrorHandler` for anything else, e.g. skip validation errors and retry the rest
 forever with `WithRedeliveryPolicy(retry.Policy{MaxAttempts: retry.Forever, ...})`.

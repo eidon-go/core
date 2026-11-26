@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/contrib/nats"
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/lifecycle/lifecycletest"
@@ -648,6 +649,47 @@ func TestConsumerConfig_MaxProcessingTime(t *testing.T) {
 			assert.Equal(t, tt.want, nats.ProcessingLimit(cfg))
 		})
 	}
+}
+
+// A transient error of a dependency is waited out in place: the
+// ErrorHandler is not asked and the message is not delivered again.
+func TestConsumer_TransientErrorIsWaitedOut(t *testing.T) {
+	t.Parallel()
+
+	s := runServer(t)
+	s.createStream(t, "ORDERS", "orders.>")
+	conn := startConnection(t, s)
+
+	var calls, asked atomic.Int32
+
+	got := newReceived()
+	c := newConsumerOnError(
+		t,
+		conn,
+		ordersConsumer(),
+		nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
+			if calls.Add(1) <= 3 {
+				return consume.Transient(errors.New("db down"))
+			}
+
+			return got.Handle(ctx, msg)
+		}),
+		func(context.Context, *nats.Message, error) nats.ErrorAction {
+			asked.Add(1)
+
+			return nats.ErrorActionReject
+		},
+		nats.WithTransientPolicy(retry.Policy{MaxAttempts: retry.Forever, InitialDelay: time.Millisecond}),
+	)
+	runInBackground(t, c)
+	healthy(t, c)
+
+	publishJS(t, s, "orders.x", "x")
+
+	assert.Equal(t, uint64(1), got.next(t).Metadata.NumDelivered, "handled in the first delivery")
+	assert.EqualValues(t, 4, calls.Load())
+	assert.Zero(t, asked.Load())
+	settled(t, s, "ORDERS", "billing")
 }
 
 func TestConsumer_ShutdownDeadlineNaksInFlight(t *testing.T) {

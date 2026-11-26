@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/retry"
 )
@@ -47,15 +48,13 @@ var fetchErrorPolicy = retry.Policy{ //nolint:gochecknoglobals,exhaustruct_v5 //
 // committed only once it and every earlier message of its partition are
 // handled or skipped.
 type Consumer struct {
-	cfg          ConsumerConfig
-	handler      Handler
-	name         string
-	logger       *slog.Logger
-	connect      retry.Policy
-	redelivery   retry.Policy
-	errorHandler ErrorHandler
-	tracer       *kotel.Tracer
-	maxPoll      int
+	cfg     ConsumerConfig
+	name    string
+	logger  *slog.Logger
+	connect retry.Policy
+	proc    consume.Processor[record]
+	tracer  *kotel.Tracer
+	maxPoll int
 
 	// budget and resume belong to the loop's goroutine: the time one poll's
 	// records may take, and where a record cut off by it resumes.
@@ -98,17 +97,15 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, onError ErrorHandler, opts
 	o := newOptions(opts)
 	tracer := o.tracer(cfg.ClientID, cfg.Group)
 
-	c := &Consumer{ //nolint:exhaustruct_v5 // lazy, worker and releaser are set below
-		cfg:          cfg,
-		handler:      handler,
-		name:         o.name,
-		logger:       o.logger,
-		connect:      o.connectPolicy(),
-		redelivery:   o.redelivery(),
-		errorHandler: onError,
-		tracer:       tracer,
-		maxPoll:      maxPoll,
+	c := &Consumer{ //nolint:exhaustruct_v5 // proc, lazy, worker and releaser are set below
+		cfg:     cfg,
+		name:    o.name,
+		logger:  o.logger,
+		connect: o.connectPolicy(),
+		tracer:  tracer,
+		maxPoll: maxPoll,
 	}
+	c.proc = newProcessor(handler, onError, &o, c.observe)
 
 	kgoOpts := o.clientOpts(cfg.Config, tracer,
 		kgo.ConsumerGroup(cfg.Group),
@@ -377,51 +374,34 @@ func (c *Consumer) yield(ctx context.Context, client *kgo.Client, r *kgo.Record,
 }
 
 // handleRecord handles one record, with the attempts the ErrorHandler and
-// the redelivery policy allow, and marks it for commit once it is handled
-// or skipped. A stop during a redelivery delay leaves it unmarked; a delay
-// past the poll's deadline returns errYield, and the attempts go on when the
-// record comes again.
+// the redelivery policy allow (see consume.Processor), and marks it for
+// commit once it is handled or skipped. A stop during a wait leaves it
+// unmarked; a wait past the poll's deadline returns errYield, and the
+// attempts go on when the record comes again.
 func (c *Consumer) handleRecord(
 	stop, work context.Context, client *kgo.Client, r *kgo.Record, deadline time.Time,
 ) error {
-	msg := messageFromRecord(r)
+	res := c.proc.Process(stop, work, record{r: r, msg: messageFromRecord(r)}, consume.Delivery{
+		Attrs: []slog.Attr{
+			slog.String("topic", r.Topic), slog.Int("partition", int(r.Partition)), slog.Int64("offset", r.Offset),
+		},
+		Attempts: c.resumeAttempt(r),
+		Deadline: deadline,
+	})
 
-	for attempt := c.resumeAttempt(r) + 1; ; attempt++ {
-		err := c.handleOnce(work, r, msg)
-		if err == nil {
-			client.MarkCommitRecords(r)
+	switch res.Outcome {
+	case consume.Handled, consume.Rejected:
+		client.MarkCommitRecords(r)
+	case consume.Yielded:
+		c.resume = resumePoint{topic: r.Topic, partition: r.Partition, offset: r.Offset, attempt: res.Attempts}
 
-			return nil
-		}
-
-		exhausted := c.redelivery.MaxAttempts >= 0 && attempt >= max(c.redelivery.MaxAttempts, 1)
-		if exhausted {
-			err = errors.Join(ErrRetriesExhausted, err)
-		}
-
-		action := c.decide(work, msg, err)
-		c.logFailure(work, r, attempt, action, err)
-
-		switch {
-		case action == ErrorActionSkip:
-			client.MarkCommitRecords(r)
-
-			return nil
-		case action == ErrorActionRetry && !exhausted:
-			if again, waitErr := c.waitRedelivery(stop, work, r, attempt, err, deadline); !again {
-				return waitErr
-			}
-		default:
-			return fmt.Errorf("%w: %s[%d] offset %d: %w", ErrStopped, r.Topic, r.Partition, r.Offset, err)
-		}
+		return errYield
+	case consume.Abandoned: // the stop: unmarked, it comes again after the restart
+	case consume.Stopped, consume.Requeued: // kafka has no requeue
+		return fmt.Errorf("%w: %s[%d] offset %d: %w", ErrStopped, r.Topic, r.Partition, r.Offset, res.Err)
 	}
-}
 
-func (c *Consumer) logFailure(ctx context.Context, r *kgo.Record, attempt int, action ErrorAction, err error) {
-	c.logger.ErrorContext(ctx, "kafka message handling failed",
-		slog.String("topic", r.Topic), slog.Int("partition", int(r.Partition)),
-		slog.Int64("offset", r.Offset), slog.Int("attempt", attempt),
-		slog.String("action", action.String()), slog.Any("error", err))
+	return nil
 }
 
 // resumeAttempt returns the attempts r already had before a yield cut them
@@ -442,64 +422,18 @@ func (c *Consumer) resumeAttempt(r *kgo.Record) int {
 	return p.attempt
 }
 
-// waitRedelivery waits for the redelivery delay after r's failed attempt
-// and reports whether a new attempt may start. If not, the error is what
-// handleRecord returns: nil when the stop began first, errYield when the
-// delay would end past the poll's deadline — it is not waited then, and r's
-// attempts are kept for when it comes again.
-func (c *Consumer) waitRedelivery(
-	stop, work context.Context, r *kgo.Record, attempt int, err error, deadline time.Time,
-) (bool, error) {
-	delay := c.redelivery.Delay(attempt)
-	if time.Until(deadline) < delay {
-		c.resume = resumePoint{topic: r.Topic, partition: r.Partition, offset: r.Offset, attempt: attempt}
-
-		return false, errYield
-	}
-
-	if c.redelivery.OnRetry != nil {
-		c.redelivery.OnRetry(work, retry.Attempt{Number: attempt, Err: err, Delay: delay})
-	}
-
-	// The stop may have begun just as the delay ended: no new attempt then.
-	return sleep(stop, delay) && stop.Err() == nil, nil
-}
-
-// handleOnce calls the handler in the record's process span; a panic is an
-// error.
-func (c *Consumer) handleOnce(work context.Context, r *kgo.Record, msg *Message) (err error) {
-	_, span := c.tracer.WithProcessSpan(r)
+// observe runs one attempt in the record's process span.
+func (c *Consumer) observe(work context.Context, rec record, call func(context.Context) error) error {
+	_, span := c.tracer.WithProcessSpan(rec.r)
 	defer span.End()
 
-	defer func() {
-		if p := recover(); p != nil {
-			err = fmt.Errorf("kafka: handler panicked: %v", p) //nolint:err113 // carries the panic value
-		}
+	err := call(trace.ContextWithSpan(work, span))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-	}()
-
-	return c.handler.Handle(trace.ContextWithSpan(work, span), msg) //nolint:wrapcheck // goes to the ErrorHandler as is
-}
-
-// decide asks the ErrorHandler; a panic in it stops the consumer.
-func (c *Consumer) decide(ctx context.Context, msg *Message, err error) ErrorAction {
-	action := ErrorActionStop
-
-	func() {
-		defer func() {
-			if p := recover(); p != nil {
-				c.logger.ErrorContext(ctx, "kafka error handler panicked", slog.Any("panic", p))
-			}
-		}()
-
-		action = c.errorHandler(ctx, msg, err)
-	}()
-
-	return action
+	return err
 }
 
 // commit commits the handled messages with the work context; a failure is

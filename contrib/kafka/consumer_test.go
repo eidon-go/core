@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/contrib/kafka"
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/lifecycle/lifecycletest"
@@ -634,6 +636,75 @@ func TestConsumer_PollBudgetKeepsAttempts(t *testing.T) {
 	require.ErrorIs(t, err, kafka.ErrStopped)
 	require.ErrorIs(t, err, kafka.ErrRetriesExhausted)
 	assert.Equal(t, 2, rec.callsOf("bad"), "the second attempt came after the yield")
+}
+
+// countingOnError skips and counts the messages it is asked about.
+func countingOnError(asked *atomic.Int32) kafka.ErrorHandler {
+	return func(context.Context, *kafka.Message, error) kafka.ErrorAction {
+		asked.Add(1)
+
+		return kafka.ErrorActionSkip
+	}
+}
+
+// A transient error of a dependency is waited out: the ErrorHandler is not
+// asked and the message is handled once the dependency is back.
+func TestConsumer_TransientErrorIsWaitedOut(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	produce(t, brokers, testTopic, "a")
+
+	rec := newRecorder()
+	rec.handle = func(_ context.Context, _ *kafka.Message, call int) error {
+		if call <= 3 {
+			return consume.Transient(errors.New("db down"))
+		}
+
+		return nil
+	}
+
+	var asked atomic.Int32
+
+	_, stop := startConsumerOnError(t, consumerConfig(brokers), rec, countingOnError(&asked),
+		kafka.WithTransientPolicy(retry.Policy{MaxAttempts: retry.Forever, InitialDelay: time.Millisecond}))
+	rec.waitSeen(t, "a")
+	require.NoError(t, stop())
+
+	assert.Equal(t, 4, rec.callsOf("a"))
+	assert.Zero(t, asked.Load(), "a transient error is not the message's fault")
+}
+
+// A transient wait past the poll's budget yields to a rebalance like a
+// redelivery delay does; the record is handled once the dependency is back.
+func TestConsumer_TransientWaitYields(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	produce(t, brokers, testTopic, "a")
+
+	rec := newRecorder()
+	rec.handle = func(_ context.Context, _ *kafka.Message, call int) error {
+		if call <= 2 {
+			return consume.Transient(errors.New("db down"))
+		}
+
+		return nil
+	}
+
+	var asked atomic.Int32
+
+	logs := &logRecorder{}
+	_, stop := startConsumerOnError(t, consumerConfig(brokers), rec, countingOnError(&asked),
+		kafka.WithKgoOpts(kgo.RebalanceTimeout(400*time.Millisecond)),
+		kafka.WithLogger(slog.New(logs)),
+		kafka.WithTransientPolicy(retry.Policy{MaxAttempts: retry.Forever, InitialDelay: time.Second}))
+	rec.waitSeen(t, "a")
+	require.NoError(t, stop())
+
+	assert.Equal(t, 3, rec.callsOf("a"))
+	assert.Zero(t, asked.Load())
+	assert.Positive(t, logs.count("kafka poll ran out of its budget, the rest is fetched again"))
 }
 
 // logRecorder is a slog.Handler that keeps the messages logged.
