@@ -16,8 +16,12 @@
 // variable set to "" and a null value (`key:` in yaml) count as not set, so
 // a lower-priority source is used instead.
 //
-// Values are read with the generic functions Get, GetOrDefault, Live and
-// LiveOrDefault; required keys are collected with a Reader and Required.
+// Values are read with the generic functions Get, GetOrDefault, Lookup, Live
+// and LiveOrDefault; required keys are collected with a Reader and Required.
+// Config.Sub returns a view of the keys under a prefix, Config.Keys lists the
+// names below one (the entries of a map), and Config.Items reads a list of
+// objects. A map key that itself contains a dot cannot be told from nesting
+// once flattened; keep such names (host names) in a list of objects.
 //
 // # Remote configuration
 //
@@ -29,6 +33,9 @@
 //	cfg, err := config.New(ctx, config.WithKV(kv), config.WithWatchedKeys("/svc/flags.yaml"))
 //	...
 //	a.Add(cfg)
+//
+// Config.OnChange calls a function after an update has changed the keys under
+// a prefix, to rebuild what was built from earlier values.
 //
 // Config implements lifecycle.Runner (Run, Shutdown) and lifecycle.Namer.
 // Reads are safe for concurrent use with updates: every update publishes a
@@ -70,6 +77,7 @@ type Config struct {
 	logger *slog.Logger
 	kv     KV
 	watch  *watcher
+	prefix string // set on a Sub view: prepended to every key read
 
 	worker   *lifecycle.Worker   // runs the watcher
 	loopDone chan struct{}       // closed when the watcher loop has returned
@@ -121,7 +129,7 @@ func load(ctx context.Context, o *options) (*Config, error) {
 		return cfg, nil
 	}
 
-	watch, err := loadWatched(ctx, o, base, cfg.store.setSnapshot)
+	watch, err := loadWatched(ctx, o, base, cfg.store.publish)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +165,12 @@ func loadWatched(ctx context.Context, o *options, base map[string]any, publish f
 
 	for _, key := range o.watchedKeys {
 		parsed, err := loadKey(ctx, o.kv, o.parsers, o.kvTimeout, key)
-		if err != nil {
+
+		switch {
+		case err == nil:
+		case o.optionalWatched[key] && errors.Is(err, ErrKVKeyNotFound):
+			parsed = map[string]any{} // the watch picks the key up once it is created
+		default:
 			return nil, err
 		}
 
@@ -220,6 +233,7 @@ func newConfig(s *store, logger *slog.Logger) *Config {
 		logger:   logger,
 		loopDone: make(chan struct{}),
 	}
+	s.logger = logger
 	cfg.worker = lifecycle.NewWorker(lifecycle.WorkerFuncs{Run: cfg.watchLoop, Logger: nil})
 	cfg.releaser = lifecycle.CloseOnce(cfg.closeKV)
 
@@ -290,21 +304,46 @@ func (c *Config) watchLoop(stop, _ context.Context) error {
 }
 
 // Get returns the value of key as T, or the zero value of T when the key is
-// not set or its value cannot be converted to T. A nil cfg reads as empty.
+// not set or its value cannot be converted to T. A value of the wrong type is
+// logged once per key (see WithLogger); use Lookup or a Reader to get it as
+// an error. A nil cfg reads as empty.
 func Get[T ValueType](cfg *Config, key string) T {
-	v, _, _ := lookupAs[T](cfg, key)
+	v, raw, res := lookupAs[T](cfg, key)
+	if res == lookupMistyped {
+		warnMistyped(cfg, key, v, raw)
+	}
 
 	return v
 }
 
 // GetOrDefault returns the value of key as T, or def when the key is not set
-// or its value cannot be converted to T.
+// or its value cannot be converted to T. A value of the wrong type is logged
+// once per key, as in Get.
 func GetOrDefault[T ValueType](cfg *Config, key string, def T) T {
-	if v, _, res := lookupAs[T](cfg, key); res == lookupFound {
+	v, raw, res := lookupAs[T](cfg, key)
+
+	switch res {
+	case lookupFound:
 		return v
+	case lookupMistyped:
+		warnMistyped(cfg, key, v, raw)
+	case lookupMissing:
 	}
 
 	return def
+}
+
+// Lookup returns the value of key as T, or a *KeyError wrapping
+// ErrKeyMissing when the key is not set, or ErrKeyMistyped when its value
+// cannot be converted to T. Use it where a typo in a value must not pass
+// silently and no Reader is at hand.
+func Lookup[T ValueType](cfg *Config, key string) (T, error) {
+	v, raw, res := lookupAs[T](cfg, key)
+	if res == lookupFound {
+		return v, nil
+	}
+
+	return v, keyError(cfg, key, v, raw, res)
 }
 
 // Live returns a function that reads key on every call, for values that may
@@ -341,7 +380,7 @@ func lookupAs[T ValueType](cfg *Config, key string) (T, any, lookupResult) {
 		return zero, nil, lookupMissing
 	}
 
-	raw, ok := cfg.store.lookup(key)
+	raw, ok := cfg.store.lookup(viewKey(cfg.prefix, key))
 	if !ok {
 		return zero, nil, lookupMissing
 	}

@@ -73,8 +73,9 @@ value in a document, count as **not set**, so a lower-priority source is used.
 ## Reading values
 
 ```go
-config.Get[T](cfg, key) T                    // zero value when unset or mistyped
-config.GetOrDefault(cfg, key, def) T         // def when unset or mistyped
+config.Get[T](cfg, key) T                    // zero value when unset or mistyped (mistyped: logged once)
+config.GetOrDefault(cfg, key, def) T         // def when unset or mistyped (mistyped: logged once)
+config.Lookup[T](cfg, key) (T, error)        // *KeyError: ErrKeyMissing or ErrKeyMistyped
 config.Live[T](cfg, key) func() T            // re-reads on every call; reconfigures nothing by itself
 config.LiveOrDefault(cfg, key, def) func() T
 ```
@@ -90,6 +91,30 @@ rather than a wrong value:
   rejected;
 - `float64`: finite numbers only;
 - lists: lists and comma-separated strings, element by element.
+
+### Nested values, maps and lists of objects
+
+```go
+db := cfg.Sub("db")                          // a view: Get[string](db, "host") reads "db.host"
+for _, name := range cfg.Keys("tenants") {   // direct children, sorted: ["a", "b"]
+    limit := config.Get[int](cfg.Sub("tenants."+name), "limit")
+}
+routes, err := cfg.Items("routes")           // a list of objects: one *Config per element
+for _, route := range routes {
+    host := config.Get[string](route, "host")
+}
+```
+
+- A `Sub` view reads through every layer (the environment included: `DB_HOST`), follows hot
+  reload and can be passed to anything that takes a `*config.Config`. It is not a component:
+  register the root `cfg` with `app.App`.
+- `Keys` sees the files, KV documents and defaults, not the environment (a variable name cannot be
+  mapped back to a key).
+- `Items` copies each element: no environment layer, no defaults, no hot reload — read it again
+  in `OnChange`. A value that is not a list of objects is a `*KeyError` wrapping `ErrKeyMistyped`.
+- **Keys with dots.** A map key that contains a dot (`"api.example.com": {...}`) cannot be told
+  from nesting after flattening: it reads as `api` → `example` → `com`. Keep such names in values,
+  in a list of objects read with `Items` (`[{host: api.example.com, ...}]`).
 
 ### Building config structs
 
@@ -109,8 +134,8 @@ if err := r.Err(); err != nil {
 
 `Err` joins one `*config.KeyError{Key, Err}` per problem; match with
 `errors.Is(err, config.ErrKeyMissing)` / `config.ErrKeyMistyped` or `errors.As(err, &keyErr)`.
-Prefer `Optional` over `GetOrDefault` for typed settings: `GetOrDefault` silently falls back on a
-mistyped value.
+Prefer `Optional` over `GetOrDefault` for typed settings: `GetOrDefault` falls back on a mistyped
+value (it only logs it, once per key), `Optional` reports it.
 
 ## Remote configuration and hot reload
 
@@ -143,6 +168,25 @@ a.Add(cfg) // the watcher runs in cfg.Run
   (default 5s). `New` reads every key once: if the backend cannot answer in time, `New` fails.
   Watch errors are logged through `WithLogger`.
 - An environment variable overriding a key pins it: hot reload does not change it.
+- `WithOptionalWatchedKeys` adds watched keys that may not exist yet: `New` treats a missing one
+  as an empty document (as the watch treats a deleted key) instead of failing with
+  `ErrKVKeyNotFound`, and the watch picks it up once it is created.
+
+### Reacting to changes
+
+`Live` is a getter: it reconfigures nothing built from an earlier value. To rebuild something —
+a rate limiter, a pool — subscribe with `OnChange`:
+
+```go
+stop := cfg.OnChange("ratelimit", func() {   // "" for any key; relative to a Sub view
+    limiter.SetLimit(rate.Limit(config.Get[float64](cfg, "ratelimit.rps")))
+})
+defer stop()
+```
+
+The callback runs on the watcher's goroutine after the new values are visible, once per update
+that changed a key at or below the prefix, one update at a time and in order — keep it short. A
+panic in it is recovered and logged.
 
 ### Writing a KV backend
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -23,6 +24,14 @@ type store struct {
 	// with keys built at run time (tenants.<id>.limit) — a few dozen bytes per
 	// key, acceptable for config keys.
 	envNames sync.Map
+
+	// changes holds the OnChange listeners; notify calls them on publish.
+	changes changeHub
+	// logger reports mistyped values and panicking listeners.
+	logger *slog.Logger
+	// warned holds the keys whose mistyped value has been logged (string →
+	// struct{}), so that a Live read in a request path logs it once.
+	warned sync.Map
 }
 
 // newStore builds a store. A nil envLookup or envName disables the
@@ -36,23 +45,37 @@ func newStore(envLookup func(string) (string, bool), envName func(string) string
 		defaults = map[string]any{}
 	}
 
-	s := &store{ //nolint:exhaustruct_v5 // snapshot is set below, envNames starts empty
+	s := &store{ //nolint:exhaustruct_v5 // snapshot is set below; caches and listeners start empty
 		envLookup: envLookup,
 		envName:   envName,
 		defaults:  defaults,
+		logger:    slog.Default(),
 	}
 	s.setSnapshot(nil)
 
 	return s
 }
 
-// setSnapshot publishes m. The caller must not mutate m afterwards.
+// setSnapshot publishes m without notifying the OnChange listeners. The
+// caller must not mutate m afterwards.
 func (s *store) setSnapshot(m map[string]any) {
 	if m == nil {
 		m = map[string]any{}
 	}
 
 	s.snapshot.Store(&m)
+}
+
+// publish publishes m and then notifies the OnChange listeners of the keys it
+// changed. Calls must not overlap (the watcher serializes them). The caller
+// must not mutate m afterwards.
+func (s *store) publish(snapshot map[string]any) {
+	if snapshot == nil {
+		snapshot = map[string]any{}
+	}
+
+	old := s.snapshot.Swap(&snapshot)
+	s.notify(*old, snapshot)
 }
 
 // lookup resolves key in priority order: environment, snapshot, defaults.
