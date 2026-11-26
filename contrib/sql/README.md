@@ -40,8 +40,12 @@ if err != nil {
     return err
 }
 
-m := corepgx.NewManager(db) // or sql.NewManager over sql.New(...)
-orders := NewOrderRepo(m)   // repositories take sql.Transactor / a QuerierProvider
+m, err := corepgx.NewManager(db) // or sql.NewManager over sql.New(...)
+if err != nil {
+    return err
+}
+
+orders := NewOrderRepo(m) // repositories take sql.Transactor / a QuerierProvider
 
 a := app.New()
 a.Add(db)     // before the components that use the pool

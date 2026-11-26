@@ -260,7 +260,7 @@ func TestWithScanner(t *testing.T) {
 	t.Parallel()
 
 	db, mock := newMock(t, sql.WithScanner(stubScanner{n: 42}))
-	m := sql.NewManager(db)
+	m := newManager(t, db)
 
 	mock.ExpectQuery("SELECT 1").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 	mock.ExpectQuery("SELECT 1").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))

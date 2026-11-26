@@ -12,7 +12,8 @@ The package name clashes with `github.com/jackc/pgx/v5`; import it as `corepgx`:
 import corepgx "github.com/eidon-go/core/contrib/sql/pgx"
 
 db, err := corepgx.New(corepgx.Config{DSN: "postgres://app:secret@db:5432/app?sslmode=disable"})
-m := corepgx.NewManager(db)
+// …
+m, err := corepgx.NewManager(db)
 ```
 
 The pool is created in `Start` (pgxpool starts background goroutines, so `New` only builds its

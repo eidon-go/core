@@ -24,7 +24,11 @@ func Example() {
 	}
 
 	ctx := context.Background()
-	m := corepgx.NewManager(db)
+
+	m, err := corepgx.NewManager(db)
+	if err != nil {
+		panic(err)
+	}
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO orders (total) VALUES ($1) RETURNING id").WithArgs(250).

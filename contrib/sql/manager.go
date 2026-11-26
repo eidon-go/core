@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	stdsql "database/sql"
+	"fmt"
 
 	"github.com/eidon-go/core/contrib/sql/internal/txcore"
 )
@@ -130,10 +131,10 @@ func init() {
 
 // NewManager returns a Manager over db. Managers over the same DB share its
 // transactions; transactions of different DBs never mix, even in one ctx.
-// It panics if db is nil.
-func NewManager(db *DB, opts ...ManagerOption) Manager {
+// A nil db is an error wrapping ErrInvalidConfig.
+func NewManager(db *DB, opts ...ManagerOption) (Manager, error) {
 	if db == nil {
-		panic("sql: NewManager: nil *DB")
+		return nil, fmt.Errorf("sql: %w: nil *DB", ErrInvalidConfig)
 	}
 
 	o := txcore.ManagerOptions{DefaultMode: txcore.ModeJoin}
@@ -142,7 +143,7 @@ func NewManager(db *DB, opts ...ManagerOption) Manager {
 		txcore.ApplyManagerOption(opt, &o)
 	}
 
-	return &manager{db: db, defaultMode: o.DefaultMode}
+	return &manager{db: db, defaultMode: o.DefaultMode}, nil
 }
 
 type manager struct {

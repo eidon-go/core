@@ -81,6 +81,17 @@ func TestNewFromDBTX_TypedNil(t *testing.T) {
 	require.ErrorIs(t, err, sql.ErrInvalidConfig)
 }
 
+func TestNew_RejectsNonPositiveHealthCheckPeriod(t *testing.T) {
+	t.Parallel()
+
+	_, err := corepgx.New(corepgx.Config{DSN: "host=localhost pool_health_check_period=0s"})
+	require.ErrorIs(t, err, sql.ErrInvalidConfig)
+
+	_, err = corepgx.New(unreachable(), corepgx.WithPoolConfig(func(c *pgxpool.Config) { c.HealthCheckPeriod = 0 }))
+	require.ErrorIs(t, err, sql.ErrInvalidConfig)
+	require.ErrorContains(t, err, "health check period")
+}
+
 func TestNew_PoolConfig(t *testing.T) {
 	t.Parallel()
 
@@ -116,7 +127,7 @@ func TestNew_BeforeStart(t *testing.T) {
 	db, err := corepgx.New(unreachable())
 	require.NoError(t, err)
 
-	m := corepgx.NewManager(db)
+	m := newManager(t, db)
 
 	assert.Equal(t, corepgx.DefaultName, db.Name())
 	assert.Nil(t, db.Pool())
@@ -178,7 +189,14 @@ func TestNew_ShutdownEndsStart(t *testing.T) {
 
 	go func() { started <- db.Start(t.Context()) }()
 
-	<-retrying
+	select {
+	case <-retrying:
+	case err := <-started:
+		t.Fatalf("Start returned before its first retry: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not retry")
+	}
+
 	require.NoError(t, db.Shutdown(t.Context()))
 
 	select {

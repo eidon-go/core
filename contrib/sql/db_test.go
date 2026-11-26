@@ -74,7 +74,7 @@ func TestNew_Lifecycle(t *testing.T) {
 
 	mock.ExpectQuery("SELECT 1").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 
-	n, err := sql.Get[int](t.Context(), sql.NewManager(db).GetQuerier(t.Context()), sql.Raw("SELECT 1"))
+	n, err := sql.Get[int](t.Context(), newManager(t, db).GetQuerier(t.Context()), sql.Raw("SELECT 1"))
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 	assert.NotEmpty(t, spans.GetSpans(), "queries are traced")
@@ -143,7 +143,14 @@ func TestDB_ShutdownEndsStart(t *testing.T) {
 
 	go func() { started <- db.Start(t.Context()) }()
 
-	<-retrying
+	select {
+	case <-retrying:
+	case err := <-started:
+		t.Fatalf("Start returned before its first retry: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not retry")
+	}
+
 	require.NoError(t, db.Shutdown(t.Context()))
 
 	select {

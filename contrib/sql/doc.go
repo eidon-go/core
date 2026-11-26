@@ -10,7 +10,7 @@
 // Typical wiring:
 //
 //	db, err := sql.New(sql.Config{DriverName: "pgx", DataSource: dsn})
-//	m := sql.NewManager(db)
+//	m, err := sql.NewManager(db)
 //	a.Add(db) // app.App: before the components that use it
 //
 //	err = m.WithTx(ctx, func(ctx context.Context) error {

@@ -38,7 +38,10 @@ func Example() {
 		panic(err)
 	}
 
-	m := sql.NewManager(db) // repositories depend on sql.Transactor / sql.QuerierProvider
+	m, err := sql.NewManager(db) // repositories depend on sql.Transactor / sql.QuerierProvider
+	if err != nil {
+		panic(err)
+	}
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id, balance FROM accounts WHERE id = $1 FOR UPDATE").WithArgs(1).
@@ -47,7 +50,7 @@ func Example() {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	err := m.WithTx(ctx, func(ctx context.Context) error {
+	err = m.WithTx(ctx, func(ctx context.Context) error {
 		q := m.GetQuerier(ctx) // the transaction of ctx
 
 		acc, err := sql.Get[account](ctx, q,
@@ -76,16 +79,27 @@ func Example() {
 func ExampleTxModeNested() {
 	db, mock := newExampleDB()
 	ctx := context.Background()
-	m := sql.NewManager(db)
+
+	m, err := sql.NewManager(db)
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() {
+		mock.ExpectClose()
+
+		_ = db.Shutdown(ctx)
+	}()
 
 	mock.ExpectBegin()
 	mock.ExpectExec("SAVEPOINT sp_1").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("ROLLBACK TO SAVEPOINT sp_1").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("RELEASE SAVEPOINT sp_1").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
 	errOptional := errors.New("optional step failed")
 
-	err := m.WithTx(ctx, func(ctx context.Context) error {
+	err = m.WithTx(ctx, func(ctx context.Context) error {
 		err := m.WithTx(ctx, func(context.Context) error {
 			return errOptional // rolls back to the savepoint only
 		}, sql.WithTxMode(sql.TxModeNested))

@@ -11,7 +11,7 @@
 //	import corepgx "github.com/eidon-go/core/contrib/sql/pgx"
 //
 //	db, err := corepgx.New(corepgx.Config{DSN: dsn})
-//	m := corepgx.NewManager(db)
+//	m, err := corepgx.NewManager(db)
 //	a.Add(db) // app.App: before the components that use the pool
 //
 //	err = m.WithTx(ctx, func(ctx context.Context) error {

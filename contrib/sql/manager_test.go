@@ -28,7 +28,7 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := sql.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectExec("UPDATE t SET a = 1").WillReturnResult(result(1))
@@ -52,7 +52,7 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := sql.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectRollback()
@@ -66,7 +66,7 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := sql.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectCommit()
@@ -81,7 +81,7 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := sql.NewManager(db)
+		m := newManager(t, db)
 		ctx, cancel := context.WithCancel(t.Context())
 
 		mock.ExpectBegin()
@@ -109,12 +109,13 @@ func TestManager_Nested(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := sql.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectExec("SAVEPOINT sp_1").WillReturnResult(result(0))
 		mock.ExpectExec("INSERT INTO log VALUES (1)").WillReturnResult(result(1))
 		mock.ExpectExec("ROLLBACK TO SAVEPOINT sp_1").WillReturnResult(result(0))
+		mock.ExpectExec("RELEASE SAVEPOINT sp_1").WillReturnResult(result(0))
 		mock.ExpectCommit()
 
 		err := m.WithTx(t.Context(), func(ctx context.Context) error {
@@ -135,7 +136,7 @@ func TestManager_Nested(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := sql.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectRollback()
@@ -155,7 +156,7 @@ func TestManager_DefaultTxMode(t *testing.T) {
 	t.Parallel()
 
 	db, mock := newMock(t)
-	m := sql.NewManager(db, sql.WithDefaultTxMode(sql.TxModeForbid), sql.ManagerOption{})
+	m := newManager(t, db, sql.WithDefaultTxMode(sql.TxModeForbid), sql.ManagerOption{})
 
 	mock.ExpectBegin()
 	mock.ExpectCommit()
@@ -174,7 +175,7 @@ func TestManager_InvalidTxMode(t *testing.T) {
 
 	db, _ := newMock(t)
 
-	err := sql.NewManager(db).WithTx(t.Context(), func(context.Context) error { return nil }, sql.WithTxMode(42))
+	err := newManager(t, db).WithTx(t.Context(), func(context.Context) error { return nil }, sql.WithTxMode(42))
 
 	require.ErrorIs(t, err, sql.ErrInvalidTxMode)
 }
@@ -183,7 +184,7 @@ func TestManager_OnCommit(t *testing.T) {
 	t.Parallel()
 
 	db, mock := newMock(t)
-	m := sql.NewManager(db)
+	m := newManager(t, db)
 
 	mock.ExpectBegin()
 	mock.ExpectCommit()
@@ -207,7 +208,7 @@ func TestManager_SharedPerDB(t *testing.T) {
 
 	db1, mock1 := newMock(t)
 	db2, mock2 := newMock(t)
-	m1, m1b, m2 := sql.NewManager(db1), sql.NewManager(db1), sql.NewManager(db2)
+	m1, m1b, m2 := newManager(t, db1), newManager(t, db1), newManager(t, db2)
 
 	mock1.ExpectBegin()
 	mock1.ExpectCommit()
@@ -226,7 +227,19 @@ func TestManager_SharedPerDB(t *testing.T) {
 func TestNewManager_NilDB(t *testing.T) {
 	t.Parallel()
 
-	assert.Panics(t, func() { sql.NewManager(nil) })
+	_, err := sql.NewManager(nil)
+
+	require.ErrorIs(t, err, sql.ErrInvalidConfig)
+}
+
+// newManager returns a Manager over db; it fails the test on an error.
+func newManager(t *testing.T, db *sql.DB, opts ...sql.ManagerOption) sql.Manager {
+	t.Helper()
+
+	m, err := sql.NewManager(db, opts...)
+	require.NoError(t, err)
+
+	return m
 }
 
 func TestTxMode_String(t *testing.T) {

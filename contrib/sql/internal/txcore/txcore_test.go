@@ -240,7 +240,17 @@ func TestWithTx_RollbackDetachedFromCancel(t *testing.T) {
 
 	require.ErrorIs(t, err, context.Canceled)
 	require.NoError(t, d.rollbackCtxErr)
-	assert.Equal(t, []string{"1:begin", "1:SAVEPOINT sp_1", "1:ROLLBACK TO SAVEPOINT sp_1", "1:rollback"}, d.calls())
+	assert.Equal(
+		t,
+		[]string{
+			"1:begin",
+			"1:SAVEPOINT sp_1",
+			"1:ROLLBACK TO SAVEPOINT sp_1",
+			"1:RELEASE SAVEPOINT sp_1",
+			"1:rollback",
+		},
+		d.calls(),
+	)
 }
 
 func TestWithTx_Panic(t *testing.T) {
@@ -260,8 +270,14 @@ func TestWithTx_Panic(t *testing.T) {
 			})
 
 			want := map[txcore.Mode][]string{
-				txcore.ModeJoin:        {"1:begin", "1:rollback"},
-				txcore.ModeNested:      {"1:begin", "1:SAVEPOINT sp_1", "1:ROLLBACK TO SAVEPOINT sp_1", "1:rollback"},
+				txcore.ModeJoin: {"1:begin", "1:rollback"},
+				txcore.ModeNested: {
+					"1:begin",
+					"1:SAVEPOINT sp_1",
+					"1:ROLLBACK TO SAVEPOINT sp_1",
+					"1:RELEASE SAVEPOINT sp_1",
+					"1:rollback",
+				},
 				txcore.ModeRequiresNew: {"1:begin", "2:begin", "2:rollback", "1:rollback"},
 			}
 			assert.Equal(t, want[mode], d.calls())
@@ -290,7 +306,17 @@ func TestWithTx_Goexit(t *testing.T) {
 
 	<-done
 
-	assert.Equal(t, []string{"1:begin", "1:SAVEPOINT sp_1", "1:ROLLBACK TO SAVEPOINT sp_1", "1:rollback"}, d.calls())
+	assert.Equal(
+		t,
+		[]string{
+			"1:begin",
+			"1:SAVEPOINT sp_1",
+			"1:ROLLBACK TO SAVEPOINT sp_1",
+			"1:RELEASE SAVEPOINT sp_1",
+			"1:rollback",
+		},
+		d.calls(),
+	)
 }
 
 func TestWithTx_Join(t *testing.T) {
@@ -427,7 +453,17 @@ func TestWithTx_Nested(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		assert.Equal(t, []string{"1:begin", "1:SAVEPOINT sp_1", "1:ROLLBACK TO SAVEPOINT sp_1", "1:commit"}, d.calls())
+		assert.Equal(
+			t,
+			[]string{
+				"1:begin",
+				"1:SAVEPOINT sp_1",
+				"1:ROLLBACK TO SAVEPOINT sp_1",
+				"1:RELEASE SAVEPOINT sp_1",
+				"1:commit",
+			},
+			d.calls(),
+		)
 	})
 
 	t.Run("joined error poisons the savepoint, not the transaction", func(t *testing.T) {
@@ -449,7 +485,17 @@ func TestWithTx_Nested(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		assert.Equal(t, []string{"1:begin", "1:SAVEPOINT sp_1", "1:ROLLBACK TO SAVEPOINT sp_1", "1:commit"}, d.calls())
+		assert.Equal(
+			t,
+			[]string{
+				"1:begin",
+				"1:SAVEPOINT sp_1",
+				"1:ROLLBACK TO SAVEPOINT sp_1",
+				"1:RELEASE SAVEPOINT sp_1",
+				"1:commit",
+			},
+			d.calls(),
+		)
 	})
 
 	t.Run("savepoint names are a per-transaction counter", func(t *testing.T) {
@@ -916,7 +962,11 @@ func TestWithTx_PanickingJoinInSavepointMarksOnlyTheSavepoint(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"1:begin", "1:SAVEPOINT sp_1", "1:ROLLBACK TO SAVEPOINT sp_1", "1:commit"}, d.calls())
+	assert.Equal(
+		t,
+		[]string{"1:begin", "1:SAVEPOINT sp_1", "1:ROLLBACK TO SAVEPOINT sp_1", "1:RELEASE SAVEPOINT sp_1", "1:commit"},
+		d.calls(),
+	)
 }
 
 func TestOnCommit_PanicRunsTheRestThenPropagates(t *testing.T) {
@@ -983,4 +1033,45 @@ func TestWithTx_ConcurrentJoinedCalls(t *testing.T) {
 	require.ErrorIs(t, err, errBoom)
 	assert.Zero(t, ran, "a rolled back transaction runs no callback")
 	assert.Equal(t, []string{"1:begin", "1:rollback"}, d.calls())
+}
+
+func TestOnCommit_RegistrationOrderAcrossScopes(t *testing.T) {
+	t.Parallel()
+
+	c := txcore.New(newDriver())
+
+	var got []string
+
+	record := func(s string) func() { return func() { got = append(got, s) } }
+
+	require.NoError(t, c.WithTx(t.Context(), opts(txcore.ModeJoin), func(outer context.Context) error {
+		c.OnCommit(outer, record("a"))
+
+		return c.WithTx(outer, opts(txcore.ModeNested), func(inner context.Context) error {
+			c.OnCommit(inner, record("b"))
+			c.OnCommit(outer, record("c")) // the parent's ctx while the savepoint is open
+			c.OnCommit(inner, record("d"))
+
+			return nil
+		})
+	}))
+
+	assert.Equal(t, []string{"a", "b", "c", "d"}, got)
+}
+
+func TestWithTx_FailedReleaseAfterRollbackToPoisons(t *testing.T) {
+	t.Parallel()
+
+	d := newDriver()
+	d.failOn("RELEASE SAVEPOINT sp_1", errBoom)
+	c := txcore.New(d)
+
+	err := c.WithTx(t.Context(), opts(txcore.ModeJoin), func(ctx context.Context) error {
+		err := c.WithTx(ctx, opts(txcore.ModeNested), fail)
+		require.ErrorIs(t, err, errBoom)
+
+		return nil
+	})
+
+	require.ErrorIs(t, err, txcore.ErrRollbackOnly)
 }

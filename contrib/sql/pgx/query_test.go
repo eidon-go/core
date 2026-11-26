@@ -161,7 +161,7 @@ func TestWithScanner(t *testing.T) {
 	t.Parallel()
 
 	db, mock := newMock(t, corepgx.WithScanner(stubScanner{n: 42}))
-	q := corepgx.NewManager(db).GetQuerier(t.Context())
+	q := newManager(t, db).GetQuerier(t.Context())
 
 	mock.ExpectQuery("SELECT 1").WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(1))
 	mock.ExpectQuery("SELECT 1").WillReturnRows(pgxmock.NewRows([]string{"n"}).AddRow(1))
@@ -181,7 +181,7 @@ func TestUnstarted(t *testing.T) {
 	db, err := corepgx.New(unreachable())
 	require.NoError(t, err)
 
-	q := corepgx.NewManager(db).GetQuerier(t.Context())
+	q := newManager(t, db).GetQuerier(t.Context())
 	ctx := t.Context()
 
 	_, err = q.Exec(ctx, "SELECT 1")

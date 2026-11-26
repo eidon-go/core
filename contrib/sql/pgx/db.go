@@ -5,6 +5,7 @@ import (
 	stdsql "database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"sync"
 
@@ -78,6 +79,13 @@ func New(cfg Config, opts ...Option) (*DB, error) {
 
 	for _, fn := range o.poolConfig {
 		fn(poolCfg)
+	}
+
+	// pgxpool starts a time.Ticker with it in Start: a zero or negative
+	// period (a DSN's pool_health_check_period=0s, a WithPoolConfig) would
+	// panic in a background goroutine.
+	if poolCfg.HealthCheckPeriod <= 0 {
+		return nil, invalid(fmt.Sprintf("health check period %s must be positive", poolCfg.HealthCheckPeriod))
 	}
 
 	d := newDB(o, nil)
@@ -178,7 +186,11 @@ func applyPool(poolCfg *pgxpool.Config, cfg Config) {
 	}
 
 	if cfg.ConnectTimeout > 0 {
+		// The dial timeout too: a DSN's connect_timeout set both, and the
+		// dialer would otherwise keep the DSN's.
 		poolCfg.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
+		dialer := &net.Dialer{Timeout: cfg.ConnectTimeout} //nolint:exhaustruct_v5 // Go's defaults, as pgconn's
+		poolCfg.ConnConfig.DialFunc = dialer.DialContext
 	}
 }
 

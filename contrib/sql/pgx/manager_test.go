@@ -24,7 +24,7 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := corepgx.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectExec("UPDATE t SET a = 1").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -50,7 +50,7 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := corepgx.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectRollback()
@@ -64,11 +64,12 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := corepgx.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectExec("SAVEPOINT sp_1").WillReturnResult(pgxmock.NewResult("SAVEPOINT", 0))
 		mock.ExpectExec("ROLLBACK TO SAVEPOINT sp_1").WillReturnResult(pgxmock.NewResult("ROLLBACK", 0))
+		mock.ExpectExec("RELEASE SAVEPOINT sp_1").WillReturnResult(pgxmock.NewResult("RELEASE", 0))
 		mock.ExpectCommit()
 
 		err := m.WithTx(t.Context(), func(ctx context.Context) error {
@@ -85,7 +86,7 @@ func TestManager_WithTx(t *testing.T) {
 		t.Parallel()
 
 		db, mock := newMock(t)
-		m := corepgx.NewManager(db)
+		m := newManager(t, db)
 
 		mock.ExpectBegin()
 		mock.ExpectRollback()
@@ -124,7 +125,7 @@ func TestManager_TxOptions(t *testing.T) {
 			mock.ExpectBeginTx(pgxv5.TxOptions{IsoLevel: tt.want, AccessMode: pgxv5.ReadOnly})
 			mock.ExpectCommit()
 
-			err := corepgx.NewManager(db).WithTx(t.Context(), func(context.Context) error { return nil },
+			err := newManager(t, db).WithTx(t.Context(), func(context.Context) error { return nil },
 				sql.WithIsolation(tt.level), sql.ReadOnly(), sql.TxOption{})
 
 			require.NoError(t, err)
@@ -136,7 +137,7 @@ func TestManager_TxOptions(t *testing.T) {
 
 		db, _ := newMock(t)
 
-		err := corepgx.NewManager(db).WithTx(t.Context(), func(context.Context) error { return nil },
+		err := newManager(t, db).WithTx(t.Context(), func(context.Context) error { return nil },
 			sql.WithIsolation(stdsql.LevelSnapshot))
 
 		require.ErrorIs(t, err, corepgx.ErrUnsupportedIsolation)
@@ -147,7 +148,7 @@ func TestManager_DefaultTxModeAndOnCommit(t *testing.T) {
 	t.Parallel()
 
 	db, mock := newMock(t)
-	m := corepgx.NewManager(db, sql.WithDefaultTxMode(sql.TxModeForbid), sql.ManagerOption{})
+	m := newManager(t, db, sql.WithDefaultTxMode(sql.TxModeForbid), sql.ManagerOption{})
 
 	mock.ExpectBegin()
 	mock.ExpectRollback()
@@ -169,7 +170,7 @@ func TestManager_SharedPerDB(t *testing.T) {
 
 	db1, mock1 := newMock(t)
 	db2, mock2 := newMock(t)
-	m1, m1b, m2 := corepgx.NewManager(db1), corepgx.NewManager(db1), corepgx.NewManager(db2)
+	m1, m1b, m2 := newManager(t, db1), newManager(t, db1), newManager(t, db2)
 
 	mock1.ExpectBegin()
 	mock1.ExpectCommit()
@@ -188,10 +189,22 @@ func TestManager_SharedPerDB(t *testing.T) {
 }
 
 // transactor is what domain code depends on: both worlds implement it.
-var _ sql.Transactor = corepgx.NewManager(&corepgx.DB{})
+var _ sql.Transactor = corepgx.Manager(nil)
 
 func TestNewManager_NilDB(t *testing.T) {
 	t.Parallel()
 
-	assert.Panics(t, func() { corepgx.NewManager(nil) })
+	_, err := corepgx.NewManager(nil)
+
+	require.ErrorIs(t, err, sql.ErrInvalidConfig)
+}
+
+// newManager returns a Manager over db; it fails the test on an error.
+func newManager(t *testing.T, db *corepgx.DB, opts ...sql.ManagerOption) corepgx.Manager {
+	t.Helper()
+
+	m, err := corepgx.NewManager(db, opts...)
+	require.NoError(t, err)
+
+	return m
 }

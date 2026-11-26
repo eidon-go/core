@@ -2,6 +2,7 @@ package pgx
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/eidon-go/core/contrib/sql"
 	"github.com/eidon-go/core/contrib/sql/internal/txcore"
@@ -26,10 +27,11 @@ type Manager interface {
 }
 
 // NewManager returns a Manager over db; the options and transaction
-// semantics are those of sql.NewManager. It panics if db is nil.
-func NewManager(db *DB, opts ...sql.ManagerOption) Manager {
+// semantics are those of sql.NewManager. A nil db is an error wrapping
+// sql.ErrInvalidConfig.
+func NewManager(db *DB, opts ...sql.ManagerOption) (Manager, error) {
 	if db == nil {
-		panic("sql/pgx: NewManager: nil *DB")
+		return nil, fmt.Errorf("sql/pgx: %w: nil *DB", sql.ErrInvalidConfig)
 	}
 
 	o := txcore.ManagerOptions{DefaultMode: txcore.ModeJoin}
@@ -38,7 +40,7 @@ func NewManager(db *DB, opts ...sql.ManagerOption) Manager {
 		txcore.ApplyManagerOption(opt, &o)
 	}
 
-	return &manager{db: db, defaultMode: o.DefaultMode}
+	return &manager{db: db, defaultMode: o.DefaultMode}, nil
 }
 
 type manager struct {

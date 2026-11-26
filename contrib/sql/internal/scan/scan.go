@@ -24,10 +24,19 @@ func Options() []dbscan.APIOption {
 }
 
 // One scans the only row of rows into dest and closes rows: sql.ErrNoRows
-// when there is none, ErrTooManyRows when there are more.
-func One(api *dbscan.API, rows dbscan.Rows, dest any) error {
-	defer rows.Close()
+// when there is none, ErrTooManyRows when there are more. An error from
+// closing rows is joined to the result.
+func One(api *dbscan.API, rows dbscan.Rows, dest any) (err error) {
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
+	return one(api, rows, dest)
+}
+
+func one(api *dbscan.API, rows dbscan.Rows, dest any) error {
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return err //nolint:wrapcheck // the driver's error, as is

@@ -104,7 +104,8 @@ func newSQLWorld(t *testing.T, name, driver, dsn string, format sql.PlaceholderF
 	require.NoError(t, db.Start(t.Context()))
 	shutdownAtCleanup(t, db)
 
-	m := sql.NewManager(db)
+	m, err := sql.NewManager(db)
+	require.NoError(t, err)
 
 	return world{
 		name:     name,
@@ -130,7 +131,8 @@ func newPgxWorld(t *testing.T) (world, *corepgx.DB) {
 	require.NoError(t, db.Start(t.Context()))
 	shutdownAtCleanup(t, db)
 
-	m := corepgx.NewManager(db)
+	m, err := corepgx.NewManager(db)
+	require.NoError(t, err)
 
 	return world{
 		name:     "postgres/pgx",

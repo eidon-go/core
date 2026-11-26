@@ -16,10 +16,12 @@
 package txcore
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -152,7 +154,17 @@ type state[T any] struct {
 
 	mu         sync.Mutex
 	savepoints int
+	callbacks  uint64 // sequence of OnCommit registrations
 	status     status
+}
+
+// callback is an OnCommit function with its registration sequence: a scope
+// that hands its callbacks to its parent merges them by it, so they run in
+// registration order even when the parent registered more meanwhile (with
+// its own ctx, or from another goroutine).
+type callback struct {
+	seq uint64
+	fn  func()
 }
 
 // scope is the transaction itself (savepoint == "") or one savepoint in it.
@@ -165,7 +177,7 @@ type scope[T any] struct {
 	done         bool
 	rollbackOnly bool
 	cause        error
-	onCommit     []func()
+	onCommit     []callback // sorted by seq
 }
 
 // WithTx runs fn in a transaction according to opts.Mode; see the package
@@ -219,8 +231,8 @@ func (c *Core[T]) Tx(ctx context.Context) (T, bool) {
 // transaction of ctx, in registration order. It is dropped when the
 // transaction — or the savepoint it was registered in — rolls back. Outside
 // a transaction of this Core, fn runs at once.
-func (c *Core[T]) OnCommit(ctx context.Context, callback func()) {
-	if callback == nil {
+func (c *Core[T]) OnCommit(ctx context.Context, hook func()) {
+	if hook == nil {
 		return
 	}
 
@@ -228,7 +240,8 @@ func (c *Core[T]) OnCommit(ctx context.Context, callback func()) {
 		found.state.mu.Lock()
 
 		if live := found.live(); live != nil {
-			live.onCommit = append(live.onCommit, callback)
+			found.state.callbacks++
+			live.onCommit = append(live.onCommit, callback{seq: found.state.callbacks, fn: hook})
 			found.state.mu.Unlock()
 
 			return
@@ -237,7 +250,7 @@ func (c *Core[T]) OnCommit(ctx context.Context, callback func()) {
 		found.state.mu.Unlock()
 	}
 
-	callback()
+	hook()
 }
 
 // current returns the innermost open scope of ctx, nil when ctx carries no
@@ -419,9 +432,10 @@ func (c *Core[T]) rollback(ctx context.Context, tx T) error {
 	return nil
 }
 
-// rollbackTo rolls back to the savepoint of sc and drops its callbacks. If
-// that fails, the transaction state is unknown: the parent scope becomes
-// rollback-only.
+// rollbackTo rolls back to the savepoint of sc, drops its callbacks and
+// releases the savepoint (PostgreSQL and MySQL keep it after ROLLBACK TO).
+// If either fails, the transaction state is unknown: the parent scope
+// becomes rollback-only.
 func (c *Core[T]) rollbackTo(ctx context.Context, child *scope[T]) error {
 	child.close(false)
 
@@ -430,6 +444,13 @@ func (c *Core[T]) rollbackTo(ctx context.Context, child *scope[T]) error {
 
 	if err := c.driver.Exec(ctx, child.state.tx, "ROLLBACK TO SAVEPOINT "+child.savepoint); err != nil {
 		err = fmt.Errorf("sql: rollback to savepoint: %w", err)
+		child.parent.markRollbackOnly(err)
+
+		return err
+	}
+
+	if err := c.driver.Exec(ctx, child.state.tx, "RELEASE SAVEPOINT "+child.savepoint); err != nil {
+		err = fmt.Errorf("sql: release savepoint: %w", err)
 		child.parent.markRollbackOnly(err)
 
 		return err
@@ -455,11 +476,16 @@ func (sc *scope[T]) finish(s status) []func() {
 	defer sc.state.mu.Unlock()
 
 	sc.state.status = s
-	callbacks := sc.onCommit
+	registered := sc.onCommit
 	sc.onCommit = nil
 
 	if s != statusCommitted {
 		return nil
+	}
+
+	callbacks := make([]func(), len(registered))
+	for i, cb := range registered {
+		callbacks[i] = cb.fn
 	}
 
 	return callbacks
@@ -536,7 +562,9 @@ func (sc *scope[T]) close(released bool) {
 	sc.done = true
 
 	if released {
-		sc.parent.onCommit = append(sc.parent.onCommit, sc.onCommit...)
+		merged := slices.Concat(sc.parent.onCommit, sc.onCommit)
+		slices.SortStableFunc(merged, func(a, b callback) int { return cmp.Compare(a.seq, b.seq) })
+		sc.parent.onCommit = merged
 	}
 
 	sc.onCommit = nil
