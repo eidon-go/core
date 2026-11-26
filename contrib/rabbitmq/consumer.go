@@ -132,7 +132,7 @@ type Consumer struct {
 	// included; resume wakes the loop (Resume).
 	paused atomic.Bool
 	resume chan struct{}
-	pause  pauser
+	pause  *consume.PauseBackoff
 	// holdFor is how long, without WithPauseFor, the paused message is held
 	// unacked before the channel closes (its redelivery delay).
 	holdFor atomic.Int64
@@ -185,7 +185,7 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError 
 		tagPrefix:    tagPrefix,
 		topologyMode: o.topologyMode,
 		resume:       make(chan struct{}, 1),
-		pause:        pauser{base: o.pauseFor}, //nolint:exhaustruct_v5 // state starts at zero
+		pause:        consume.NewPauseBackoff(o.pauseFor, MaxPause),
 	}
 	c.proc = consume.Processor[*Message]{
 		Handle:  handler.Handle,
@@ -337,7 +337,7 @@ var errPaused = errors.New("rabbitmq: consumer paused")
 // message unacked: the pause's length with WithPauseFor, else the redelivery
 // delay of its delivery number n.
 func (c *Consumer) beginPause(ctx context.Context, n int, cause error) {
-	if c.pause.begin(time.Now()) <= 0 {
+	if c.pause.Begin(time.Now()) <= 0 {
 		c.holdFor.Store(int64(c.redelivery.Delay(n)))
 	}
 
@@ -352,9 +352,10 @@ func (c *Consumer) beginPause(ctx context.Context, n int, cause error) {
 
 	c.tel.setPaused(ctx, c.cfg.Queue, true)
 
-	if length := c.pause.remaining(time.Now()); length > 0 {
+	if c.pause.Enabled() {
 		c.logger.ErrorContext(ctx, "rabbitmq consumer paused",
-			slog.String("queue", c.cfg.Queue), slog.Duration("pause_for", length), slog.Any("error", cause))
+			slog.String("queue", c.cfg.Queue), slog.Duration("pause_for", c.pause.Remaining(time.Now())),
+			slog.Any("error", cause))
 	} else {
 		c.logger.ErrorContext(ctx, "rabbitmq consumer paused, waiting for Resume",
 			slog.String("queue", c.cfg.Queue), slog.Any("error", cause))
@@ -367,7 +368,7 @@ func (c *Consumer) endPause(ctx context.Context, auto bool) {
 		return
 	}
 
-	c.pause.end(time.Now(), auto)
+	c.pause.End(time.Now(), auto)
 	c.tel.setPaused(ctx, c.cfg.Queue, false)
 }
 
@@ -376,8 +377,8 @@ func (c *Consumer) endPause(ctx context.Context, auto bool) {
 // them, so that the other consumers of the queue do not get it at once.
 func (c *Consumer) hold(stop context.Context) {
 	length := time.Duration(c.holdFor.Load())
-	if c.pause.base > 0 {
-		length = c.pause.remaining(time.Now())
+	if c.pause.Enabled() {
+		length = c.pause.Remaining(time.Now())
 	}
 
 	sleep(stop, length)
@@ -392,8 +393,8 @@ func (c *Consumer) waitResume(stop context.Context, cause error) bool {
 
 	var timeout <-chan time.Time
 
-	if c.pause.base > 0 {
-		timer := time.NewTimer(c.pause.remaining(time.Now()))
+	if c.pause.Enabled() {
+		timer := time.NewTimer(c.pause.Remaining(time.Now()))
 		defer timer.Stop()
 
 		timeout = timer.C

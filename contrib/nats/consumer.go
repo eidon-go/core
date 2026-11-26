@@ -213,7 +213,7 @@ type Consumer struct {
 	// unsubscribed; resume wakes the loop (Resume).
 	paused atomic.Bool
 	resume chan struct{}
-	pause  pauser
+	pause  *consume.PauseBackoff
 	tel    *telemetry
 
 	runner *runner
@@ -278,7 +278,7 @@ func NewConsumer(
 		progressEvery: ackDeadline(jsConfig) / 2, //nolint:mnd // half of it
 		maxProcessing: cfg.processingLimit(ackDeadline(jsConfig)),
 		resume:        make(chan struct{}, 1),
-		pause:         pauser{base: o.pauseFor}, //nolint:exhaustruct_v5 // state starts at zero
+		pause:         consume.NewPauseBackoff(o.pauseFor, MaxPause),
 		tel:           tel,
 	}
 	c.runner = newRunner(c.loop, c.logger, ErrNotConnected)
@@ -412,11 +412,11 @@ func (c *Consumer) waitResume(stop context.Context, cause error) bool {
 	default:
 	}
 
-	length := c.pause.current()
-
 	var timeout <-chan time.Time
 
-	if length > 0 {
+	length := c.pause.Remaining(time.Now())
+
+	if c.pause.Enabled() {
 		timer := time.NewTimer(length)
 		defer timer.Stop()
 
@@ -431,7 +431,7 @@ func (c *Consumer) waitResume(stop context.Context, cause error) bool {
 
 	attrs := []any{slog.String("stream", c.cfg.Stream), slog.String("durable", c.cfg.Durable)}
 
-	if length > 0 {
+	if c.pause.Enabled() {
 		c.logger.ErrorContext(stop, "nats consumer paused", append(attrs,
 			slog.Duration("pause_for", length), slog.Any("error", cause))...)
 	} else {
@@ -441,17 +441,17 @@ func (c *Consumer) waitResume(stop context.Context, cause error) bool {
 
 	select {
 	case <-c.resume:
-		c.pause.end(time.Now(), false)
+		c.pause.End(time.Now(), false)
 		c.logger.InfoContext(stop, "nats consumer resumed", attrs...)
 
 		return true
 	case <-timeout:
-		c.pause.end(time.Now(), true)
+		c.pause.End(time.Now(), true)
 		c.logger.InfoContext(stop, "nats consumer pause ended, subscribing again", attrs...)
 
 		return true
 	case <-stop.Done():
-		c.pause.end(time.Now(), false)
+		c.pause.End(time.Now(), false)
 
 		return false
 	}
@@ -682,7 +682,7 @@ func (c *Consumer) settleOutcome(
 	case consume.Paused:
 		// Given back with a delay, so that the other instances do not get it
 		// (and pause) at once.
-		delay := c.pause.begin(time.Now())
+		delay := c.pause.Begin(time.Now())
 		if delay <= 0 {
 			delay = c.proc.redelivery.Delay(int(min(delivered, math.MaxInt32)))
 		}

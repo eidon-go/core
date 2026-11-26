@@ -634,34 +634,6 @@ func TestConsumer_PauseEndsByItself(t *testing.T) {
 	require.NoError(t, receive(t, done))
 }
 
-func TestPauser_Lengths(t *testing.T) {
-	t.Parallel()
-
-	p := pauser{base: 5 * time.Minute}
-	now := time.Now()
-
-	got := make([]time.Duration, 0, 4)
-
-	for range 4 {
-		length := p.begin(now)
-		got = append(got, length)
-		assert.Equal(t, length, p.remaining(now))
-		now = now.Add(length)
-		assert.Zero(t, p.remaining(now))
-		p.end(now, true)
-		now = now.Add(time.Second) // paused again soon after
-	}
-
-	assert.Equal(t, []time.Duration{5 * time.Minute, 10 * time.Minute, MaxPause, MaxPause}, got)
-
-	p.end(now, false)
-	assert.Equal(t, 5*time.Minute, p.begin(now), "Resume resets the streak")
-
-	manual := pauser{}
-	assert.Zero(t, manual.begin(now))
-	assert.Zero(t, manual.remaining(now))
-}
-
 func TestConsumer_RetriesAFailedSubscription(t *testing.T) {
 	t.Parallel()
 
