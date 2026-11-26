@@ -103,6 +103,19 @@ func run(m *testing.M) int {
 		return 1
 	}
 
+	rabbitCtr, cfg, err := startRabbitMQ(ctx)
+	if rabbitCtr != nil {
+		defer terminate(ctx, "rabbitmq", rabbitCtr.Terminate)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+
+		return 1
+	}
+
+	rabbitConfig = cfg
+
 	return m.Run()
 }
 
