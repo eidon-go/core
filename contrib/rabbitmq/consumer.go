@@ -31,7 +31,8 @@ type ConsumerConfig struct {
 	Queue string `json:"queue" yaml:"queue"`
 
 	// Topology is declared before every subscription — at the start and
-	// after every reconnect. Empty: the queue must exist.
+	// after every reconnect — or only checked (WithTopologyMode). Empty: the
+	// queue must exist.
 	Topology Topology `json:"topology" yaml:"topology"`
 
 	// Concurrency is the number of messages handled at the same time, each
@@ -120,6 +121,8 @@ type Consumer struct {
 	concurrency int
 	prefetch    int
 	tagPrefix   string
+	// topologyMode is WithTopologyMode.
+	topologyMode TopologyMode
 
 	worker     *lifecycle.Worker
 	subscribed atomic.Bool
@@ -166,16 +169,17 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError 
 	}
 
 	c := &Consumer{ //nolint:exhaustruct_v5 // proc and worker are set below, state starts at zero
-		conn:        conn,
-		cfg:         cfg,
-		name:        o.name,
-		logger:      o.logger,
-		redelivery:  o.redelivery(),
-		tel:         newTelemetry(&o),
-		concurrency: concurrency,
-		prefetch:    prefetch,
-		tagPrefix:   tagPrefix,
-		resume:      make(chan struct{}, 1),
+		conn:         conn,
+		cfg:          cfg,
+		name:         o.name,
+		logger:       o.logger,
+		redelivery:   o.redelivery(),
+		tel:          newTelemetry(&o),
+		concurrency:  concurrency,
+		prefetch:     prefetch,
+		tagPrefix:    tagPrefix,
+		topologyMode: o.topologyMode,
+		resume:       make(chan struct{}, 1),
 	}
 	c.proc = consume.Processor[*Message]{
 		Handle:  handler.Handle,
@@ -219,7 +223,8 @@ func checkArgs(conn *Connection, handler Handler, onError ErrorHandler) error {
 // and nil at once after Shutdown. Implements lifecycle.Runner.
 func (c *Consumer) Run(ctx context.Context) error {
 	err := c.worker.Run(ctx)
-	if errors.Is(err, ErrStopped) || errors.Is(err, ErrClosed) || errors.Is(err, ErrNotStarted) {
+	if errors.Is(err, ErrStopped) || errors.Is(err, ErrClosed) || errors.Is(err, ErrNotStarted) ||
+		errors.Is(err, ErrTopology) {
 		return err //nolint:wrapcheck // the loop's errors carry the module prefix
 	}
 
@@ -292,7 +297,7 @@ func (c *Consumer) loop(stop, work context.Context) error {
 			failures = 0
 
 			continue
-		case errors.Is(err, ErrClosed), errors.Is(err, ErrNotStarted):
+		case errors.Is(err, ErrClosed), errors.Is(err, ErrNotStarted), errors.Is(err, ErrTopology):
 			return err
 		case subscribed:
 			failures = 0
@@ -373,7 +378,7 @@ func (c *Consumer) session(stop, work context.Context) (bool, error) {
 
 // subscribe declares the topology, sets the prefetch and consumes.
 func (c *Consumer) subscribe(ch amqpChannel, tag string) (<-chan amqp.Delivery, error) {
-	if err := c.cfg.Topology.declare(ch); err != nil {
+	if err := c.cfg.Topology.apply(ch, c.topologyMode); err != nil {
 		return nil, err
 	}
 

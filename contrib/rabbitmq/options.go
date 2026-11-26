@@ -68,6 +68,7 @@ type options struct {
 	propagators      propagation.TextMapPropagator
 	redeliveryPolicy *retry.Policy
 	transientPolicy  *retry.Policy
+	topologyMode     TopologyMode
 	dial             dialFunc // tests only
 }
 
@@ -234,6 +235,13 @@ func WithRedeliveryPolicy(p retry.Policy) Option {
 // counts it at once. Consumer only.
 func WithTransientPolicy(p retry.Policy) Option {
 	return func(o *options) { o.transientPolicy = &p }
+}
+
+// WithTopologyMode sets how the Consumer treats ConsumerConfig.Topology when
+// it subscribes: declare it (TopologyDeclare, the default) or only check
+// that it exists (TopologyVerify). Consumer only.
+func WithTopologyMode(mode TopologyMode) Option {
+	return func(o *options) { o.topologyMode = mode }
 }
 
 // withDial replaces the dialer (tests).

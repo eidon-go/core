@@ -830,3 +830,50 @@ func TestErrorAction_String(t *testing.T) {
 		assert.Equal(t, want, action.String())
 	}
 }
+
+// TopologyVerify checks the exchanges and queues with passive declares and
+// declares nothing.
+func TestConsumer_TopologyVerify(t *testing.T) {
+	t.Parallel()
+
+	broker := newFakeBroker()
+	h := &recordingHandler{}
+	c := newTestConsumer(t, newTestConnection(t, broker, true), ordersConfig, h, WithTopologyMode(TopologyVerify))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := run(ctx, c)
+
+	require.Eventually(t, func() bool { return c.Healthcheck(t.Context()) == nil }, 5*time.Second, time.Millisecond)
+
+	broker.deliver(t, body("a"))
+	require.Eventually(t, func() bool { return len(h.handled()) == 1 }, 5*time.Second, time.Millisecond)
+
+	cancel()
+	require.NoError(t, receive(t, done))
+
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+
+	assert.Equal(t, []string{"exchange events", "queue orders"}, broker.checked)
+	assert.Empty(t, broker.declared, "nothing is declared")
+}
+
+func TestConsumer_TopologyVerifyFailsOnAMissingQueue(t *testing.T) {
+	t.Parallel()
+
+	broker := newFakeBroker()
+	broker.missing = map[string]bool{"queue orders": true}
+	c := newTestConsumer(t, newTestConnection(t, broker, true), ordersConfig, &recordingHandler{},
+		WithTopologyMode(TopologyVerify))
+
+	err := receive(t, run(t.Context(), c))
+	require.ErrorIs(t, err, ErrTopology)
+	require.ErrorContains(t, err, `queue "orders" does not exist`)
+}
+
+func TestTopologyMode_String(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{"declare", "verify", "topology(9)"},
+		[]string{TopologyDeclare.String(), TopologyVerify.String(), TopologyMode(9).String()})
+}

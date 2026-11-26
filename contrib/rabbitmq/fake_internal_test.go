@@ -24,6 +24,8 @@ type fakeBroker struct {
 	dials      int
 	conn       *fakeConn
 	declareErr error
+	missing    map[string]bool // passive declares that fail with 404
+	checked    []string        // passive declares
 	consumeErr error
 
 	declared  []string
@@ -303,6 +305,25 @@ func (ch *fakeChannel) exchangeDeclare(e Exchange) error { return ch.declare("ex
 func (ch *fakeChannel) queueDeclare(q Queue) error       { return ch.declare("queue " + q.Name) }
 func (ch *fakeChannel) queueBind(b Binding) error {
 	return ch.declare("bind " + b.Queue + " " + b.Exchange)
+}
+
+func (ch *fakeChannel) exchangeDeclarePassive(e Exchange) error {
+	return ch.check("exchange " + e.Name)
+}
+func (ch *fakeChannel) queueDeclarePassive(q Queue) error { return ch.check("queue " + q.Name) }
+
+// check is a passive declare: a name in the broker's missing set is 404.
+func (ch *fakeChannel) check(what string) error {
+	ch.broker.mu.Lock()
+	defer ch.broker.mu.Unlock()
+
+	if ch.broker.missing[what] {
+		return &amqp.Error{Code: amqp.NotFound, Reason: "NOT_FOUND - no " + what}
+	}
+
+	ch.broker.checked = append(ch.broker.checked, what)
+
+	return nil
 }
 
 func (ch *fakeChannel) consume(_, tag string, _ bool, _ amqp.Table) (<-chan amqp.Delivery, error) {
