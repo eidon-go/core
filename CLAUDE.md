@@ -25,7 +25,7 @@ imports.
 
 ## Status and roadmap
 
-1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.6` is the latest tag.
+1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.7` is the latest tag.
    Contrib modules are written against rc.N (cut rc.7… when a module needs core API changes —
    breaking changes are still allowed). Core `v1.0.0` + `contrib/config/yaml/v1.0.0` are tagged
    once the main contrib modules (`http2`, `config/etcd`, `otel`, `grpc`, `kafka`, `sql`) have
@@ -137,7 +137,10 @@ published `go.mod` files.
   interfaces).
 - **`config`** — layered config with priority `env > watched KV keys > KV keys > files > defaults`;
   nested documents are flattened to dotted keys; read through generic getters
-  (`config.Get[T]`, `GetOrDefault`, `Live[T]` for hot-reloaded values) — no struct binding.
+  (`config.Get[T]`, `GetOrDefault`, `Lookup[T]`, `Live[T]` for hot-reloaded values) — no struct
+  binding. Subtrees, maps and lists of objects via `cfg.Sub` / `cfg.Keys` / `cfg.Items`; rebuild
+  on hot reload with `cfg.OnChange(prefix, fn)`. Map keys containing dots are indistinguishable
+  from nesting (documented; use a list of objects).
   JSON is built in; other formats plug in via `WithParser(func([]byte) (map[string]any, error), exts...)`.
   KV backends implement `config.KV`.
 - **`retry`** — `retry.Policy` with backoff; `OnRetry` hook for logging, `retry.Forever` only
@@ -155,7 +158,8 @@ Format modules (`contrib/config/yaml`) need not import core at all.
 New integration modules must follow `docs/contrib-guidelines.md` (constructor `New(cfg, opts...)`
 with no network I/O — I/O goes in `Start`/`Run`; `With*` options; `Config.Validate()` using
 `errors.Join`; `WithLogger` defaulting to `slog.Default()` and always `*Context` log methods;
-OTel providers as options; sentinel errors `Err<What>` with `"<module>: "` prefix). Read it before
+OTel providers as options plus `WithTelemetry` (a module-local interface that the `otel`
+module's `Provider` satisfies); sentinel errors `Err<What>` with `"<module>: "` prefix). Read it before
 adding a module.
 
 - Public API of published modules is stable: renames/signature/behavior changes are breaking.

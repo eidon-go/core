@@ -267,10 +267,24 @@ func (s *Server) drain(ctx context.Context) error {
 // serve runs grpc.Server.Serve. Once a stop has begun, Serve returns only
 // after it has finished, with nil (or ErrServerStopped when the stop came
 // before Serve).
+//
+// It may also return the Accept error of the listener that drain closed:
+// when Shutdown's ctx is already done, DrainBlocking returns before
+// GracefulStop has run, and drain closes the listener before grpc-go has
+// marked the server as stopping. Such an error during the stop is the stop
+// itself, not a failure.
 func (s *Server) serve() error {
 	err := s.srv.Serve(s.listener)
 	if err == nil || errors.Is(err, grpc.ErrServerStopped) {
 		return nil
+	}
+
+	if errors.Is(err, net.ErrClosed) {
+		select {
+		case <-s.lc.Draining():
+			return nil
+		default:
+		}
 	}
 
 	return fmt.Errorf("serve: %w", err)
