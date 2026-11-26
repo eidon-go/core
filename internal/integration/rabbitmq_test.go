@@ -364,7 +364,9 @@ func TestRabbitMQ_DrainOnStop(t *testing.T) {
 
 	exchange, queue := rabbitName(t, "x"), rabbitName(t, "q")
 	pub := newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "publish"))
+
 	g := newGate(t)
+	defer g.open() // before the cleanups, which wait for the consumer
 
 	var handled []string
 
@@ -486,6 +488,8 @@ func TestRabbitMQ_HandlerPublishesDuringDrain(t *testing.T) {
 	require.NoError(t, err)
 
 	g := newGate(t)
+	defer g.open() // before the cleanups, which wait for the consumer
+
 	h := rabbitmq.HandlerFunc(func(ctx context.Context, msg *rabbitmq.Message) error {
 		g.wait(ctx)
 

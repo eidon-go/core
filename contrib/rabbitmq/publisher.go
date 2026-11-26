@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel/trace"
@@ -103,10 +102,8 @@ func (p *Publisher) Name() string { return p.name }
 // there. Separate connections keep the consumers out of this (see the
 // package documentation).
 func (p *Publisher) Publish(ctx context.Context, msgs ...*Message) error {
-	for i, msg := range msgs {
-		if msg == nil {
-			return fmt.Errorf("%w: msgs[%d] is nil", ErrInvalidConfig, i)
-		}
+	if err := validateMessages(msgs); err != nil {
+		return err
 	}
 
 	if !p.enter() {
@@ -172,6 +169,22 @@ func (p *Publisher) Publish(ctx context.Context, msgs ...*Message) error {
 // Idempotent. Implements lifecycle.Resource.
 func (p *Publisher) Shutdown(ctx context.Context) error {
 	return p.releaser.Shutdown(ctx) //nolint:wrapcheck // the caller's context error or nil
+}
+
+// validateMessages checks every message before the first is sent, so that an
+// invalid one does not stop a batch half sent.
+func validateMessages(msgs []*Message) error {
+	for idx, msg := range msgs {
+		if msg == nil {
+			return fmt.Errorf("%w: msgs[%d] is nil", ErrInvalidConfig, idx)
+		}
+
+		if err := toTable(msg.Headers, 0).Validate(); err != nil {
+			return fmt.Errorf("%w: msgs[%d] headers: %w", ErrInvalidConfig, idx, err)
+		}
+	}
+
+	return nil
 }
 
 // enter registers a Publish; false after Shutdown.
@@ -393,50 +406,68 @@ func awaitConfirm(ctx context.Context, ch *confirmChannel, conf confirmation) er
 type confirmChannel struct {
 	amqpChannel
 
-	closes chan *amqp.Error
+	closes chan *amqp.Error // the close listener: the reason, then closed
 
-	mu     sync.Mutex
-	known  bool        // the close was seen
-	reason *amqp.Error // nil for a close without a broker error
+	reader chan struct{} // a token: held by the caller that reads closes
+	known  chan struct{} // closed once reason is set
+	reason *amqp.Error   // nil for a close without a broker error
 }
 
 func newConfirmChannel(ch amqpChannel) *confirmChannel {
-	return &confirmChannel{ //nolint:exhaustruct_v5 // state starts at zero
+	return newCloseState(ch, ch.notifyClose(make(chan *amqp.Error, 1)))
+}
+
+func newCloseState(ch amqpChannel, closes chan *amqp.Error) *confirmChannel {
+	return &confirmChannel{ //nolint:exhaustruct_v5 // reason starts at zero
 		amqpChannel: ch,
-		closes:      ch.notifyClose(make(chan *amqp.Error, 1)),
+		closes:      closes,
+		reader:      make(chan struct{}, 1),
+		known:       make(chan struct{}),
 	}
 }
 
-// closeReasonWait bounds the wait for the reason of a channel that is
-// closing: amqp091 marks a channel closed before it hands the reason to the
-// close listeners (and releases the confirms after that).
-const closeReasonWait = time.Second
-
 // closeErr returns ErrNotConfirmed, joined with the broker's reason for
-// closing the channel if it gave one. Call it once the channel is closed;
-// it waits for the reason until ctx is done, at most closeReasonWait. The
-// wait is under mu, so that one caller takes the reason and the others see
-// it.
+// closing the channel if it gave one. Call it once the channel is closed.
+// amqp091 marks a channel closed before it hands the reason to the close
+// listeners, and it always closes the listeners as it shuts the channel
+// down, so closeErr waits for the reason — until ctx is done, which then
+// gives ErrNotConfirmed alone. One caller at a time reads the listener; the
+// others wait for its result, each with its own ctx.
 func (c *confirmChannel) closeErr(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.known {
-		timer := time.NewTimer(closeReasonWait)
-		defer timer.Stop()
-
-		select {
-		case reason, ok := <-c.closes:
-			c.known = true
-
-			if ok {
-				c.reason = reason
-			}
-		case <-ctx.Done():
-		case <-timer.C:
-		}
+	select {
+	case <-c.known:
+		return c.reasonErr()
+	case <-ctx.Done():
+		return ErrNotConfirmed
+	case c.reader <- struct{}{}:
 	}
 
+	defer func() { <-c.reader }()
+
+	// Only the holder of the token closes known: if it is not closed now, it
+	// stays open until this caller reads the listener.
+	select {
+	case <-c.known:
+		return c.reasonErr()
+	default:
+	}
+
+	select {
+	case reason, ok := <-c.closes:
+		if ok {
+			c.reason = reason
+		}
+
+		close(c.known) // publishes reason
+
+		return c.reasonErr()
+	case <-ctx.Done():
+		return ErrNotConfirmed
+	}
+}
+
+// reasonErr is the result of closeErr once the reason is known.
+func (c *confirmChannel) reasonErr() error {
 	if c.reason != nil {
 		return fmt.Errorf("%w: channel closed by the broker: %w", ErrNotConfirmed, c.reason)
 	}

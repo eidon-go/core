@@ -48,8 +48,12 @@ func TestPublisher_Headers(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.IsType(t, amqp.Table{}, got[0].Headers["metadata"])
 
-	// A type AMQP cannot carry fails before anything is sent.
-	err := pub.Publish(t.Context(), &Message{RoutingKey: "q", Headers: map[string]any{"n": uint64(1)}})
+	// A type AMQP cannot carry fails before anything is sent — also the
+	// valid messages before it in the batch.
+	err := pub.Publish(t.Context(),
+		&Message{RoutingKey: "q", Body: []byte("valid")},
+		&Message{RoutingKey: "q", Headers: map[string]any{"n": uint64(1)}})
 	require.ErrorIs(t, err, ErrInvalidConfig)
-	assert.Len(t, broker.publishedMessages(), 1)
+	require.ErrorContains(t, err, "msgs[1]")
+	assert.Len(t, broker.publishedMessages(), 1, "nothing of the batch was sent")
 }
