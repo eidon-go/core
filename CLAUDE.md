@@ -11,7 +11,7 @@ It is a **multi-module repo**: every directory with a `go.mod` is a separately v
 (tags `<dir>/vX.Y.Z`, core is `vX.Y.Z`). `scripts/modules.sh` lists them (`--published` excludes
 anything under `internal/`, e.g. the future `internal/integration` test module).
 
-- `.` (core) — `lifecycle`, `app`, `config`, `retry`. **Standard library only (testify in tests
+- `.` (core) — `lifecycle`, `app`, `config`, `retry`, `consume`. **Standard library only (testify in tests
   only), Go 1.25+. Never add a third-party dependency here** — anything that needs one becomes its
   own module.
 - `contrib/<name>` — every other published module: integrations (`contrib/http2`, later
@@ -147,13 +147,17 @@ published `go.mod` files.
   from nesting (documented; use a list of objects).
   JSON is built in; other formats plug in via `WithParser(func([]byte) (map[string]any, error), exts...)`.
   KV backends implement `config.KV`.
+- **`consume`** — `consume.Processor[M]`: the attempt loop every message consumer module builds on
+  (`OnError` → `Retry`/`Requeue`/`Reject`/`Stop`, redelivery waits, panics recovered, failure logs);
+  `consume.Transient(err)` errors are waited out without counting an attempt; `Delivery.Deadline`
+  yields (Kafka's poll budget). Modules keep their own `ErrorAction`/`ErrorHandler` types and map them.
 - **`retry`** — `retry.Policy` with backoff; `OnRetry` hook for logging, `retry.Forever` only
   bounded by ctx; `retry.ConnectPolicy()` is the default connect policy and `Policy.Logged`
   adds the standard retry log.
 
 Dependency rules between packages/modules (from `docs/contrib-guidelines.md`):
-`lifecycle` depends only on stdlib. Integration modules may import only `core/lifecycle` and
-`core/retry` — never `core/app` or `core/config` (config arrives as a plain `Config` struct).
+`lifecycle` depends only on stdlib. Integration modules may import only `core/lifecycle`,
+`core/retry` and `core/consume` — never `core/app` or `core/config` (config arrives as a plain `Config` struct).
 Exception: `contrib/config/<backend>` modules implement `config.KV` and import `config` only.
 Format modules (`contrib/config/yaml`) need not import core at all.
 

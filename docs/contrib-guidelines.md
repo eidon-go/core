@@ -9,7 +9,7 @@ reason in its README.
 
 - One Go module per integration (`contrib/<name>/go.mod`, module path
   `github.com/eidon-go/core/contrib/<name>`), tagged `contrib/<name>/vX.Y.Z`.
-- Depend on `github.com/eidon-go/core` for `lifecycle` and `retry` only. Never import `core/app`
+- Depend on `github.com/eidon-go/core` for `lifecycle`, `retry` and `consume` only. Never import `core/app`
   (components must work without it) or `core/config` (configuration comes in as a struct).
   Exception: `contrib/config/<backend>` modules (e.g. `contrib/config/etcd`) implement `config.KV` and therefore
   import `config` — and nothing else from it; the rest of their rules are in
@@ -73,7 +73,9 @@ component" in the lifecycle README):
   new work with its `stop` context and handles the work in flight with its `work` context, kept
   in an unexported field and delegated to; `Shutdown` calls the worker's `Shutdown` first, then
   releases the client (`CloseOnce`/`ShutdownOnce`).
-- **Message consumers** take their error strategy (`ErrorHandler`) as a required constructor
+- **Message consumers** run their handler through `consume.Processor` (attempts, `OnError`, waits,
+  panics, failure logs, `consume.Transient`) and only settle the `Outcome` with the broker; they
+  take a `WithTransientPolicy` option. They take their error strategy (`ErrorHandler`) as a required constructor
   argument after the handler — `NewConsumer(cfg, handler, onError, opts...)`, `nil` is an
   `ErrInvalidConfig` — never as an option with a default: stopping on a message that cannot be
   handled stops the whole service and crash-loops on restart, so the choice must be explicit.
