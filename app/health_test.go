@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +50,56 @@ func TestHealthReport_GroupWithoutCheckersIsNotListed(t *testing.T) {
 	a.Add(lifecycle.GroupNamed("infra", &resource{name: "cache", rec: &recorder{}}))
 
 	assert.Empty(t, a.HealthReport(t.Context()))
+}
+
+// hangingChecker blocks in Healthcheck until its ctx ends and records that
+// it was called.
+type hangingChecker struct {
+	name   string
+	called atomic.Bool
+}
+
+func (h *hangingChecker) Name() string                   { return h.name }
+func (h *hangingChecker) Shutdown(context.Context) error { return nil }
+
+func (h *hangingChecker) Healthcheck(ctx context.Context) error {
+	h.called.Store(true)
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
+func TestHealthcheck_SkipsComponentsWithoutReadiness(t *testing.T) {
+	t.Parallel()
+
+	hanging := &hangingChecker{name: "cache"}
+	srv := newServer("http", &recorder{})
+
+	a := newApp()
+	a.Add(&checker{name: "db"}, app.WithReadiness())
+	a.Add(hanging)
+	a.Add(srv)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := runAsync(ctx, a)
+
+	<-srv.running
+
+	var err error
+
+	// A hanging check outside readiness would block Healthcheck until the
+	// test's ctx ends; it must not be called at all.
+	eventually(t, func() bool {
+		err = a.Healthcheck(t.Context())
+
+		return !errors.Is(err, app.ErrNotReady)
+	})
+
+	require.NoError(t, err)
+	assert.False(t, hanging.called.Load(), "check outside readiness must not run")
+
+	cancel()
+	require.NoError(t, wait(t, done))
 }
 
 // barrierChecker blocks until all checkers of a barrier have entered, which

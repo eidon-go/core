@@ -15,8 +15,10 @@ import (
 // requested — and otherwise runs the lifecycle.Healthchecker of every
 // component added WithReadiness concurrently and joins the failures, each
 // prefixed with the component's name. Components added without it do not
-// affect readiness; their checks are reported by HealthReport. App satisfies
-// lifecycle.Healthchecker, so it can back a /readyz endpoint directly.
+// affect readiness and are not checked at all, so a slow or hanging check of
+// such a component never delays the answer; their checks are reported by
+// HealthReport. App satisfies lifecycle.Healthchecker, so it can back a
+// /readyz endpoint directly.
 //
 // The app counts as running as soon as every runner has been launched, not
 // when each has finished binding; components that need to be truly ready
@@ -29,8 +31,8 @@ func (a *App) Healthcheck(ctx context.Context) error {
 
 	var errs []error
 
-	for _, r := range a.HealthReport(ctx) {
-		if r.Readiness && r.Err != nil {
+	for _, r := range a.check(ctx, true) {
+		if r.Err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Name, r.Err))
 		}
 	}
@@ -61,6 +63,13 @@ type HealthResult struct {
 // implement lifecycle.Healthchecker are not included. A Healthcheck that
 // panics is reported as ErrHealthcheckPanicked.
 func (a *App) HealthReport(ctx context.Context) []HealthResult {
+	return a.check(ctx, false)
+}
+
+// check runs the lifecycle.Healthchecker of every registered component —
+// only those added WithReadiness when readinessOnly is set — concurrently and
+// returns one result per checker, in registration order.
+func (a *App) check(ctx context.Context, readinessOnly bool) []HealthResult {
 	a.mu.Lock()
 	components := slices.Clone(a.components)
 	readiness := slices.Clone(a.readiness)
@@ -70,10 +79,14 @@ func (a *App) HealthReport(ctx context.Context) []HealthResult {
 
 	results := make([]HealthResult, 0, len(components))
 
-	for i, c := range components {
+	for pos, c := range components {
+		if readinessOnly && !readiness[pos] {
+			continue
+		}
+
 		if hc, ok := c.(lifecycle.Healthchecker); ok {
 			checkers = append(checkers, hc)
-			results = append(results, HealthResult{Name: lifecycle.NameOf(c), Err: nil, Readiness: readiness[i]})
+			results = append(results, HealthResult{Name: lifecycle.NameOf(c), Err: nil, Readiness: readiness[pos]})
 		}
 	}
 
