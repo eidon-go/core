@@ -3,7 +3,7 @@ module github.com/eidon-go/core/contrib/otel
 go 1.26.0
 
 require (
-	github.com/eidon-go/core v1.0.0-rc.3
+	github.com/eidon-go/core v1.0.0-rc.6
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
