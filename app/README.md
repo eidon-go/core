@@ -11,8 +11,12 @@ func main() {
         app.WithStartTimeout(time.Minute),
     )
 
-    a.Add(telemetry, cfg, db, cache) // dependencies first: telemetry is flushed last
-    a.Add(grpcServer, httpServer)
+    a.Add(telemetry)               // dependencies first: telemetry is flushed last
+    a.Add(cfg)
+    a.Add(db, app.WithReadiness()) // cannot serve without it: its health gates readiness
+    a.Add(cache)                   // serves without it, degraded: health is diagnostic
+    a.Add(grpcServer)
+    a.Add(httpServer)
 
     if err := a.Run(context.Background()); err != nil {
         log.Fatal(err)
@@ -68,8 +72,11 @@ shutdown that hangs.
 
 ## Registration
 
-`Add(components ...lifecycle.Resource)` registers components in dependency order. A component
-implementing `lifecycle.Runner` is run; every component is shut down. `Add` panics on a nil
+`Add(component lifecycle.Resource, opts ...AddOption)` registers one component; call it in
+dependency order. A component implementing `lifecycle.Runner` is run; every component is shut
+down. The only option, `WithReadiness()`, makes the component's health check gate readiness (see
+[Health](#health)). To register several parts of one integration as a unit, combine them with
+`lifecycle.Group` / `GroupNamed`. `Add` panics on a nil
 component (including a typed nil pointer), on a component added twice, and after `Run` — all
 programming errors. Duplicates are detected by pointer identity; non-pointer values and pointers to
 zero-size types are never treated as duplicates.
@@ -86,11 +93,26 @@ returned.
 ## Health
 
 `Healthcheck(ctx)` reports **readiness**: `ErrNotReady` before `Run`, while starting and from the
-moment shutdown is requested; otherwise it runs every registered `lifecycle.Healthchecker`
-concurrently and joins the failures, each prefixed with the component's name
-(`lifecycle.NameOf`). `App` implements `lifecycle.Healthchecker`, so it can back `/readyz`
-directly. `HealthReport(ctx)` returns one `HealthResult{Name, Err}` per checker for structured
-output. Liveness (`/livez`) should not depend on components: just respond.
+moment shutdown is requested; otherwise it runs the `lifecycle.Healthchecker` of every component
+added `WithReadiness()` concurrently and joins the failures, each prefixed with the component's
+name (`lifecycle.NameOf`). `App` implements `lifecycle.Healthchecker`, so it can back `/readyz`
+directly.
+
+Readiness is **opt-in**. A failing readiness check takes every instance out of the load balancer
+at once, so only the dependencies without which the service cannot answer any request belong in
+it — typically the primary database. A cache, a message producer or a consumer that is down
+should degrade the service, not take its API offline: add those without the option.
+
+```go
+a.Add(db, app.WithReadiness()) // /readyz fails while the database is unreachable
+a.Add(cache)                   // reported, never fails /readyz
+a.Add(consumer)                // reported; consumers are not load-balanced
+```
+
+`HealthReport(ctx)` runs **every** checker, with or without the option, and returns one
+`HealthResult{Name, Err, Readiness}` per checker for structured output or a debug endpoint;
+`Readiness` tells whether `Err` counts toward `Healthcheck`. Liveness (`/livez`) should not depend
+on components: just respond.
 
 ## Observing the lifecycle
 

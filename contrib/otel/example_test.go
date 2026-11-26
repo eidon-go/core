@@ -40,8 +40,8 @@ func Example() { //nolint:testableexamples // exports to a collector and runs un
 
 	a := app.New(app.WithLogger(logger))
 	a.Add(telemetry)
-	// a.Add(httpServer, consumer, …): built after SetGlobal, or given
-	// telemetry.TracerProvider() and friends explicitly.
+	// a.Add(httpServer), a.Add(consumer), …: built after SetGlobal, or
+	// given telemetry.TracerProvider() and friends explicitly.
 
 	if err := a.Run(context.Background()); err != nil {
 		log.Fatal(err)

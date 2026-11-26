@@ -66,6 +66,8 @@ has returned.
 
 `Healthcheck` and `Name` may be called at any time, concurrently with everything else.
 `Healthchecker` is about **readiness** only; liveness is not aggregated from components.
+`app.App` counts a component's check toward its own readiness only when the component is added
+with `app.WithReadiness()`; the others appear in `app.App.HealthReport` only.
 
 ## Writing a component
 

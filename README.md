@@ -86,8 +86,11 @@ func main() {
     }
 
     a := app.New(app.WithShutdownTimeout(30*time.Second), app.WithShutdownDelay(5*time.Second))
-    a.Add(cfg, db, cache)          // dependencies first; db.Start connects with retry
-    a.Add(grpcServer, httpServer)  // runners
+    a.Add(cfg)                        // dependencies first
+    a.Add(db, app.WithReadiness())    // db.Start connects with retry; its health gates readiness
+    a.Add(cache)                      // health reported, but a cache outage does not fail readiness
+    a.Add(grpcServer)                 // runners
+    a.Add(httpServer)
 
     if err := a.Run(ctx); err != nil {
         log.Fatal(err)

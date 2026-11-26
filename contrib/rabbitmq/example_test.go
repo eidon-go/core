@@ -18,9 +18,10 @@ type orderCreated struct {
 // acks. The consumer's handler publishes too. The constructors do no I/O;
 // with app.App, register the components in this order:
 //
-//	a.Add(publishConn, consumeConn) // Starters: dial in Start, closed last
-//	a.Add(publisher)                // a Resource: shut down after the consumer has drained
-//	a.Add(consumer)                 // a Runner: stopped first
+//	a.Add(publishConn) // Starters: dial in Start, closed last
+//	a.Add(consumeConn)
+//	a.Add(publisher) // a Resource: shut down after the consumer has drained
+//	a.Add(consumer)  // a Runner: stopped first
 func Example() {
 	cfg := rabbitmq.Config{Host: "localhost", User: "app", Password: "secret"}
 

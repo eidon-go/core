@@ -12,10 +12,11 @@ import (
 
 // Healthcheck reports readiness. It returns ErrNotReady unless the app is
 // running — before Run, while starting and from the moment shutdown is
-// requested — and otherwise runs every registered lifecycle.Healthchecker
-// concurrently and joins the failures, each prefixed with the component's
-// name. App satisfies lifecycle.Healthchecker, so it can back a /readyz
-// endpoint directly.
+// requested — and otherwise runs the lifecycle.Healthchecker of every
+// component added WithReadiness concurrently and joins the failures, each
+// prefixed with the component's name. Components added without it do not
+// affect readiness; their checks are reported by HealthReport. App satisfies
+// lifecycle.Healthchecker, so it can back a /readyz endpoint directly.
 //
 // The app counts as running as soon as every runner has been launched, not
 // when each has finished binding; components that need to be truly ready
@@ -29,7 +30,7 @@ func (a *App) Healthcheck(ctx context.Context) error {
 	var errs []error
 
 	for _, r := range a.HealthReport(ctx) {
-		if r.Err != nil {
+		if r.Readiness && r.Err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Name, r.Err))
 		}
 	}
@@ -49,25 +50,30 @@ type HealthResult struct {
 	Name string
 	// Err is nil when the component is healthy.
 	Err error
+	// Readiness reports whether the component was added WithReadiness, that
+	// is, whether Err counts toward App.Healthcheck.
+	Readiness bool
 }
 
-// HealthReport runs every registered lifecycle.Healthchecker concurrently and
-// returns one result per checker, in registration order, whatever the app's
-// own state. Components that do not implement lifecycle.Healthchecker are not
-// included. A Healthcheck that panics is reported as ErrHealthcheckPanicked.
+// HealthReport runs every registered lifecycle.Healthchecker concurrently —
+// with or without WithReadiness — and returns one result per checker, in
+// registration order, whatever the app's own state. Components that do not
+// implement lifecycle.Healthchecker are not included. A Healthcheck that
+// panics is reported as ErrHealthcheckPanicked.
 func (a *App) HealthReport(ctx context.Context) []HealthResult {
 	a.mu.Lock()
 	components := slices.Clone(a.components)
+	readiness := slices.Clone(a.readiness)
 	a.mu.Unlock()
 
 	var checkers []lifecycle.Healthchecker
 
 	results := make([]HealthResult, 0, len(components))
 
-	for _, c := range components {
+	for i, c := range components {
 		if hc, ok := c.(lifecycle.Healthchecker); ok {
 			checkers = append(checkers, hc)
-			results = append(results, HealthResult{Name: lifecycle.NameOf(c), Err: nil})
+			results = append(results, HealthResult{Name: lifecycle.NameOf(c), Err: nil, Readiness: readiness[i]})
 		}
 	}
 

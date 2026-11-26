@@ -93,6 +93,10 @@ The rules below are what the adapters implement; a hand-written component follow
   I/O with peers afterwards; safe without `Start` or `Run` and after a failed `Start`;
   idempotent (a repeated call returns `nil`).
 - `Healthcheck(ctx)`: readiness only, cheap (cached state or a bounded ping), honors `ctx`.
+  Readiness in `app.App` is opt-in (`app.WithReadiness()`), because one failing check takes every
+  instance out of the load balancer. The README says when to register the component with it:
+  a client of a dependency the service cannot answer any request without (the primary database)
+  usually is; caches, producers and consumers usually are not — the service degrades instead.
 - Only sources of work (servers, consumers, schedulers) are `Runner`s: `app.App` stops runners
   together. Anything they use while draining — a producer with a flush loop, a client with a
   refresh loop — is a `Resource` (a `Starter` for its goroutines), so it is shut down after every

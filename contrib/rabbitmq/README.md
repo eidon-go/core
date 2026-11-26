@@ -73,9 +73,10 @@ if err != nil {
 }
 
 a := app.New()
-a.Add(publishConn, consumeConn) // Starters: dialed first, closed last
-a.Add(publisher)                // a Resource: shut down after the consumer has drained
-a.Add(consumer)                 // a Runner: stopped first
+a.Add(publishConn) // Starters: dialed first, closed last
+a.Add(consumeConn)
+a.Add(publisher) // a Resource: shut down after the consumer has drained
+a.Add(consumer)  // a Runner: stopped first
 return a.Run(ctx)
 ```
 
@@ -127,6 +128,10 @@ once, wrapping `ErrInvalidConfig`.
 | `Connection` | Starter, Resource | dials with retry, starts the reconnect loop | — | stops the loop, closes the connection (and every channel on it); the close handshake is bounded by the deadline (`DialTimeout` without one), then the socket is closed | up / `ErrNotConnected` while redialing |
 | `Publisher` | Resource | — (the channel opens on the first `Publish`) | — | refuses new messages, waits for outstanding confirms until its deadline (then those `Publish` calls fail with `ErrNotConfirmed`), closes the channel within the deadline | — |
 | `Consumer` | Runner | — (its connection connects) | subscribes and consumes; resubscribes after a lost channel; drains on stop | bounds the drain; at the deadline cancels the handlers' context — the channel closes once they return, or with the connection, and the unacked messages are requeued | subscribed / `ErrNotConnected` |
+
+Add these components to `app.App` without `app.WithReadiness()` unless the service cannot answer
+requests without the broker: a lost channel should not take every instance out of the load
+balancer. Their checks still appear in `HealthReport`.
 
 **Registration order:** connections, then publishers, then consumers. `app.App` stops the
 consumers first — their handlers may still publish while they drain — then the publishers, then

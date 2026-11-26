@@ -124,7 +124,8 @@ type Runner interface {
 
 // Healthchecker is an optional interface a component implements to report
 // readiness (e.g. for a /readyz endpoint). app.App.Healthcheck aggregates
-// every registered Healthchecker.
+// the Healthcheckers of the components added with app.WithReadiness;
+// app.App.HealthReport lists them all.
 //
 // Healthcheck may be called frequently, concurrently with any other method,
 // including during shutdown, so it should be cheap — a cached result or a

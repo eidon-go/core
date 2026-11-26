@@ -502,7 +502,8 @@ func TestRabbitMQ_HandlerPublishesDuringDrain(t *testing.T) {
 
 	a := app.New(app.WithSignals(), app.WithLogger(slog.New(slog.DiscardHandler)),
 		app.WithShutdownTimeout(rabbitWait))
-	a.Add(publishConn, consumeConn)
+	a.Add(publishConn)
+	a.Add(consumeConn)
 	a.Add(pub)
 	a.Add(c)
 
