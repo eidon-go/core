@@ -93,6 +93,12 @@ type ConsumerConfig struct {
 	// batch small enough to be handled well within the group's rebalance
 	// timeout (franz-go default 60s). Default: DefaultMaxPollRecords.
 	MaxPollRecords int `json:"maxPollRecords" yaml:"maxPollRecords"`
+
+	// Concurrency is how many partitions of a poll are handled at once, one
+	// goroutine each; the records of a partition are always handled in
+	// order. A slow partition then no longer holds up the others. Default
+	// (0): 1, one partition after another.
+	Concurrency int `json:"concurrency" yaml:"concurrency"`
 }
 
 // Validate reports every invalid field at once. Each error wraps
@@ -121,6 +127,11 @@ func (c ConsumerConfig) Validate() error {
 	if c.MaxPollRecords < 0 {
 		errs = append(errs, fmt.Errorf("%w: maxPollRecords must not be negative, got %d",
 			ErrInvalidConfig, c.MaxPollRecords))
+	}
+
+	if c.Concurrency < 0 {
+		errs = append(errs, fmt.Errorf("%w: concurrency must not be negative, got %d",
+			ErrInvalidConfig, c.Concurrency))
 	}
 
 	return errors.Join(errs...)

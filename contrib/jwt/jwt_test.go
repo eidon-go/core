@@ -65,7 +65,13 @@ func TestConfig_Validate(t *testing.T) {
 		{name: "valid", cfg: baseConfig()},
 		{
 			name: "valid with all fields",
-			cfg:  jwt.Config{Issuer: "auth", Audience: []string{"api"}, Subject: "user", TTL: time.Second, Leeway: 1},
+			cfg: jwt.Config{
+				Issuer:          "auth",
+				Audience:        []string{"api"},
+				RequiredSubject: "user",
+				TTL:             time.Second,
+				Leeway:          1,
+			},
 		},
 		{name: "empty", cfg: jwt.Config{}, want: []string{"Issuer", "TTL"}},
 		{
@@ -119,7 +125,7 @@ func TestAuthService_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	clk := &clock{now: start()}
-	svc := newService(t, jwt.Config{Issuer: "auth", Subject: "user", TTL: time.Hour}, newKey(t, secret()), clk)
+	svc := newService(t, jwt.Config{Issuer: "auth", RequiredSubject: "user", TTL: time.Hour}, newKey(t, secret()), clk)
 	info := session{UserID: "42", Roles: []string{"admin"}}
 
 	token, err := svc.CreateToken(t.Context(), info)
@@ -159,10 +165,12 @@ func TestAuthService_TimeClaims(t *testing.T) {
 		want   error
 	}{
 		{name: "just before expiry", shift: time.Hour - time.Second},
-		{name: "expired", shift: time.Hour + time.Second, want: jwt.ErrTokenExpired},
-		{name: "expired within leeway", leeway: time.Minute, shift: time.Hour + time.Second},
-		{name: "issued in the future", shift: -time.Second, want: gojwt.ErrTokenUsedBeforeIssued},
-		{name: "issued in the future within leeway", leeway: time.Minute, shift: -time.Second},
+		{name: "expired", shift: time.Hour + time.Minute, want: jwt.ErrTokenExpired},
+		{name: "expired within the default leeway", shift: time.Hour + time.Second},
+		{name: "expired within leeway", leeway: 2 * time.Minute, shift: time.Hour + time.Minute},
+		{name: "issued in the future", shift: -time.Minute, want: gojwt.ErrTokenUsedBeforeIssued},
+		{name: "clock of the parser a second behind", shift: -time.Second},
+		{name: "issued in the future within leeway", leeway: 2 * time.Minute, shift: -time.Minute},
 	}
 
 	for _, tt := range tests {
@@ -198,7 +206,7 @@ func TestAuthService_Rejects(t *testing.T) {
 	clk := &clock{now: start()}
 	key := newKey(t, secret())
 	verifier := newService(t, jwt.Config{
-		Issuer: "auth", Audience: []string{"api", "web"}, Subject: "user",
+		Issuer: "auth", Audience: []string{"api", "web"}, RequiredSubject: "user",
 		TTL: time.Hour,
 	}, key, clk)
 
@@ -212,7 +220,7 @@ func TestAuthService_Rejects(t *testing.T) {
 			name: "another issuer",
 			issuer: newService(
 				t,
-				jwt.Config{Issuer: "other", Audience: []string{"api"}, Subject: "user", TTL: time.Hour},
+				jwt.Config{Issuer: "other", Audience: []string{"api"}, RequiredSubject: "user", TTL: time.Hour},
 				key,
 				clk,
 			),
@@ -222,7 +230,7 @@ func TestAuthService_Rejects(t *testing.T) {
 			name: "another audience",
 			issuer: newService(
 				t,
-				jwt.Config{Issuer: "auth", Audience: []string{"admin"}, Subject: "user", TTL: time.Hour},
+				jwt.Config{Issuer: "auth", Audience: []string{"admin"}, RequiredSubject: "user", TTL: time.Hour},
 				key,
 				clk,
 			),
@@ -232,7 +240,7 @@ func TestAuthService_Rejects(t *testing.T) {
 			name: "another subject",
 			issuer: newService(
 				t,
-				jwt.Config{Issuer: "auth", Audience: []string{"web"}, Subject: "robot", TTL: time.Hour},
+				jwt.Config{Issuer: "auth", Audience: []string{"web"}, RequiredSubject: "robot", TTL: time.Hour},
 				key,
 				clk,
 			),
@@ -242,7 +250,7 @@ func TestAuthService_Rejects(t *testing.T) {
 			name: "another key",
 			issuer: newService(
 				t,
-				jwt.Config{Issuer: "auth", Audience: []string{"web"}, Subject: "user", TTL: time.Hour},
+				jwt.Config{Issuer: "auth", Audience: []string{"web"}, RequiredSubject: "user", TTL: time.Hour},
 				newKey(t, otherSecret()),
 				clk,
 			),
@@ -292,8 +300,8 @@ func TestAuthService_Rejects(t *testing.T) {
 	t.Run("accepts any one of the audiences", func(t *testing.T) {
 		t.Parallel()
 
-		issuer := newService(t, jwt.Config{Issuer: "auth", Audience: []string{"web"}, Subject: "user", TTL: time.Hour},
-			key, clk)
+		issuer := newService(t,
+			jwt.Config{Issuer: "auth", Audience: []string{"web"}, RequiredSubject: "user", TTL: time.Hour}, key, clk)
 
 		token, err := issuer.CreateToken(t.Context(), session{UserID: "1"})
 		require.NoError(t, err)
@@ -370,4 +378,77 @@ func TestAuthService_ConfigIsCopied(t *testing.T) {
 	claims, err := svc.ParseClaims(t.Context(), token)
 	require.NoError(t, err)
 	assert.Equal(t, gojwt.ClaimStrings{"api"}, claims.Audience)
+}
+
+// lazyVerifier checks the signature but ignores the parser options it is
+// given, as a careless third-party Verifier might.
+type lazyVerifier struct{ key []byte }
+
+func (v lazyVerifier) Verify(_ context.Context, token string, claims gojwt.Claims, _ ...gojwt.ParserOption) error {
+	_, err := gojwt.ParseWithClaims(token, claims, func(*gojwt.Token) (any, error) { return v.key, nil },
+		gojwt.WithValidMethods([]string{"HS256"}), gojwt.WithoutClaimsValidation())
+
+	return err
+}
+
+// The claims are checked by AuthService, not only by the Verifier.
+func TestAuthService_ChecksClaimsWithoutTheVerifier(t *testing.T) {
+	t.Parallel()
+
+	clk := &clock{now: start()}
+	key := newKey(t, secret())
+
+	svc, err := jwt.NewAuthService[session](baseConfig(), key, lazyVerifier{key: secret()}, jwt.WithClock(clk.Now))
+	require.NoError(t, err)
+
+	token, err := svc.CreateToken(t.Context(), session{UserID: "1"})
+	require.NoError(t, err)
+
+	_, err = svc.ParseToken(t.Context(), token)
+	require.NoError(t, err)
+
+	clk.now = start().Add(2 * time.Hour)
+
+	_, err = svc.ParseToken(t.Context(), token)
+	require.ErrorIs(t, err, jwt.ErrInvalidToken)
+	require.ErrorIs(t, err, jwt.ErrTokenExpired)
+
+	other, err := jwt.NewAuthService[session](jwt.Config{Issuer: "other", TTL: time.Hour}, key,
+		lazyVerifier{key: secret()}, jwt.WithClock(clk.Now))
+	require.NoError(t, err)
+
+	foreign, err := other.CreateToken(t.Context(), session{})
+	require.NoError(t, err)
+
+	_, err = svc.ParseToken(t.Context(), foreign)
+	require.ErrorIs(t, err, gojwt.ErrTokenInvalidIssuer)
+}
+
+// user is a payload that names its subject.
+type user struct {
+	ID string `json:"id"`
+}
+
+func (u user) Subject() string { return u.ID }
+
+func TestAuthService_SubjectFromPayload(t *testing.T) {
+	t.Parallel()
+
+	key := newKey(t, secret())
+
+	svc, err := jwt.NewAuthService[user](baseConfig(), key, key)
+	require.NoError(t, err)
+
+	token, err := svc.CreateToken(t.Context(), user{ID: "42"})
+	require.NoError(t, err)
+
+	claims, err := svc.ParseClaims(t.Context(), token)
+	require.NoError(t, err)
+	assert.Equal(t, "42", claims.Subject)
+
+	cfg := baseConfig()
+	cfg.RequiredSubject = "service"
+
+	_, err = jwt.NewAuthService[user](cfg, key, key)
+	require.ErrorIs(t, err, jwt.ErrInvalidConfig, "RequiredSubject and a Subjecter payload")
 }

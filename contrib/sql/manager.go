@@ -78,22 +78,23 @@ func (m TxMode) String() string { return txcore.Mode(m).String() }
 
 // TxOption configures one WithTx call; the default call needs none. The
 // zero value changes nothing.
-type TxOption struct{ apply func(*txcore.Options) }
+type TxOption = txcore.TxOption
 
 // WithTxMode sets the mode of a nested WithTx (default TxModeJoin, or the
 // Manager's WithDefaultTxMode).
 func WithTxMode(mode TxMode) TxOption {
-	return TxOption{apply: func(o *txcore.Options) { o.Mode = txcore.Mode(mode) }}
+	return txcore.NewTxOption(func(o *txcore.Options) { o.Mode = txcore.Mode(mode) })
 }
 
 // WithIsolation sets the isolation level of a new transaction. A joined or
 // nested call may ask for the same or a weaker level than the transaction
-// has (sql.LevelDefault counts as the weakest); a stricter one fails with
-// ErrTxOptionsIncompatible. Levels are compared by their order in
+// has — a transaction begun with sql.LevelDefault counts as Read Committed,
+// the weakest default of PostgreSQL, MySQL and SQL Server — and a stricter
+// one fails with ErrTxOptionsIncompatible. Levels are compared by their order in
 // database/sql, which fits PostgreSQL and MySQL; levels outside one scale
 // (SQL Server's Snapshot against RepeatableRead) are compared the same way.
 func WithIsolation(level stdsql.IsolationLevel) TxOption {
-	return TxOption{apply: func(o *txcore.Options) { o.Isolation = level }}
+	return txcore.NewTxOption(func(o *txcore.Options) { o.Isolation = level })
 }
 
 // ReadOnly begins a read-only transaction. Inside a read-only transaction,
@@ -102,31 +103,17 @@ func WithIsolation(level stdsql.IsolationLevel) TxOption {
 // fails there; let it use GetQuerier, or pass ReadOnly. Inside a read-write
 // transaction it may be either.
 func ReadOnly() TxOption {
-	return TxOption{apply: func(o *txcore.Options) { o.ReadOnly = true }}
+	return txcore.NewTxOption(func(o *txcore.Options) { o.ReadOnly = true })
 }
 
 // ManagerOption configures NewManager (of this package and of sql/pgx). The
 // zero value changes nothing.
-type ManagerOption struct{ apply func(*txcore.ManagerOptions) }
+type ManagerOption = txcore.ManagerOption
 
 // WithDefaultTxMode sets the mode of a nested WithTx without WithTxMode
 // (default TxModeJoin).
 func WithDefaultTxMode(mode TxMode) ManagerOption {
-	return ManagerOption{apply: func(o *txcore.ManagerOptions) { o.DefaultMode = txcore.Mode(mode) }}
-}
-
-//nolint:gochecknoinits // hands sql/pgx the appliers of the option types
-func init() {
-	txcore.ApplyTxOption = func(opt any, o *txcore.Options) {
-		if apply := opt.(TxOption).apply; apply != nil { //nolint:forcetypeassert // only sql/pgx calls it, with TxOption
-			apply(o)
-		}
-	}
-	txcore.ApplyManagerOption = func(opt any, o *txcore.ManagerOptions) {
-		if apply := opt.(ManagerOption).apply; apply != nil { //nolint:forcetypeassert // likewise
-			apply(o)
-		}
-	}
+	return txcore.NewManagerOption(func(o *txcore.ManagerOptions) { o.DefaultMode = txcore.Mode(mode) })
 }
 
 // NewManager returns a Manager over db. Managers over the same DB share its
@@ -138,10 +125,7 @@ func NewManager(db *DB, opts ...ManagerOption) (Manager, error) {
 	}
 
 	o := txcore.ManagerOptions{DefaultMode: txcore.ModeJoin}
-
-	for _, opt := range opts {
-		txcore.ApplyManagerOption(opt, &o)
-	}
+	txcore.ApplyManager(&o, opts)
 
 	return &manager{db: db, defaultMode: o.DefaultMode}, nil
 }
@@ -153,10 +137,7 @@ type manager struct {
 
 func (m *manager) WithTx(ctx context.Context, body func(ctx context.Context) error, opts ...TxOption) error {
 	o := txcore.Options{Mode: m.defaultMode} //nolint:exhaustruct_v5 // defaults; options set the rest
-
-	for _, opt := range opts {
-		txcore.ApplyTxOption(opt, &o)
-	}
+	txcore.ApplyTx(&o, opts)
 
 	return m.db.core.WithTx(ctx, o, body) //nolint:wrapcheck // fn's error as is
 }

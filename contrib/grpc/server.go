@@ -81,7 +81,7 @@ func New(cfg Config, opts ...Option) (*Server, error) {
 	}
 
 	if o.listener != nil {
-		s.listener = &onceCloseListener{Listener: o.listener} //nolint:exhaustruct_v5 // once state starts at zero
+		s.listener = lifecycle.ListenerOnce(o.listener)
 	}
 
 	s.srv = grpc.NewServer(serverOptions(cfg, o)...)
@@ -234,14 +234,12 @@ func (s *Server) Draining() <-chan struct{} { return s.lc.Draining() }
 // listen opens the listener unless WithListener preset one; called by Start.
 func (s *Server) listen(ctx context.Context) error {
 	if s.listener == nil {
-		var lc net.ListenConfig
-
-		ln, err := lc.Listen(ctx, "tcp", s.addr)
+		ln, err := lifecycle.ListenTCP(ctx, s.addr)
 		if err != nil {
 			return fmt.Errorf("listen on %s: %w", s.addr, err)
 		}
 
-		s.listener = &onceCloseListener{Listener: ln} //nolint:exhaustruct_v5 // once state starts at zero
+		s.listener = ln
 	}
 
 	addr := s.listener.Addr()
@@ -298,22 +296,6 @@ func wrap(err error) error {
 	}
 
 	return fmt.Errorf("grpc: %w", err)
-}
-
-// onceCloseListener closes the listener once: Serve closes the listener it is
-// given, and Shutdown closes it again in case Run never served it. Not every
-// net.Listener tolerates a second Close.
-type onceCloseListener struct {
-	net.Listener
-
-	once sync.Once
-	err  error
-}
-
-func (l *onceCloseListener) Close() error {
-	l.once.Do(func() { l.err = l.Listener.Close() })
-
-	return l.err
 }
 
 // notHealth keeps health RPCs out of the otelgrpc instrumentation: probes

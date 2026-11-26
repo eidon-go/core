@@ -241,6 +241,45 @@ func TestConsumer_Requeue(t *testing.T) {
 	settled(t, s, "ORDERS", "billing")
 }
 
+func TestConsumer_PauseAndResume(t *testing.T) {
+	t.Parallel()
+
+	s := runServer(t)
+	s.createStream(t, "ORDERS", "orders.>")
+	conn := startConnection(t, s)
+	got := newReceived()
+
+	var fixed atomic.Bool
+
+	c := newConsumerOnError(
+		t,
+		conn,
+		ordersConsumer(),
+		nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
+			if !fixed.Load() {
+				return errors.New("database schema is behind")
+			}
+
+			return got.Handle(ctx, msg)
+		}),
+		func(context.Context, *nats.Message, error) nats.ErrorAction { return nats.ErrorActionPause },
+	)
+	runInBackground(t, c)
+	healthy(t, c)
+
+	publishJS(t, s, "orders.x", "x")
+
+	require.Eventually(t, func() bool { return errors.Is(c.Healthcheck(t.Context()), nats.ErrPaused) },
+		5*time.Second, 10*time.Millisecond)
+
+	fixed.Store(true)
+	c.Resume()
+
+	assert.Equal(t, uint64(2), got.next(t).Metadata.NumDelivered, "delivered again after Resume")
+	healthy(t, c)
+	settled(t, s, "ORDERS", "billing")
+}
+
 func TestConsumer_DiscardTerminates(t *testing.T) {
 	t.Parallel()
 

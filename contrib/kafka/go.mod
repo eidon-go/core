@@ -3,7 +3,7 @@ module github.com/eidon-go/core/contrib/kafka
 go 1.26.0
 
 require (
-	github.com/eidon-go/core v1.0.0-rc.10
+	github.com/eidon-go/core v1.0.0-rc.11
 	github.com/stretchr/testify v1.12.1
 	github.com/twmb/franz-go v1.22.3
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261124225310-6c9261d4443a

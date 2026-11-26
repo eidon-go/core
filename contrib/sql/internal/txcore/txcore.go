@@ -74,14 +74,39 @@ type ManagerOptions struct {
 	DefaultMode Mode
 }
 
-// The option types of package sql (TxOption, ManagerOption) keep their
-// function unexported, so that no internal type shows in its API. Package
-// sql sets these in init to apply them; package sql/pgx, which imports sql,
-// applies the same options through them.
-var (
-	ApplyTxOption      func(opt any, o *Options)        //nolint:gochecknoglobals // set once by package sql
-	ApplyManagerOption func(opt any, o *ManagerOptions) //nolint:gochecknoglobals // set once by package sql
-)
+// TxOption configures one WithTx call; sql.TxOption is an alias of it. Its
+// function is unexported, so that no internal type shows in the API of sql:
+// options are built by NewTxOption and applied by ApplyTx.
+type TxOption struct{ apply func(*Options) }
+
+// NewTxOption returns a TxOption that applies apply.
+func NewTxOption(apply func(*Options)) TxOption { return TxOption{apply: apply} }
+
+// ApplyTx applies opts to o in order; a zero option changes nothing.
+func ApplyTx(o *Options, opts []TxOption) {
+	for _, opt := range opts {
+		if opt.apply != nil {
+			opt.apply(o)
+		}
+	}
+}
+
+// ManagerOption configures a manager; sql.ManagerOption is an alias of it.
+type ManagerOption struct{ apply func(*ManagerOptions) }
+
+// NewManagerOption returns a ManagerOption that applies apply.
+func NewManagerOption(apply func(*ManagerOptions)) ManagerOption {
+	return ManagerOption{apply: apply}
+}
+
+// ApplyManager applies opts to o in order; a zero option changes nothing.
+func ApplyManager(o *ManagerOptions, opts []ManagerOption) {
+	for _, opt := range opts {
+		if opt.apply != nil {
+			opt.apply(o)
+		}
+	}
+}
 
 var (
 	// ErrNestedTx is returned by WithTx with ModeForbid inside a transaction.
@@ -509,7 +534,7 @@ func (sc *scope[T]) live() *scope[T] {
 func (sc *scope[T]) enter(opts Options) error {
 	txState := sc.state
 
-	if opts.Isolation > txState.opts.Isolation {
+	if opts.Isolation > effectiveIsolation(txState.opts.Isolation) {
 		return fmt.Errorf(
 			"%w: isolation %s inside %s",
 			ErrTxOptionsIncompatible,
@@ -523,6 +548,18 @@ func (sc *scope[T]) enter(opts Options) error {
 	}
 
 	return sc.rollbackOnlyErr()
+}
+
+// effectiveIsolation is the level a transaction begun with level is known
+// to have at least. The database's default is at least Read Committed in
+// PostgreSQL, MySQL, SQL Server and Oracle, so a call asking for Read
+// Committed may join a transaction begun with LevelDefault.
+func effectiveIsolation(level sql.IsolationLevel) sql.IsolationLevel {
+	if level == sql.LevelDefault {
+		return sql.LevelReadCommitted
+	}
+
+	return level
 }
 
 // rollbackOnlyErr returns ErrRollbackOnly joined with the cause when sc is

@@ -34,4 +34,8 @@ var (
 	// ErrStopped is wrapped by the error Consumer.Run returns when the
 	// ErrorHandler chose ErrorActionStop; the handler's error is wrapped too.
 	ErrStopped = errors.New("kafka: consumer stopped on a handler error")
+
+	// ErrPaused is returned by Consumer.Healthcheck while an ErrorActionPause
+	// holds partitions paused, until Consumer.Resume.
+	ErrPaused = errors.New("kafka: consumer paused on a handler error")
 )

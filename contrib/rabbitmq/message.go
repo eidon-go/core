@@ -170,6 +170,13 @@ const (
 	// down. The message is not acked; the broker requeues it when the
 	// channel closes. Use it when going on would lose data.
 	ErrorActionStop
+
+	// ErrorActionPause pauses the consumer: it cancels its subscription
+	// (the message is not acked and the broker requeues it when the channel
+	// closes), Healthcheck reports ErrPaused, and the service keeps running.
+	// Consumer.Resume (or a restart) subscribes again; meanwhile the message
+	// may go to another consumer of the queue.
+	ErrorActionPause
 )
 
 // String returns the action's name.
@@ -183,6 +190,8 @@ func (a ErrorAction) String() string {
 		return "reject"
 	case ErrorActionStop:
 		return "stop"
+	case ErrorActionPause:
+		return "pause"
 	default:
 		return "unknown"
 	}

@@ -551,6 +551,48 @@ func TestConsumer_SubscribesAgainAfterAReconnect(t *testing.T) {
 	assert.Len(t, broker.declared, 6, "the topology is declared on every subscription")
 }
 
+func TestConsumer_PauseAndResume(t *testing.T) {
+	t.Parallel()
+
+	broker := newFakeBroker()
+
+	var fixed atomic.Bool
+
+	h := &recordingHandler{
+		failFor: func(int32) error {
+			if fixed.Load() {
+				return nil
+			}
+
+			return errHandler
+		},
+	}
+	pause := func(context.Context, *Message, error) ErrorAction { return ErrorActionPause }
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h, pause, fastRedelivery(2))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := run(ctx, c)
+
+	broker.deliver(t, body("a"))
+	require.Eventually(t, func() bool { return errors.Is(c.Healthcheck(t.Context()), ErrPaused) },
+		5*time.Second, time.Millisecond)
+
+	_, requeued, rejected := broker.snapshot()
+	assert.Len(t, requeued, 1, "unacked, requeued with the channel")
+	assert.Empty(t, rejected)
+
+	fixed.Store(true)
+	c.Resume()
+
+	require.Eventually(t, func() bool { return c.Healthcheck(t.Context()) == nil }, 5*time.Second, time.Millisecond)
+	broker.deliver(t, body("b"))
+	require.Eventually(t, func() bool { return len(h.handled()) == 1 }, 5*time.Second, time.Millisecond)
+
+	cancel()
+	require.NoError(t, receive(t, done))
+	assert.Equal(t, []string{"b"}, h.handled())
+}
+
 func TestConsumer_RetriesAFailedSubscription(t *testing.T) {
 	t.Parallel()
 
@@ -783,7 +825,7 @@ func TestErrorAction_String(t *testing.T) {
 
 	for action, want := range map[ErrorAction]string{
 		ErrorActionRetry: "retry", ErrorActionRequeue: "requeue", ErrorActionReject: "reject",
-		ErrorActionStop: "stop", ErrorAction(42): "unknown",
+		ErrorActionStop: "stop", ErrorActionPause: "pause", ErrorAction(42): "unknown",
 	} {
 		assert.Equal(t, want, action.String())
 	}

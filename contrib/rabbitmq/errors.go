@@ -52,6 +52,11 @@ var (
 	// ErrStopped is wrapped by the error Consumer.Run returns when the
 	// ErrorHandler chose ErrorActionStop; the handler's error is wrapped too.
 	ErrStopped = errors.New("rabbitmq: consumer stopped on a handler error")
+
+	// ErrPaused is returned by Consumer.Healthcheck while an
+	// ErrorActionPause holds the consumer unsubscribed, until
+	// Consumer.Resume.
+	ErrPaused = errors.New("rabbitmq: consumer paused on a handler error")
 )
 
 // wrap prefixes err with the module name; nil stays nil.

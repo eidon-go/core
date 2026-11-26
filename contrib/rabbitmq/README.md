@@ -194,6 +194,7 @@ A handler error goes to the `ErrorHandler` passed to `NewConsumer`, which return
 | `ErrorActionRequeue` | after the redelivery policy's delay for the message's delivery number (a quorum queue's `x-delivery-count`; otherwise 1, or 2 once redelivered), `basic.nack` with requeue: back to the queue, to any consumer. The worker holds the message during the delay, so a failing message cannot loop hot; a stop during the delay leaves it to be requeued when the channel closes. Bound it with a quorum queue's `x-delivery-limit` |
 | `ErrorActionReject` | `basic.nack` without requeue: to the queue's dead-letter exchange (`x-dead-letter-exchange`), or dropped when it has none |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is not acked and is requeued |
+| `ErrorActionPause` | the consumer cancels its subscription (the message is not acked and is requeued); `Healthcheck` reports `ErrPaused` (alert on it) and the service keeps running. `Consumer.Resume()` — or a restart — subscribes again |
 
 **Transient errors.** An error of a dependency rather than of the message — a database that is
 down — is marked with `consume.Transient(err)` (package `github.com/eidon-go/core/consume`). The

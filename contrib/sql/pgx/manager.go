@@ -35,10 +35,7 @@ func NewManager(db *DB, opts ...sql.ManagerOption) (Manager, error) {
 	}
 
 	o := txcore.ManagerOptions{DefaultMode: txcore.ModeJoin}
-
-	for _, opt := range opts {
-		txcore.ApplyManagerOption(opt, &o)
-	}
+	txcore.ApplyManager(&o, opts)
 
 	return &manager{db: db, defaultMode: o.DefaultMode}, nil
 }
@@ -50,10 +47,7 @@ type manager struct {
 
 func (m *manager) WithTx(ctx context.Context, body func(ctx context.Context) error, opts ...sql.TxOption) error {
 	o := txcore.Options{Mode: m.defaultMode} //nolint:exhaustruct_v5 // defaults; options set the rest
-
-	for _, opt := range opts {
-		txcore.ApplyTxOption(opt, &o)
-	}
+	txcore.ApplyTx(&o, opts)
 
 	return m.db.core.WithTx(ctx, o, body) //nolint:wrapcheck // fn's error as is
 }

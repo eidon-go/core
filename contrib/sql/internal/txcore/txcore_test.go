@@ -671,9 +671,10 @@ func TestWithTx_OptionsCompatibility(t *testing.T) {
 			name:  "stricter isolation",
 			outer: rw(sql.LevelReadCommitted), inner: rw(sql.LevelSerializable), wantErr: true,
 		},
+		{name: "read committed inside default", outer: rw(sql.LevelDefault), inner: rw(sql.LevelReadCommitted)},
 		{
-			name:  "explicit inside default",
-			outer: rw(sql.LevelDefault), inner: rw(sql.LevelReadCommitted), wantErr: true,
+			name:  "stricter inside default",
+			outer: rw(sql.LevelDefault), inner: rw(sql.LevelRepeatableRead), wantErr: true,
 		},
 		{name: "read-only inside read-write", outer: rw(sql.LevelDefault), inner: ro(sql.LevelDefault)},
 		{name: "read-only inside read-only", outer: ro(sql.LevelDefault), inner: ro(sql.LevelDefault)},

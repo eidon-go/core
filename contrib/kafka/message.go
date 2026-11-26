@@ -89,6 +89,14 @@ const (
 	// is redelivered once the service is back. Use it when going on would
 	// lose or reorder data.
 	ErrorActionStop
+
+	// ErrorActionPause pauses the message's partition and goes on with the
+	// others: the message is not committed, the consumer reports ErrPaused
+	// from Healthcheck, and the service keeps running. Consumer.Resume (or a
+	// restart) fetches the partition again from the message. Use it when a
+	// message must neither be lost nor stop the service — an alert on the
+	// health report brings someone to look at it.
+	ErrorActionPause
 )
 
 // String returns the action's name.
@@ -100,6 +108,8 @@ func (a ErrorAction) String() string {
 		return "skip"
 	case ErrorActionStop:
 		return "stop"
+	case ErrorActionPause:
+		return "pause"
 	default:
 		return "unknown"
 	}

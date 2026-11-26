@@ -163,7 +163,8 @@ Inside a transaction of the same `DB`, `WithTxMode` (or the manager's default) d
 
 Outside a transaction every mode begins one. `WithIsolation(level)` and `ReadOnly()` configure a
 new transaction; a joined or nested call may ask for the same or a weaker isolation level
-(`LevelDefault` is the weakest) and must be `ReadOnly` inside a read-only transaction — otherwise
+(a transaction begun with `LevelDefault` counts as Read Committed, the weakest default of
+PostgreSQL, MySQL and SQL Server) and must be `ReadOnly` inside a read-only transaction — otherwise
 `ErrTxOptionsIncompatible`. The pgx world rejects levels PostgreSQL does not have
 (`ErrUnsupportedIsolation`).
 
@@ -193,8 +194,9 @@ run as the builder rendered it; nothing rewrites it.
   `RETURNING` with `Get`.
 
 Placeholders: `sql.Dollar` and `sql.Question` have squirrel's `PlaceholderFormat` method set:
-`sq.StatementBuilder.PlaceholderFormat(sql.Dollar)`. With `Dollar`, `??` is an escaped `?` — the
-way to write jsonb's `?`, `?|` and `?&` operators.
+`sq.StatementBuilder.PlaceholderFormat(sql.Dollar)`. With `Dollar`, `??` is an escaped `?` — write
+jsonb's operators as `??`, `??|` and `??&`. A `?` inside a string literal (`'…'`, `E'…'`,
+`$tag$…$tag$`), a quoted identifier or a comment is left as it is.
 
 Mapping (`DefaultScanner`): a field takes the column named by its `db` tag, or its name in
 snake_case (`UserID` → `user_id`); embedded structs are flattened; a column that maps to no field is

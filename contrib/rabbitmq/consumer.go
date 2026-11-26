@@ -123,6 +123,11 @@ type Consumer struct {
 
 	worker     *lifecycle.Worker
 	subscribed atomic.Bool
+
+	// paused is set while an ErrorActionPause holds the consumer
+	// unsubscribed; resume wakes the loop (Resume).
+	paused atomic.Bool
+	resume chan struct{}
 }
 
 // NewConsumer validates cfg and builds a consumer of conn for handler; it
@@ -135,16 +140,8 @@ type Consumer struct {
 func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError ErrorHandler,
 	opts ...Option,
 ) (*Consumer, error) {
-	if conn == nil {
-		return nil, fmt.Errorf("%w: connection is nil", ErrInvalidConfig)
-	}
-
-	if lifecycle.IsNil(handler) {
-		return nil, fmt.Errorf("%w: handler is nil", ErrInvalidConfig)
-	}
-
-	if onError == nil {
-		return nil, fmt.Errorf("%w: error handler is nil", ErrInvalidConfig)
+	if err := checkArgs(conn, handler, onError); err != nil {
+		return nil, err
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -178,6 +175,7 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError 
 		concurrency: concurrency,
 		prefetch:    prefetch,
 		tagPrefix:   tagPrefix,
+		resume:      make(chan struct{}, 1),
 	}
 	c.proc = consume.Processor[*Message]{
 		Handle:  handler.Handle,
@@ -198,6 +196,20 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError 
 
 // Name returns the component name (WithName). Implements lifecycle.Namer.
 func (c *Consumer) Name() string { return c.name }
+
+// checkArgs validates the arguments of NewConsumer other than its config.
+func checkArgs(conn *Connection, handler Handler, onError ErrorHandler) error {
+	switch {
+	case conn == nil:
+		return fmt.Errorf("%w: connection is nil", ErrInvalidConfig)
+	case lifecycle.IsNil(handler):
+		return fmt.Errorf("%w: handler is nil", ErrInvalidConfig)
+	case onError == nil:
+		return fmt.Errorf("%w: error handler is nil", ErrInvalidConfig)
+	default:
+		return nil
+	}
+}
 
 // Run consumes until the consumer is stopped — ctx cancelled or Shutdown
 // called — and the messages in flight are handled, then returns nil. It
@@ -227,11 +239,16 @@ func (c *Consumer) Shutdown(ctx context.Context) error {
 }
 
 // Healthcheck returns nil while Run is subscribed, ErrNotConnected while it
-// waits for the connection or subscribes again, and ErrNotRunning when Run
-// is not running. Implements lifecycle.Healthchecker.
+// waits for the connection or subscribes again, ErrPaused while an
+// ErrorActionPause holds it unsubscribed, and ErrNotRunning when Run is not
+// running. Implements lifecycle.Healthchecker.
 func (c *Consumer) Healthcheck(ctx context.Context) error {
 	if err := c.worker.Healthcheck(ctx); err != nil {
 		return wrap(err)
+	}
+
+	if c.paused.Load() {
+		return ErrPaused
 	}
 
 	if !c.subscribed.Load() {
@@ -239,6 +256,19 @@ func (c *Consumer) Healthcheck(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Resume subscribes again a consumer that an ErrorActionPause paused.
+// Without a pause it does nothing.
+func (c *Consumer) Resume() {
+	if !c.paused.Load() {
+		return
+	}
+
+	select {
+	case c.resume <- struct{}{}:
+	default: // already signalled
+	}
 }
 
 // loop is the worker's loop: it subscribes again after every lost channel
@@ -254,6 +284,14 @@ func (c *Consumer) loop(stop, work context.Context) error {
 			return err
 		case stop.Err() != nil:
 			return nil //nolint:nilerr // the stop is not an error
+		case errors.Is(err, errPaused):
+			if !c.waitResume(stop, err) {
+				return nil
+			}
+
+			failures = 0
+
+			continue
 		case errors.Is(err, ErrClosed), errors.Is(err, ErrNotStarted):
 			return err
 		case subscribed:
@@ -275,6 +313,33 @@ func (c *Consumer) loop(stop, work context.Context) error {
 		if !sleep(stop, resubscribePolicy.Delay(failures)) {
 			return nil
 		}
+	}
+}
+
+// errPaused ends a session on an ErrorActionPause.
+var errPaused = errors.New("rabbitmq: consumer paused")
+
+// waitResume holds the consumer unsubscribed until Resume (true) or the
+// stop (false).
+func (c *Consumer) waitResume(stop context.Context, cause error) bool {
+	select { // a Resume of an earlier pause does not end this one
+	case <-c.resume:
+	default:
+	}
+
+	c.paused.Store(true)
+	defer c.paused.Store(false)
+
+	c.logger.ErrorContext(stop, "rabbitmq consumer paused, waiting for Resume",
+		slog.String("queue", c.cfg.Queue), slog.Any("error", cause))
+
+	select {
+	case <-c.resume:
+		c.logger.InfoContext(stop, "rabbitmq consumer resumed", slog.String("queue", c.cfg.Queue))
+
+		return true
+	case <-stop.Done():
+		return false
 	}
 }
 
@@ -421,6 +486,8 @@ func (c *Consumer) handle(stop, work context.Context, d *amqp.Delivery) error {
 		c.settle(work, d, ErrorActionReject)
 	case consume.Stopped:
 		return fmt.Errorf("%w: queue %q: %w", ErrStopped, c.cfg.Queue, res.Err)
+	case consume.Paused: // unacked: requeued when the channel closes
+		return fmt.Errorf("%w: queue %q: %w", errPaused, c.cfg.Queue, res.Err)
 	case consume.Abandoned, consume.Yielded: // unacked: requeued when the channel closes
 	}
 
@@ -514,6 +581,8 @@ func (a ErrorAction) consume() consume.Action {
 		return consume.Reject
 	case ErrorActionStop:
 		return consume.Stop
+	case ErrorActionPause:
+		return consume.Pause
 	default:
 		return consume.Stop
 	}

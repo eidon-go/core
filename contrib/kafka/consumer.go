@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/plugin/kotel"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -56,10 +58,21 @@ type Consumer struct {
 	tracer  *kotel.Tracer
 	maxPoll int
 
-	// budget and resume belong to the loop's goroutine: the time one poll's
-	// records may take, and where a record cut off by it resumes.
+	// concurrency is how many partitions are handled at once (at least 1).
+	concurrency int
+
+	// budget belongs to the loop's goroutine: the time one poll's records
+	// may take.
 	budget time.Duration
-	resume resumePoint
+
+	// resume holds, per partition, the record a yield cut off and its last
+	// attempt.
+	resumeMu sync.Mutex
+	resume   map[topicPartition]resumePoint
+
+	// paused holds the partitions an ErrorActionPause paused, until Resume.
+	pausedMu sync.Mutex
+	paused   map[string][]int32
 
 	lazy     *lazyClient
 	worker   *lifecycle.Worker
@@ -98,12 +111,14 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, onError ErrorHandler, opts
 	tracer := o.tracer(cfg.ClientID, cfg.Group)
 
 	c := &Consumer{ //nolint:exhaustruct_v5 // proc, lazy, worker and releaser are set below
-		cfg:     cfg,
-		name:    o.name,
-		logger:  o.logger,
-		connect: o.connectPolicy(),
-		tracer:  tracer,
-		maxPoll: maxPoll,
+		cfg:         cfg,
+		name:        o.name,
+		logger:      o.logger,
+		connect:     o.connectPolicy(),
+		tracer:      tracer,
+		maxPoll:     maxPoll,
+		concurrency: max(cfg.Concurrency, 1),
+		resume:      map[topicPartition]resumePoint{},
 	}
 	c.proc = newProcessor(handler, onError, &o, c.observe)
 
@@ -174,10 +189,36 @@ func (c *Consumer) Shutdown(ctx context.Context) error {
 	return wrap(closeErr)
 }
 
-// Healthcheck returns nil while Run consumes, ErrNotRunning otherwise.
-// Implements lifecycle.Healthchecker.
+// Healthcheck returns nil while Run consumes, ErrNotRunning otherwise, and
+// ErrPaused while an ErrorActionPause holds partitions paused. Implements
+// lifecycle.Healthchecker.
 func (c *Consumer) Healthcheck(ctx context.Context) error {
-	return wrap(c.worker.Healthcheck(ctx))
+	if err := c.worker.Healthcheck(ctx); err != nil {
+		return wrap(err)
+	}
+
+	c.pausedMu.Lock()
+	defer c.pausedMu.Unlock()
+
+	if len(c.paused) > 0 {
+		return fmt.Errorf("%w: %v", ErrPaused, c.paused)
+	}
+
+	return nil
+}
+
+// Resume resumes the partitions an ErrorActionPause paused: they are fetched
+// again from the paused messages. It is safe to call at any time, also from
+// another goroutine; without paused partitions it does nothing.
+func (c *Consumer) Resume() {
+	c.pausedMu.Lock()
+	paused := c.paused
+	c.paused = nil
+	c.pausedMu.Unlock()
+
+	if client := c.lazy.get(); client != nil && len(paused) > 0 {
+		client.ResumeFetchPartitions(paused)
+	}
 }
 
 // onRevoked commits the handled messages of the partitions being revoked
@@ -304,28 +345,76 @@ func pollBudget(client *kgo.Client) time.Duration {
 // errYield ends the handling of a poll early: its budget ran out.
 var errYield = errors.New("kafka: poll budget exhausted")
 
-// resumePoint is the record whose retries a yield cut off, and its last
-// attempt: when the record comes again its attempts go on from there
-// instead of starting over.
-type resumePoint struct {
+type topicPartition struct {
 	topic     string
 	partition int32
-	offset    int64
-	attempt   int
 }
 
-// handleFetches handles the polled records in order until one stops the
-// consumer, the stop begins or the poll's budget runs out; then the records
-// not handled are fetched again (see yield).
+// resumePoint is the record of a partition whose retries a yield cut off,
+// and its last attempt: when the record comes again its attempts go on
+// from there instead of starting over.
+type resumePoint struct {
+	offset  int64
+	attempt int
+}
+
+// handleFetches handles the polled records partition by partition, up to
+// Concurrency partitions at once, each in order (see handlePartition). The
+// first error stops the partitions still running and is returned once they
+// have all returned.
 func (c *Consumer) handleFetches(
 	stop, work context.Context, client *kgo.Client, fetches kgo.Fetches, deadline time.Time,
 ) error {
-	for iter := fetches.RecordIter(); !iter.Done(); {
-		if stop.Err() != nil {
-			return nil //nolint:nilerr // the stop is not an error
+	stop, cancel := context.WithCancel(stop)
+	defer cancel()
+
+	var (
+		wg    sync.WaitGroup
+		once  sync.Once
+		first error
+	)
+
+	slots := make(chan struct{}, c.concurrency)
+
+	fetches.EachPartition(func(p kgo.FetchTopicPartition) {
+		if len(p.Records) == 0 {
+			return
 		}
 
-		r := iter.Next()
+		slots <- struct{}{}
+
+		wg.Go(func() {
+			defer func() { <-slots }()
+
+			if err := c.handlePartition(stop, work, client, p.Records, deadline); err != nil {
+				once.Do(func() {
+					first = err
+
+					cancel()
+				})
+			}
+		})
+	})
+
+	wg.Wait()
+
+	return first
+}
+
+// handlePartition handles the polled records of one partition in order until
+// one stops the consumer or pauses the partition, the stop begins, or the
+// poll's budget runs out; then the records not handled are fetched again
+// (see yield).
+func (c *Consumer) handlePartition(
+	stop, work context.Context, client *kgo.Client, records []*kgo.Record, deadline time.Time,
+) error {
+	for _, r := range records {
+		switch {
+		case stop.Err() != nil:
+			return nil //nolint:nilerr // the stop is not an error
+		case c.isPaused(r.Topic, r.Partition):
+			return nil // fetched again from its paused record
+		}
 
 		err := errYield
 		if time.Now().Before(deadline) {
@@ -333,7 +422,7 @@ func (c *Consumer) handleFetches(
 		}
 
 		if errors.Is(err, errYield) {
-			c.yield(work, client, r, iter)
+			c.yield(work, client, r)
 
 			return nil
 		}
@@ -346,27 +435,13 @@ func (c *Consumer) handleFetches(
 	return nil
 }
 
-// yield rewinds every partition of the poll to its first record not handled
-// — r and the ones iter still holds — so that the next polls fetch them
-// again, after the rebalance waiting for this poll has run. Nothing past
-// them is marked, so no commit skips them.
-func (c *Consumer) yield(ctx context.Context, client *kgo.Client, r *kgo.Record, iter *kgo.FetchesRecordIter) {
-	rewind := map[string]map[int32]kgo.EpochOffset{}
-	add := func(r *kgo.Record) {
-		if rewind[r.Topic] == nil {
-			rewind[r.Topic] = map[int32]kgo.EpochOffset{}
-		}
-
-		if _, ok := rewind[r.Topic][r.Partition]; !ok { // the first is the earliest
-			rewind[r.Topic][r.Partition] = kgo.EpochOffset{Epoch: r.LeaderEpoch, Offset: r.Offset}
-		}
-	}
-
-	for add(r); !iter.Done(); {
-		add(iter.Next())
-	}
-
-	client.SetOffsets(rewind)
+// yield rewinds r's partition to r, its first record not handled, so that
+// the next polls fetch it again, after the rebalance waiting for this poll
+// has run. Nothing past it is marked, so no commit skips it.
+func (c *Consumer) yield(ctx context.Context, client *kgo.Client, r *kgo.Record) {
+	client.SetOffsets(map[string]map[int32]kgo.EpochOffset{
+		r.Topic: {r.Partition: {Epoch: r.LeaderEpoch, Offset: r.Offset}},
+	})
 
 	c.logger.WarnContext(ctx, "kafka poll ran out of its budget, the rest is fetched again",
 		slog.Duration("budget", c.budget), slog.String("topic", r.Topic),
@@ -393,9 +468,15 @@ func (c *Consumer) handleRecord(
 	case consume.Handled, consume.Rejected:
 		client.MarkCommitRecords(r)
 	case consume.Yielded:
-		c.resume = resumePoint{topic: r.Topic, partition: r.Partition, offset: r.Offset, attempt: res.Attempts}
+		c.resumeMu.Lock()
+		c.resume[topicPartition{topic: r.Topic, partition: r.Partition}] = resumePoint{
+			offset: r.Offset, attempt: res.Attempts,
+		}
+		c.resumeMu.Unlock()
 
 		return errYield
+	case consume.Paused:
+		c.pause(work, client, r, res.Err)
 	case consume.Abandoned: // the stop: unmarked, it comes again after the restart
 	case consume.Stopped, consume.Requeued: // kafka has no requeue
 		return fmt.Errorf("%w: %s[%d] offset %d: %w", ErrStopped, r.Topic, r.Partition, r.Offset, res.Err)
@@ -404,18 +485,47 @@ func (c *Consumer) handleRecord(
 	return nil
 }
 
+// pause pauses the fetching of r's partition and rewinds it to r, so that
+// Resume fetches it again from r; the records of the partition already
+// polled are skipped (handleFetches) and not rewound past r (yield).
+func (c *Consumer) pause(ctx context.Context, client *kgo.Client, r *kgo.Record, cause error) {
+	client.SetOffsets(map[string]map[int32]kgo.EpochOffset{
+		r.Topic: {r.Partition: {Epoch: r.LeaderEpoch, Offset: r.Offset}},
+	})
+	client.PauseFetchPartitions(map[string][]int32{r.Topic: {r.Partition}})
+
+	c.pausedMu.Lock()
+	if c.paused == nil {
+		c.paused = map[string][]int32{}
+	}
+
+	c.paused[r.Topic] = append(c.paused[r.Topic], r.Partition)
+	c.pausedMu.Unlock()
+
+	c.logger.ErrorContext(ctx, "kafka partition paused, waiting for Resume",
+		slog.String("topic", r.Topic), slog.Int("partition", int(r.Partition)),
+		slog.Int64("offset", r.Offset), slog.Any("error", cause))
+}
+
+func (c *Consumer) isPaused(topic string, partition int32) bool {
+	c.pausedMu.Lock()
+	defer c.pausedMu.Unlock()
+
+	return slices.Contains(c.paused[topic], partition)
+}
+
 // resumeAttempt returns the attempts r already had before a yield cut them
 // off, 0 for none. A resume point of r's partition is used up either way: a
 // record at another offset means r's partition moved on.
 func (c *Consumer) resumeAttempt(r *kgo.Record) int {
-	p := c.resume
-	if p.topic != r.Topic || p.partition != r.Partition {
-		return 0
-	}
+	key := topicPartition{topic: r.Topic, partition: r.Partition}
 
-	c.resume = resumePoint{} //nolint:exhaustruct_v5 // cleared
+	c.resumeMu.Lock()
+	p, ok := c.resume[key]
+	delete(c.resume, key)
+	c.resumeMu.Unlock()
 
-	if p.offset != r.Offset {
+	if !ok || p.offset != r.Offset {
 		return 0
 	}
 
@@ -424,10 +534,16 @@ func (c *Consumer) resumeAttempt(r *kgo.Record) int {
 
 // observe runs one attempt in the record's process span.
 func (c *Consumer) observe(work context.Context, rec record, call func(context.Context) error) error {
-	_, span := c.tracer.WithProcessSpan(rec.r)
+	// kotel's ctx is the record's, with the trace context and the baggage
+	// read from its headers; the handler runs in work (cancelled at the
+	// Shutdown deadline) with the span and the baggage carried over.
+	spanCtx, span := c.tracer.WithProcessSpan(rec.r)
 	defer span.End()
 
-	err := call(trace.ContextWithSpan(work, span))
+	bag := baggage.FromContext(spanCtx) //nolint:contextcheck // only the record's baggage is taken from it
+	ctx := baggage.ContextWithBaggage(trace.ContextWithSpan(work, span), bag)
+
+	err := call(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
