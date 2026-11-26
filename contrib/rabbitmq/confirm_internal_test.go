@@ -23,6 +23,9 @@ func TestConfirmChannel_CloseErrWaitsForTheReason(t *testing.T) {
 
 	go func() { patient <- c.closeErr(t.Context()) }()
 
+	// The patient caller holds the listener before the impatient one starts.
+	require.Eventually(t, func() bool { return len(c.reader) == 1 }, testWait, time.Millisecond)
+
 	// A caller with a short deadline returns at it, while the other one
 	// holds the listener.
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
@@ -51,6 +54,38 @@ func TestConfirmChannel_CloseErrWaitsForTheReason(t *testing.T) {
 
 	// Every later caller gets the same reason at once.
 	require.ErrorAs(t, c.closeErr(t.Context()), &amqpErr)
+}
+
+// A send that gave up waiting for the reason (its ctx ended) gets it added
+// by Publish once it is known, read before or still in the listener.
+func TestWithCloseReason(t *testing.T) {
+	t.Parallel()
+
+	closes := make(chan *amqp.Error, 1)
+	c := newCloseState(nil, closes)
+
+	expired, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := c.closeErr(expired)
+	assert.Equal(t, ErrNotConfirmed, err, "no reason yet")
+	assert.Equal(t, err, withCloseReason(err, c), "still none")
+
+	closes <- &amqp.Error{Code: amqp.NotFound, Reason: "late"}
+
+	close(closes)
+
+	var amqpErr *amqp.Error
+
+	got := withCloseReason(err, c)
+	require.ErrorIs(t, got, ErrNotConfirmed)
+	require.ErrorAs(t, got, &amqpErr)
+	assert.Equal(t, "late", amqpErr.Reason)
+
+	// Other errors, and ones that already carry a reason, are left alone.
+	assert.Equal(t, ErrNacked, withCloseReason(ErrNacked, c))
+	assert.Equal(t, got, withCloseReason(got, c))
+	assert.Equal(t, err, withCloseReason(err, nil))
 }
 
 // A close without a reason (by the client) ends the wait with

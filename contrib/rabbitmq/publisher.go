@@ -158,7 +158,23 @@ func (p *Publisher) Publish(ctx context.Context, msgs ...*Message) error {
 		}
 	}
 
-	return firstErr
+	return withCloseReason(firstErr, pinned)
+}
+
+// withCloseReason adds the broker's reason for closing ch to an
+// ErrNotConfirmed that lacks it — the send that failed may have given up
+// waiting for the reason (its ctx ended) before it became known.
+func withCloseReason(err error, ch *confirmChannel) error {
+	var amqpErr *amqp.Error
+	if ch == nil || !errors.Is(err, ErrNotConfirmed) || errors.As(err, &amqpErr) {
+		return err
+	}
+
+	if reason := ch.knownReason(); reason != nil {
+		return fmt.Errorf("%w: channel closed by the broker: %w", err, reason)
+	}
+
+	return err
 }
 
 // Shutdown refuses new messages and waits for the confirms of the messages
@@ -463,6 +479,43 @@ func (c *confirmChannel) closeErr(ctx context.Context) error {
 		return c.reasonErr()
 	case <-ctx.Done():
 		return ErrNotConfirmed
+	}
+}
+
+// knownReason returns the broker's reason for closing the channel if it is
+// available now, without waiting: read before, or waiting in the listener.
+func (c *confirmChannel) knownReason() *amqp.Error {
+	select {
+	case <-c.known:
+		return c.reason
+	default:
+	}
+
+	select {
+	case c.reader <- struct{}{}:
+	default:
+		return nil // another caller is reading it
+	}
+
+	defer func() { <-c.reader }()
+
+	select {
+	case <-c.known:
+		return c.reason
+	default:
+	}
+
+	select {
+	case reason, ok := <-c.closes:
+		if ok {
+			c.reason = reason
+		}
+
+		close(c.known)
+
+		return c.reason
+	default:
+		return nil
 	}
 }
 
