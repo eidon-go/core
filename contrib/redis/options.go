@@ -97,6 +97,12 @@ func WithTLSConfig(config *tls.Config) Option {
 // the client is created, for the settings Config does not cover (a
 // CredentialsProvider, a Dialer, RouteByLatency, Protocol, …). Several
 // apply in order.
+//
+// The edits are not checked. In particular, go-redis applies no deadline to
+// a read when ContextTimeoutEnabled is turned off with a negative
+// ReadTimeout, or when ReadTimeout is set to -2: the PING of Start and
+// Healthcheck then waits for the server however their ctx ends, and only
+// Shutdown (closing the connections) interrupts it.
 func WithUniversalOptions(fn func(*goredis.UniversalOptions)) Option {
 	return func(o *options) {
 		if fn != nil {
