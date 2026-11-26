@@ -50,8 +50,6 @@ type Client struct {
 	connect     retry.Policy
 	pingTimeout time.Duration // 0: the read timeout bounds the PING
 	releaser    *lifecycle.Releaser
-
-	closing context.Context //nolint:containedctx // a close signal for a Start in progress
 }
 
 // New validates cfg and builds the client: a cluster client for several
@@ -78,8 +76,6 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		return nil, err
 	}
 
-	closing, cancel := context.WithCancel(context.Background())
-
 	var pingTimeout time.Duration
 	if universal.ReadTimeout < 0 {
 		pingTimeout = unboundedPingTimeout
@@ -91,7 +87,6 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		connect:     o.connectPolicy(),
 		pingTimeout: pingTimeout,
 		releaser: lifecycle.CloseOnce(func() error {
-			cancel()
 			close(metricsDone)
 
 			if err := rdb.Close(); err != nil && !errors.Is(err, goredis.ErrClosed) {
@@ -100,7 +95,6 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 
 			return nil
 		}),
-		closing: closing,
 	}, nil
 }
 
@@ -135,25 +129,13 @@ func (c *Client) Name() string { return c.name }
 // WithConnectRetry policy; Shutdown ends the retries. It returns ErrClosed
 // after Shutdown. Implements lifecycle.Starter.
 func (c *Client) Start(ctx context.Context) error {
-	if c.releaser.Closing() {
-		return wrap(ErrClosed)
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	stop := context.AfterFunc(c.closing, cancel) //nolint:contextcheck // the close signal, not a parent context
-	defer stop()
-
-	if err := c.connect.Do(ctx, c.ping); err != nil {
-		if c.closing.Err() != nil {
-			return wrap(ErrClosed)
+	return wrap(c.releaser.Do(ctx, func(ctx context.Context) error {
+		if err := c.connect.Do(ctx, c.ping); err != nil {
+			return fmt.Errorf("ping: %w", err)
 		}
 
-		return fmt.Errorf("redis: ping: %w", err)
-	}
-
-	return nil
+		return nil
+	}))
 }
 
 // Shutdown closes the client and its connection pools. When ctx is done

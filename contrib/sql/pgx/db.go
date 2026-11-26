@@ -55,9 +55,7 @@ type DB struct {
 	sqlDB  *stdsql.DB    // created by SQLDB
 	closed bool
 
-	closing       context.Context //nolint:containedctx // a close signal for a Start in progress
-	cancelClosing context.CancelFunc
-	releaser      *lifecycle.Releaser
+	releaser *lifecycle.Releaser
 }
 
 // New validates cfg and builds the pool configuration with the otelpgx
@@ -147,15 +145,11 @@ func isNilPointer(v any) bool {
 }
 
 func newDB(o options, pool PoolIface) *DB {
-	closing, cancel := context.WithCancel(context.Background())
-
 	d := &DB{ //nolint:exhaustruct_v5 // the rest is set by the constructors or starts at zero
-		name:          o.name,
-		connect:       o.connectPolicy(),
-		scanner:       o.scanner,
-		pool:          pool,
-		closing:       closing,
-		cancelClosing: cancel,
+		name:    o.name,
+		connect: o.connectPolicy(),
+		scanner: o.scanner,
+		pool:    pool,
 	}
 
 	d.core = txcore.New[pgxv5.Tx](pgxDriver{db: d})
@@ -243,21 +237,13 @@ func (d *DB) Start(ctx context.Context) error {
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	stop := context.AfterFunc(d.closing, cancel) //nolint:contextcheck // the close signal, not a parent context
-	defer stop()
-
-	if err := d.connect.Do(ctx, pool.Ping); err != nil {
-		if d.closing.Err() != nil {
-			return wrap(ErrClosed)
+	return wrap(d.releaser.Do(ctx, func(ctx context.Context) error {
+		if err := d.connect.Do(ctx, pool.Ping); err != nil {
+			return fmt.Errorf("ping: %w", err)
 		}
 
-		return fmt.Errorf("sql/pgx: ping: %w", err)
-	}
-
-	return nil
+		return nil
+	}))
 }
 
 // Shutdown closes the *sql.DB of SQLDB, if any, then the pool, which waits
@@ -330,8 +316,6 @@ func (d *DB) close() error {
 	d.closed = true
 	pool, sqlDB := d.pool, d.sqlDB
 	d.mu.Unlock()
-
-	d.cancelClosing()
 
 	var err error
 

@@ -25,7 +25,7 @@ imports.
 
 ## Status and roadmap
 
-1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.7` is the latest tag.
+1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.10` is the latest tag.
    Contrib modules are written against rc.N (cut rc.7… when a module needs core API changes —
    breaking changes are still allowed). Core `v1.0.0` + `contrib/config/yaml/v1.0.0` are tagged
    once the main contrib modules (`http2`, `config/etcd`, `otel`, `grpc`, `kafka`, `sql`) have

@@ -39,7 +39,7 @@ func NewClient(cfg Config, opts ...Option) (*Client, error) {
 		name:     o.name,
 		connect:  o.connectPolicy(),
 		lazy:     lazy,
-		releaser: lifecycle.CloseOnce(lazy.close),
+		releaser: lazy.releaser,
 	}, nil
 }
 

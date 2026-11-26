@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/XSAM/otelsql v0.44.0
-	github.com/eidon-go/core v1.0.0-rc.6
+	github.com/eidon-go/core v1.0.0-rc.10
 	github.com/exaring/otelpgx v0.13.0
 	github.com/georgysavva/scany/v2 v2.1.4
 	github.com/google/uuid v1.6.0

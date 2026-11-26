@@ -31,9 +31,6 @@ type DB struct {
 	connect  retry.Policy
 	core     *txcore.Core[*stdsql.Tx]
 	releaser *lifecycle.Releaser
-
-	closing       context.Context //nolint:containedctx // a close signal for a Start in progress
-	cancelClosing context.CancelFunc
 }
 
 // New validates cfg and opens the pool, instrumented with otelsql (traces
@@ -79,21 +76,15 @@ func NewFromDB(db *stdsql.DB, opts ...Option) (*DB, error) {
 }
 
 func newDB(db *stdsql.DB, o options, stats metric.Registration) *DB {
-	closing, cancel := context.WithCancel(context.Background())
-
 	d := &DB{ //nolint:exhaustruct_v5 // releaser is set below
-		name:          o.name,
-		db:            db,
-		scanner:       o.scanner,
-		connect:       o.connectPolicy(),
-		core:          txcore.New[*stdsql.Tx](stdDriver{db: db}),
-		closing:       closing,
-		cancelClosing: cancel,
+		name:    o.name,
+		db:      db,
+		scanner: o.scanner,
+		connect: o.connectPolicy(),
+		core:    txcore.New[*stdsql.Tx](stdDriver{db: db}),
 	}
 
 	d.releaser = lifecycle.CloseOnce(func() error {
-		cancel()
-
 		var errs []error
 
 		if stats != nil {
@@ -138,25 +129,13 @@ func (d *DB) Name() string { return d.name }
 // WithConnectRetry policy; Shutdown ends the retries. It returns ErrClosed
 // after Shutdown. Implements lifecycle.Starter.
 func (d *DB) Start(ctx context.Context) error {
-	if d.releaser.Closing() {
-		return wrap(ErrClosed)
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	stop := context.AfterFunc(d.closing, cancel) //nolint:contextcheck // the close signal, not a parent context
-	defer stop()
-
-	if err := d.connect.Do(ctx, d.db.PingContext); err != nil {
-		if d.closing.Err() != nil {
-			return wrap(ErrClosed)
+	return wrap(d.releaser.Do(ctx, func(ctx context.Context) error {
+		if err := d.connect.Do(ctx, d.db.PingContext); err != nil {
+			return fmt.Errorf("ping: %w", err)
 		}
 
-		return fmt.Errorf("sql: ping: %w", err)
-	}
-
-	return nil
+		return nil
+	}))
 }
 
 // Shutdown closes the pool: database/sql waits for the queries in flight.
