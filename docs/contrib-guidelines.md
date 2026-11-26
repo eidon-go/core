@@ -44,6 +44,13 @@ func WithLogger(*slog.Logger) Option
   library, a YAML unmarshal or a literal. `yaml`/`json` tags may be added for convenience.
 - Durations are `time.Duration`, sizes and counts are integers; document the unit and the default
   on every field.
+- Zero means the documented default. A negative value disables the feature only where disabling
+  makes sense and the field documents it (`http2` server and client timeouts, `http2/client`
+  `KeepAlive`, `grpc/client` `IdleTimeout`, `config/etcd` `DialKeepAliveTime`, `sql`
+  `MaxIdleConns`); everywhere else `Validate` rejects it. A field whose default already is "no
+  limit" (`sql` `ConnMaxLifetime`, `grpc` `MaxConnectionAge`) has nothing to disable, so a negative
+  value is an error there. When the library treats zero as "disabled", map the negative value to it
+  after applying the defaults (see `http2/client`'s `disabledAsZero`).
 - `func (c Config) Validate() error` reports every problem at once (`errors.Join`).
 - Defaults are applied in `New`, never by reading the environment.
 
