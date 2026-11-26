@@ -36,7 +36,8 @@ imports.
    `lifecycle.Worker` user) → `sql` (done; `sql` + `sql/pgx`, as v0.x) → `rabbitmq` (done; `Connection` resource shared by
    `Publisher` and `Consumer`, own reconnect loop on amqp091-go) → `nats` (done; `Connection` + `Publisher` + core
    `Subscriber` with request-reply + JetStream `Consumer`; tests on an embedded nats-server) → `jwt` (done; `AuthService[T]`
-   + `jwt/hs256`, no lifecycle, no core dependency) → `redis`. Modules may declare a newer `go` than core
+   + `jwt/hs256`, no lifecycle, no core dependency) → `redis` (done; `Client` on go-redis `UniversalClient`:
+   single/cluster/Sentinel, tests on miniredis). Modules may declare a newer `go` than core
    when their dependencies need it (`contrib/http2` and `contrib/sql` are go 1.26: otel ≥ v1.47 for a reachable
    vulnerability fix). Later, the same way: `river`, `sqlx` (adapters for `sql`). Each module is written to
    `docs/contrib-guidelines.md` and ships with `lifecycletest` checks, a README, `Example*` tests
