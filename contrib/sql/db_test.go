@@ -11,9 +11,11 @@ import (
 	"github.com/XSAM/otelsql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eidon-go/core/contrib/sql"
 	"github.com/eidon-go/core/lifecycle"
@@ -22,6 +24,13 @@ import (
 )
 
 var errPing = errors.New("connection refused")
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{ tp trace.TracerProvider }
+
+func (t telemetry) TracerProvider() trace.TracerProvider { return t.tp }
+
+func (telemetry) MeterProvider() metric.MeterProvider { return noop.NewMeterProvider() }
 
 // fastRetry retries quickly; onRetry (optional) sees every retry.
 func fastRetry(attempts int, onRetry func()) sql.Option {
@@ -62,7 +71,8 @@ func TestNew_Lifecycle(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans))
 
 	db, err := sql.New(sql.Config{DriverName: "sqlmock", DataSource: t.Name(), MaxOpenConns: 5, MaxIdleConns: 1},
-		sql.WithName("main"), sql.WithTracerProvider(tp), sql.WithLogger(slog.New(slog.DiscardHandler)),
+		sql.WithName("main"), sql.WithTelemetry(nil), sql.WithTelemetry(telemetry{tp: tp}),
+		sql.WithLogger(slog.New(slog.DiscardHandler)),
 		sql.WithMeterProvider(noop.NewMeterProvider()), sql.WithOtelSQLOptions(otelsql.WithSQLCommenter(false)))
 	require.NoError(t, err)
 

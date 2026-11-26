@@ -13,8 +13,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eidon-go/core/app"
 	"github.com/eidon-go/core/contrib/http2"
@@ -498,6 +502,39 @@ func TestServer_Tracing(t *testing.T) {
 	}
 
 	assert.ElementsMatch(t, []string{"GET /users/{id}", "GET /any", "GET"}, names, "probes are not traced")
+}
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{ tp trace.TracerProvider }
+
+func (t telemetry) TracerProvider() trace.TracerProvider { return t.tp }
+
+func (telemetry) MeterProvider() metric.MeterProvider { return metricnoop.NewMeterProvider() }
+
+func (telemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }
+
+// With WithTelemetry alone, the server continues the trace of the request.
+func TestServer_WithTelemetry(t *testing.T) {
+	t.Parallel()
+
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+
+	srv := newServer(t, http.NotFoundHandler(), http2.WithTelemetry(nil), http2.WithTelemetry(telemetry{tp: tp}))
+	serve(t.Context(), t, srv)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL(srv)+"/", nil)
+	require.NoError(t, err)
+	req.Header.Set("Traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+
+	resp, err := newClient().Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.Eventually(t, func() bool { return len(rec.Ended()) == 1 }, testTimeout, time.Millisecond)
+	assert.Equal(t, traceID, rec.Ended()[0].SpanContext().TraceID().String(), "the incoming trace context is kept")
 }
 
 func TestServer_WithApp(t *testing.T) {

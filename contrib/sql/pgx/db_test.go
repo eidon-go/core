@@ -12,7 +12,9 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/eidon-go/core/contrib/sql"
@@ -102,6 +104,8 @@ func TestNew_PoolConfig(t *testing.T) {
 	cfg.MaxConnLifetime, cfg.MaxConnIdleTime, cfg.HealthCheckPeriod = time.Hour, time.Minute, time.Second
 
 	_, err := corepgx.New(cfg,
+		corepgx.WithTelemetry(nil),
+		corepgx.WithTelemetry(telemetry{}), // replaced by the two options after it
 		corepgx.WithTracerProvider(tracenoop.NewTracerProvider()),
 		corepgx.WithMeterProvider(noop.NewMeterProvider()),
 		corepgx.WithOtelPgxOptions(otelpgx.WithDisableAcquireTracer()),
@@ -120,6 +124,13 @@ func TestNew_PoolConfig(t *testing.T) {
 	assert.Equal(t, time.Second, got.ConnConfig.ConnectTimeout)
 	assert.IsType(t, &otelpgx.Tracer{}, got.ConnConfig.Tracer)
 }
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{}
+
+func (telemetry) TracerProvider() trace.TracerProvider { return tracenoop.NewTracerProvider() }
+
+func (telemetry) MeterProvider() metric.MeterProvider { return noop.NewMeterProvider() }
 
 func TestNew_BeforeStart(t *testing.T) {
 	t.Parallel()
