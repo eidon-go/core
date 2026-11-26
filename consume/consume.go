@@ -13,6 +13,7 @@
 //	case consume.Requeued: return it to the broker
 //	case consume.Rejected: skip, terminate or dead-letter it
 //	case consume.Stopped:  stop the consumer with res.Err
+//	case consume.Paused:   pause the message's source; leave the message to the broker
 //	case consume.Abandoned, consume.Yielded: leave it to the broker
 //	}
 //
@@ -95,6 +96,11 @@ const (
 	Reject
 	// Stop stops the consumer.
 	Stop
+	// Pause leaves the message unsettled and pauses the consumer's intake of
+	// its source (a partition, a subscription, a queue): the process keeps
+	// running, the consumer reports unhealthy until it is resumed or
+	// restarted, and the message is delivered again then.
+	Pause
 )
 
 // String returns the action's name.
@@ -108,6 +114,8 @@ func (a Action) String() string {
 		return "reject"
 	case Stop:
 		return "stop"
+	case Pause:
+		return "pause"
 	default:
 		return fmt.Sprintf("action(%d)", int(a))
 	}
@@ -133,6 +141,9 @@ const (
 	// Yielded: a wait would have ended past the Delivery's deadline. The
 	// message is not settled; Result.Attempts is where its attempts resume.
 	Yielded
+	// Paused: the error handler chose Pause. The message is not settled;
+	// the consumer pauses its source.
+	Paused
 )
 
 // String returns the outcome's name.
@@ -150,6 +161,8 @@ func (o Outcome) String() string {
 		return "abandoned"
 	case Yielded:
 		return "yielded"
+	case Paused:
+		return "paused"
 	default:
 		return fmt.Sprintf("outcome(%d)", int(o))
 	}
@@ -285,6 +298,8 @@ func (p *Processor[M]) failed(stop, work context.Context, msg M, d Delivery, att
 		return Result{Outcome: Requeued, Err: err, Attempts: attempt}, true
 	case action == Reject:
 		return Result{Outcome: Rejected, Err: err, Attempts: attempt}, true
+	case action == Pause:
+		return Result{Outcome: Paused, Err: err, Attempts: attempt}, true
 	case action == Retry && !last:
 		if out, ok := p.wait(stop, work, d.Deadline, p.Redelivery, attempt, err); !ok {
 			return Result{Outcome: out, Err: err, Attempts: attempt}, true

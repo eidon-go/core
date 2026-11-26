@@ -184,9 +184,11 @@ stop := cfg.OnChange("ratelimit", func() {   // "" for any key; relative to a Su
 defer stop()
 ```
 
-The callback runs on the watcher's goroutine after the new values are visible, once per update
-that changed a key at or below the prefix, one update at a time and in order — keep it short. A
-panic in it is recovered and logged.
+The callback runs after the new values are visible, when an update changed a key at or below the
+prefix, on the config's notification goroutine: the callbacks of one change run one after another
+in registration order. The watcher does not wait for them — a slow callback delays only the next
+callbacks, never the new values — and the updates published while callbacks run are merged into
+one notification. A panic in a callback is recovered and logged.
 
 ### Writing a KV backend
 

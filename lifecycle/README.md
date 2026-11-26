@@ -129,11 +129,14 @@ fails as soon as the stop begins, like net/http's), `Close` in its own goroutine
 after a failed `Drain` so that `Serve` returns, `Run` after `Shutdown` returning `nil`,
 `Healthcheck` (`ErrNotServing` before `Run` and from the moment the stop begins), `Draining()`
 for long-lived handlers, and panics in the four functions turned into errors. `Listen` returns
-before `Serve` or `Drain` is called (a `Shutdown` during `Start` waits for it), so they can share
-the listener without locking. It returns `ErrNotStarted`, `ErrAlreadyStarted` and `ErrClosed`;
+before `Serve` or `Drain` is called (a `Shutdown` during `Start` waits for it until its own
+context is done; the stop then follows once `Listen` returns), so they can share the listener
+without locking. It returns `ErrNotStarted`, `ErrAlreadyStarted` and `ErrClosed`;
 modules re-export them (`var ErrClosed = lifecycle.ErrClosed`) and wrap the errors they return
 with their own prefix. `DrainBlocking(srv.GracefulStop)` adapts a graceful stop without a
-context.
+context. `ListenTCP(ctx, addr)` opens the TCP listener of `Listen`, and `ListenerOnce(ln)` wraps a
+listener passed in by the user: `Serve` closes its listener and `Close` closes it again in case
+`Serve` never ran, which not every `net.Listener` tolerates.
 
 Keep the `*Server` in an unexported field and delegate `Start`, `Run`, `Shutdown` and
 `Healthcheck` to it: embedding would make every method added to `Server` later part of the

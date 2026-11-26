@@ -90,6 +90,9 @@ type Server struct {
 	started bool
 	running bool
 	closed  bool
+	// listening is open while Start runs Listen, which happens outside mu so
+	// that a Shutdown meanwhile can honor its ctx.
+	listening chan struct{}
 
 	serving atomic.Bool
 
@@ -119,22 +122,43 @@ func NewServer(funcs ServerFuncs) *Server {
 }
 
 // Start calls Listen, if set. It returns ErrClosed after Shutdown and
-// ErrAlreadyStarted when called twice. Implements Starter.
+// ErrAlreadyStarted when called twice (or during another Start); a Shutdown
+// during Listen makes it return ErrClosed once Listen has returned. Implements
+// Starter.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	switch {
 	case s.closed:
+		s.mu.Unlock()
+
 		return ErrClosed
-	case s.started:
+	case s.started || s.listening != nil:
+		s.mu.Unlock()
+
 		return ErrAlreadyStarted
 	}
 
+	listening := make(chan struct{})
+	s.listening = listening
+	s.mu.Unlock()
+
+	var err error
 	if s.funcs.Listen != nil {
-		if err := protect("listen", func() error { return s.funcs.Listen(ctx) }); err != nil {
-			return err
-		}
+		err = protect("listen", func() error { return s.funcs.Listen(ctx) })
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.listening = nil
+	close(listening)
+
+	switch {
+	case err != nil:
+		return err
+	case s.closed: // Shutdown stops what Listen opened
+		return ErrClosed
 	}
 
 	s.started = true
@@ -196,12 +220,19 @@ func (s *Server) Run(ctx context.Context) error {
 // every later call, returns at once. The error of Drain goes to the first
 // call only; later calls return nil, or ctx.Err() if their own ctx ends
 // before the drain finishes or is cut off. It is safe without Start or Run;
-// a Shutdown during Start waits for Listen. Implements Resource.
+// a Shutdown during Start waits for Listen until ctx is done — then it returns
+// ctx.Err() and the stop, cut off at once, follows when Listen returns.
+// Implements Resource.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	first := !s.closed
 	s.closed = true
+	listening := s.listening
 	s.mu.Unlock()
+
+	if err := s.awaitListen(ctx, listening); err != nil {
+		return err
+	}
 
 	s.beginStop(ctx)
 
@@ -278,6 +309,28 @@ func (s *Server) claimRun() (bool, error) {
 	s.serving.Store(true)
 
 	return true, nil
+}
+
+// awaitListen waits for a Listen in progress (listening, nil if none) until
+// ctx is done; then it leaves the stop, cut off at once, to follow the Listen
+// and returns ctx.Err().
+func (s *Server) awaitListen(ctx context.Context, listening <-chan struct{}) error {
+	if listening == nil {
+		return nil
+	}
+
+	select {
+	case <-listening:
+		return nil
+	case <-ctx.Done():
+		go func() {
+			<-listening
+			s.beginStop(ctx)
+			s.forceStop()
+		}()
+
+		return ctx.Err() //nolint:wrapcheck // the caller's own context error
+	}
 }
 
 // beginStop starts the one drain. Its ctx keeps the values of ctx but not

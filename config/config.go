@@ -47,6 +47,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/eidon-go/core/lifecycle"
@@ -294,11 +295,19 @@ func (c *Config) closeKV() error {
 func (c *Config) watchLoop(stop, _ context.Context) error {
 	defer close(c.loopDone)
 
-	if c.watch != nil {
-		c.watch.run(stop)
-	} else {
+	if c.watch == nil {
 		<-stop.Done()
+
+		return nil
 	}
+
+	seen := c.store.current() // before the watcher can publish
+
+	var wg sync.WaitGroup
+	wg.Go(func() { c.store.notifyLoop(stop, seen) })
+
+	c.watch.run(stop)
+	wg.Wait()
 
 	return nil
 }

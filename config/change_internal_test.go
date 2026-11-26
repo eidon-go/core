@@ -75,6 +75,52 @@ func TestConfig_OnChange(t *testing.T) {
 	assert.Equal(t, "any", receive(t, calls))
 }
 
+// A slow callback holds neither the watcher nor the new values; the updates
+// published meanwhile reach it as one change.
+func TestConfig_OnChangeDoesNotHoldTheWatcher(t *testing.T) {
+	t.Parallel()
+
+	kv := newFakeKV()
+	kv.SetData("/flags.json", []byte(`{"v": 1}`))
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(), quiet())
+	require.NoError(t, err)
+
+	entered, release := make(chan string, 4), make(chan struct{})
+
+	cfg.OnChange("v", func() {
+		entered <- Get[string](cfg, "v")
+
+		<-release
+	})
+
+	runConfig(t, cfg, kv, "/flags.json")
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	kv.Set("/flags.json", []byte(`{"v": 2}`))
+	assert.Equal(t, "2", receive(t, entered))
+
+	// The callback blocks; the watcher keeps publishing.
+	kv.Set("/flags.json", []byte(`{"v": 3}`))
+	kv.Set("/flags.json", []byte(`{"v": 4}`))
+	require.Eventually(t, func() bool { return Get[string](cfg, "v") == "4" }, 5*time.Second, time.Millisecond)
+
+	close(release)
+	assert.Equal(t, "4", receive(t, entered), "the updates during the callback are merged")
+
+	select {
+	case v := <-entered:
+		t.Fatalf("unexpected extra call with %q", v)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestConfig_OptionalWatchedKeys(t *testing.T) {
 	t.Parallel()
 
