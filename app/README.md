@@ -95,8 +95,9 @@ returned.
 `Healthcheck(ctx)` reports **readiness**: `ErrNotReady` before `Run`, while starting and from the
 moment shutdown is requested; otherwise it runs the `lifecycle.Healthchecker` of every component
 added `WithReadiness()` concurrently and joins the failures, each prefixed with the component's
-name (`lifecycle.NameOf`). `App` implements `lifecycle.Healthchecker`, so it can back `/readyz`
-directly.
+name (`lifecycle.NameOf`). Components added without the option are not checked at all, so a slow
+or hanging check of one never delays `/readyz`. `App` implements `lifecycle.Healthchecker`, so it
+can back `/readyz` directly.
 
 Readiness is **opt-in**. A failing readiness check takes every instance out of the load balancer
 at once, so only the dependencies without which the service cannot answer any request belong in
