@@ -28,20 +28,22 @@ const (
 type Option func(*options)
 
 type options struct {
-	defaults     map[string]any
-	files        []fileSource
-	fsys         fs.FS
-	parsers      parsers
-	kv           KV
-	keys         []string
-	watchedKeys  []string
-	kvTimeout    time.Duration
-	watchInitial time.Duration
-	watchMax     time.Duration
-	envLookup    func(string) (string, bool)
-	envPrefix    string
-	envBootstrap bool
-	logger       *slog.Logger
+	defaults    map[string]any
+	files       []fileSource
+	fsys        fs.FS
+	parsers     parsers
+	kv          KV
+	keys        []string
+	watchedKeys []string
+	// optionalWatched marks the watched keys that New accepts as missing.
+	optionalWatched map[string]bool
+	kvTimeout       time.Duration
+	watchInitial    time.Duration
+	watchMax        time.Duration
+	envLookup       func(string) (string, bool)
+	envPrefix       string
+	envBootstrap    bool
+	logger          *slog.Logger
 	// err is an error found while applying options (e.g. a key collision in
 	// WithDefaults); New returns it.
 	err error
@@ -146,6 +148,25 @@ func WithKeys(keys ...string) Option {
 // values. Watched keys take priority over WithKeys and are merged in order.
 func WithWatchedKeys(keys ...string) Option {
 	return func(o *options) { o.watchedKeys = append(o.watchedKeys, keys...) }
+}
+
+// WithOptionalWatchedKeys adds watched keys, like WithWatchedKeys, that may
+// be missing: New does not fail with ErrKVKeyNotFound when one does not
+// exist, but treats it as an empty document — as the watch treats a key
+// deleted at run time — and the watch picks it up once it is created. Use it
+// for feature flags or overrides that an operator creates only when needed.
+func WithOptionalWatchedKeys(keys ...string) Option {
+	return func(o *options) {
+		if o.optionalWatched == nil {
+			o.optionalWatched = map[string]bool{}
+		}
+
+		for _, key := range keys {
+			o.optionalWatched[key] = true
+		}
+
+		o.watchedKeys = append(o.watchedKeys, keys...)
+	}
 }
 
 // WithKVTimeout bounds every KV read and the wait for the initial state of a

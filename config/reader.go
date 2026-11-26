@@ -1,8 +1,10 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 )
 
@@ -64,19 +66,9 @@ func NewReader(cfg *Config) *Reader {
 // empty list is a present value. Validate such values where they are used.
 func Required[T ValueType](r *Reader, key string) T {
 	v, raw, res := lookupAs[T](r.cfg, key)
-
-	var err error
-
-	switch res {
-	case lookupFound:
-		return v
-	case lookupMissing:
-		err = ErrKeyMissing
-	case lookupMistyped:
-		err = fmt.Errorf("%w: want %T, got %T", ErrKeyMistyped, v, raw)
+	if res != lookupFound {
+		r.record(keyError(r.cfg, key, v, raw, res))
 	}
-
-	r.record(&KeyError{Key: key, Err: err})
 
 	return v
 }
@@ -91,7 +83,7 @@ func Optional[T ValueType](r *Reader, key string, def T) T {
 	case lookupFound:
 		return v
 	case lookupMistyped:
-		r.record(&KeyError{Key: key, Err: fmt.Errorf("%w: want %T, got %T", ErrKeyMistyped, v, raw)})
+		r.record(keyError(r.cfg, key, v, raw, res))
 	case lookupMissing:
 	}
 
@@ -111,4 +103,38 @@ func (r *Reader) record(err error) {
 	r.mu.Lock()
 	r.errs = append(r.errs, err)
 	r.mu.Unlock()
+}
+
+// keyError describes a failed lookup of key; want is the zero value of the
+// requested type. The key is the full one, the prefix of a Sub view included.
+func keyError(cfg *Config, key string, want, raw any, res lookupResult) *KeyError {
+	if cfg != nil {
+		key = viewKey(cfg.prefix, key)
+	}
+
+	if res == lookupMistyped {
+		return &KeyError{Key: key, Err: fmt.Errorf("%w: want %T, got %T", ErrKeyMistyped, want, raw)}
+	}
+
+	return &KeyError{Key: key, Err: ErrKeyMissing}
+}
+
+// warnMistyped logs, once per key, that Get or GetOrDefault replaced a value
+// of the wrong type by the zero value or the default.
+func warnMistyped(cfg *Config, key string, want, raw any) {
+	full := viewKey(cfg.prefix, key)
+	if _, logged := cfg.store.warned.LoadOrStore(full, struct{}{}); logged {
+		return
+	}
+
+	cfg.logger.WarnContext(
+		context.Background(),
+		"config: value has the wrong type, using the default",
+		slog.String(
+			"key",
+			full,
+		),
+		slog.String("want", fmt.Sprintf("%T", want)),
+		slog.String("got", fmt.Sprintf("%T", raw)),
+	)
 }
