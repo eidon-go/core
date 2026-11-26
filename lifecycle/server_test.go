@@ -303,6 +303,74 @@ func TestServer_ShutdownDeadlineCutsOff(t *testing.T) {
 	assert.Equal(t, int32(1), f.closes.Load(), "Close runs once")
 }
 
+// slowListen returns funcs whose Listen blocks until release is closed and
+// reports through listening that it has begun.
+func slowListen(f *fakeServer) (lifecycle.ServerFuncs, chan struct{}, chan struct{}) {
+	listening, release := make(chan struct{}), make(chan struct{})
+	funcs := f.funcs()
+	funcs.Listen = func(context.Context) error {
+		close(listening)
+		<-release
+
+		return nil
+	}
+
+	return funcs, listening, release
+}
+
+func TestServer_ShutdownDuringListenWaitsForIt(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeServer()
+	funcs, listening, release := slowListen(f)
+	s := lifecycle.NewServer(funcs)
+
+	started := make(chan error, 1)
+
+	go func() { started <- s.Start(t.Context()) }()
+
+	<-listening
+	require.ErrorIs(t, s.Start(t.Context()), lifecycle.ErrAlreadyStarted, "a second Start during Listen")
+
+	shut := make(chan error, 1)
+
+	go func() { shut <- s.Shutdown(t.Context()) }()
+
+	// Shutdown has begun once a Start sees it.
+	require.Eventually(t, func() bool { return errors.Is(s.Start(t.Context()), lifecycle.ErrClosed) },
+		2*time.Second, time.Millisecond)
+	close(release)
+
+	require.ErrorIs(t, <-started, lifecycle.ErrClosed)
+	require.NoError(t, <-shut)
+	assert.Equal(t, int32(1), f.drains.Load())
+}
+
+func TestServer_ShutdownDuringListenHonorsItsContext(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeServer()
+	funcs, listening, release := slowListen(f)
+	s := lifecycle.NewServer(funcs)
+
+	started := make(chan error, 1)
+
+	go func() { started <- s.Start(t.Context()) }()
+
+	<-listening
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	require.ErrorIs(t, s.Shutdown(ctx), context.Canceled, "Shutdown does not wait for Listen past its ctx")
+
+	close(release)
+
+	require.ErrorIs(t, <-started, lifecycle.ErrClosed)
+	require.Eventually(t, func() bool { return f.closes.Load() == 1 }, 2*time.Second, time.Millisecond,
+		"the stop follows once Listen returns")
+}
+
 func TestServer_DrainErrorGoesToFirstShutdown(t *testing.T) {
 	t.Parallel()
 

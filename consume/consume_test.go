@@ -97,6 +97,10 @@ func TestProcess_Outcomes(t *testing.T) {
 			redelivery: fast(3), want: consume.Stopped, attempts: 1, asked: 1, wantErr: errDown,
 		},
 		{
+			name: "pause", errs: []error{errDown}, action: consume.Pause,
+			redelivery: fast(3), want: consume.Paused, attempts: 1, asked: 1, wantErr: errDown,
+		},
+		{
 			name: "unknown action stops", errs: []error{errDown}, action: consume.Action(42),
 			redelivery: fast(3), want: consume.Stopped, attempts: 1, asked: 1, wantErr: errDown,
 		},
@@ -375,14 +379,16 @@ func TestTransient(t *testing.T) {
 func TestStrings(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, []string{"retry", "requeue", "reject", "stop", "action(9)"}, []string{
+	assert.Equal(t, []string{"retry", "requeue", "reject", "stop", "pause", "action(9)"}, []string{
 		consume.Retry.String(), consume.Requeue.String(), consume.Reject.String(), consume.Stop.String(),
-		consume.Action(9).String(),
+		consume.Pause.String(), consume.Action(9).String(),
 	})
-	assert.Equal(t, []string{"handled", "requeued", "rejected", "stopped", "abandoned", "yielded", "outcome(9)"},
+	assert.Equal(t, []string{
+		"handled", "requeued", "rejected", "stopped", "abandoned", "yielded", "paused", "outcome(9)",
+	},
 		[]string{
 			consume.Handled.String(), consume.Requeued.String(), consume.Rejected.String(), consume.Stopped.String(),
-			consume.Abandoned.String(), consume.Yielded.String(), consume.Outcome(9).String(),
+			consume.Abandoned.String(), consume.Yielded.String(), consume.Paused.String(), consume.Outcome(9).String(),
 		})
 }
 

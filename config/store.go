@@ -25,8 +25,12 @@ type store struct {
 	// key, acceptable for config keys.
 	envNames sync.Map
 
-	// changes holds the OnChange listeners; notify calls them on publish.
+	// changes holds the OnChange listeners; notifyLoop calls them after a
+	// publish.
 	changes changeHub
+	// published is signalled (without blocking) by every publish; notifyLoop
+	// waits on it, so that updates arriving during a callback are merged.
+	published chan struct{}
 	// logger reports mistyped values and panicking listeners.
 	logger *slog.Logger
 	// warned holds the keys whose mistyped value has been logged (string →
@@ -50,6 +54,7 @@ func newStore(envLookup func(string) (string, bool), envName func(string) string
 		envName:   envName,
 		defaults:  defaults,
 		logger:    slog.Default(),
+		published: make(chan struct{}, 1),
 	}
 	s.setSnapshot(nil)
 
@@ -66,17 +71,24 @@ func (s *store) setSnapshot(m map[string]any) {
 	s.snapshot.Store(&m)
 }
 
-// publish publishes m and then notifies the OnChange listeners of the keys it
-// changed. Calls must not overlap (the watcher serializes them). The caller
-// must not mutate m afterwards.
+// publish publishes m and signals notifyLoop, without waiting for the
+// OnChange listeners. Calls must not overlap (the watcher serializes them).
+// The caller must not mutate m afterwards.
 func (s *store) publish(snapshot map[string]any) {
 	if snapshot == nil {
 		snapshot = map[string]any{}
 	}
 
-	old := s.snapshot.Swap(&snapshot)
-	s.notify(*old, snapshot)
+	s.snapshot.Store(&snapshot)
+
+	select {
+	case s.published <- struct{}{}:
+	default: // a signal is pending: notifyLoop will see this snapshot too
+	}
 }
+
+// current returns the published snapshot.
+func (s *store) current() map[string]any { return *s.snapshot.Load() }
 
 // lookup resolves key in priority order: environment, snapshot, defaults.
 // Environment values are strings; the others keep their decoded type.

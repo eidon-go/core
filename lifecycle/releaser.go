@@ -53,7 +53,10 @@ type Releaser struct {
 
 // ShutdownOnce returns a Releaser for a release function that honors ctx,
 // such as an SDK's Shutdown(ctx): the first Shutdown calls release with its
-// own ctx and returns its result. It panics if release is nil.
+// own ctx and returns its result. The release runs once, with that ctx only:
+// a later Shutdown does not retry it. When the ctx is already done, release
+// must still free the resource — close it at once instead of returning
+// ctx.Err() untouched. It panics if release is nil.
 func ShutdownOnce(release func(ctx context.Context) error) *Releaser {
 	if release == nil {
 		panic("lifecycle: ShutdownOnce: nil release")

@@ -53,6 +53,7 @@ case consume.Handled:              // ack
 case consume.Requeued:             // give it back to the broker
 case consume.Rejected:             // skip, terminate or dead-letter it
 case consume.Stopped:              // stop the consumer with res.Err
+case consume.Paused:               // pause the message's source, report unhealthy
 case consume.Abandoned, consume.Yielded: // not settled: the broker delivers it again
 }
 ```
@@ -61,7 +62,7 @@ case consume.Abandoned, consume.Yielded: // not settled: the broker delivers it 
 |---|---|
 | `Handle` | one attempt; a panic becomes the attempt's error (`"<Name>: handler panicked: …"`) |
 | `Observe` | optional wrapper of every attempt (spans, metrics); `call` runs `Handle` with panics recovered |
-| `OnError` | decides `Retry`, `Requeue`, `Reject` or `Stop` for a failed attempt; a panic in it counts as `Stop` |
+| `OnError` | decides `Retry`, `Requeue`, `Reject`, `Stop` or `Pause` for a failed attempt; a panic in it counts as `Stop` |
 | `Redelivery` | attempts and delays of `Retry`; `Retry` with no attempt left counts as `Stop`, and `OnError` gets `Exhausted` joined to the error once none is left |
 | `Transient` | waits of a `Transient` error; the zero value counts it as an ordinary failure at once |
 | `Exhausted` | the sentinel joined when attempts run out (default `consume.ErrRetriesExhausted`) |

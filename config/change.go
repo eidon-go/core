@@ -16,12 +16,15 @@ import (
 // what was built from earlier values — a rate limiter, a client pool — which
 // Live cannot do.
 //
-// callback runs on the watcher's goroutine once the new values are visible
-// to Get. Updates are delivered one at a time and in order, so keep it short:
-// a slow callback delays the next update. A panic in it is recovered and
-// logged. The environment layer is not watched, so callback may be called
-// for a key that an environment variable pins. FromMap configs and configs
-// without watched keys never call it.
+// callback runs on the goroutine of the config's change notifications (one
+// per Config, started by Run), once the new values are visible to Get; the
+// callbacks of one change run one after another, in registration order. The
+// watcher does not wait for them: a slow callback delays only the next
+// callbacks, never the new values, and the updates published meanwhile are
+// merged into one notification. A panic in callback is recovered and logged.
+// The environment layer is not watched, so callback may be called for a key
+// that an environment variable pins. FromMap configs and configs without
+// watched keys never call it; nor does a Config after Shutdown.
 func (c *Config) OnChange(prefix string, callback func()) func() {
 	if c == nil || c.store == nil || callback == nil {
 		return func() {}
@@ -81,9 +84,26 @@ func (h *changeHub) snapshot() []listener {
 	return out
 }
 
+// notifyLoop calls the OnChange listeners after every publish until stop is
+// done. seen is the snapshot the listeners already know; updates published
+// while the listeners run are merged into the next round.
+func (s *store) notifyLoop(stop context.Context, seen map[string]any) {
+	for {
+		select {
+		case <-stop.Done():
+			return
+		case <-s.published:
+		}
+
+		cur := s.current()
+		s.notify(stop, seen, cur)
+		seen = cur
+	}
+}
+
 // notify calls the listeners whose prefix covers a key that differs between
 // old and cur.
-func (s *store) notify(old, cur map[string]any) {
+func (s *store) notify(ctx context.Context, old, cur map[string]any) {
 	listeners := s.changes.snapshot()
 	if len(listeners) == 0 {
 		return
@@ -96,15 +116,15 @@ func (s *store) notify(old, cur map[string]any) {
 
 	for _, l := range listeners {
 		if covers(l.prefix, changed) {
-			s.call(l)
+			s.call(ctx, l)
 		}
 	}
 }
 
-func (s *store) call(target listener) {
+func (s *store) call(ctx context.Context, target listener) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.ErrorContext(context.Background(), "config: OnChange callback panicked",
+			s.logger.ErrorContext(ctx, "config: OnChange callback panicked",
 				slog.String("prefix", target.prefix), slog.String("panic", fmt.Sprint(r)))
 		}
 	}()
