@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 )
@@ -50,7 +51,7 @@ func (s *sockets) track(conn net.Conn) bool {
 	defer s.mu.Unlock()
 
 	if s.interrupted {
-		_ = conn.Close()
+		go closeNow(conn)
 
 		return false
 	}
@@ -61,7 +62,7 @@ func (s *sockets) track(conn net.Conn) bool {
 }
 
 // interrupt closes the current socket — a write blocked on it fails at
-// once — and fails every later dial.
+// once — and fails every later dial. It does not wait for the close.
 func (s *sockets) interrupt() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,8 +70,17 @@ func (s *sockets) interrupt() {
 	s.interrupted = true
 
 	if s.current != nil {
-		_ = s.current.Close()
+		go closeNow(s.current)
 	}
+}
+
+// closeNow closes conn so that nothing waits on it: an expired deadline
+// first fails the I/O in progress and the close's own writes (a TLS
+// close_notify), then Close. A connection from a custom dialer may still
+// block in either: the caller runs it in the background.
+func closeNow(conn net.Conn) {
+	_ = conn.SetDeadline(time.Now())
+	_ = conn.Close()
 }
 
 // trackingDialer is the CustomDialer of a Connection.
