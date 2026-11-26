@@ -47,7 +47,7 @@ case errors.Is(err, jwt.ErrInvalidToken): // reject
 | `Issuer` | required | `iss` of issued tokens; parsed tokens must carry it |
 | `Audience` | `[Issuer]` | `aud` of issued tokens; parsed tokens must name at least one |
 | `Subject` | empty | `sub` of issued tokens; when set, parsed tokens must carry it |
-| `TTL` | required, > 0 | `exp` = now + TTL |
+| `TTL` | required, ≥ 1s (time claims are whole seconds) | `exp` = now + TTL |
 | `Leeway` | `0` | clock skew tolerated on `exp`, `nbf`, `iat` |
 
 `Config.Validate` reports every problem at once (each wraps `ErrInvalidConfig`).

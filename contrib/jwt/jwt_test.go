@@ -65,9 +65,14 @@ func TestConfig_Validate(t *testing.T) {
 		{name: "valid", cfg: baseConfig()},
 		{
 			name: "valid with all fields",
-			cfg:  jwt.Config{Issuer: "auth", Audience: []string{"api"}, Subject: "user", TTL: 1, Leeway: 1},
+			cfg:  jwt.Config{Issuer: "auth", Audience: []string{"api"}, Subject: "user", TTL: time.Second, Leeway: 1},
 		},
 		{name: "empty", cfg: jwt.Config{}, want: []string{"Issuer", "TTL"}},
+		{
+			name: "TTL below the claims' precision",
+			cfg:  jwt.Config{Issuer: "auth", TTL: 999 * time.Millisecond},
+			want: []string{"TTL"},
+		},
 		{
 			name: "invalid values",
 			cfg:  jwt.Config{Issuer: "auth", Audience: []string{"api", ""}, TTL: -1, Leeway: -1},

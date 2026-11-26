@@ -21,6 +21,31 @@ func TestNew_ShortSecret(t *testing.T) {
 	require.ErrorContains(t, err, "31 bytes")
 }
 
+func TestKey_NotFromNew(t *testing.T) {
+	t.Parallel()
+
+	valid, err := hs256.New([]byte(strings.Repeat("k", hs256.MinSecretLength)))
+	require.NoError(t, err)
+
+	token, err := valid.Sign(t.Context(), gojwt.RegisteredClaims{Issuer: "auth"})
+	require.NoError(t, err)
+
+	for name, key := range map[string]*hs256.Key{"zero": {}, "nil": nil} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := key.Sign(t.Context(), gojwt.RegisteredClaims{})
+			require.ErrorContains(t, err, "key not created with New")
+
+			var claims gojwt.RegisteredClaims
+
+			err = key.Verify(t.Context(), token, &claims)
+			require.ErrorIs(t, err, jwt.ErrInvalidToken)
+			require.ErrorContains(t, err, "key not created with New")
+		})
+	}
+}
+
 func TestKey_SignVerify(t *testing.T) {
 	t.Parallel()
 

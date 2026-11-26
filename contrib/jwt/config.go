@@ -24,7 +24,9 @@ type Config struct {
 	Subject string `json:"subject" yaml:"subject"`
 
 	// TTL is how long an issued token is valid ("exp" = now + TTL).
-	// Required, positive.
+	// Required, at least a second: the time claims are whole seconds
+	// (github.com/golang-jwt/jwt/v5's TimePrecision), so a shorter TTL could
+	// issue a token that is expired at once.
 	TTL time.Duration `json:"ttl" yaml:"ttl"`
 
 	// Leeway is the clock skew tolerated when checking "exp", "nbf" and
@@ -44,8 +46,8 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("%w: Audience must not contain empty strings", ErrInvalidConfig))
 	}
 
-	if c.TTL <= 0 {
-		errs = append(errs, fmt.Errorf("%w: TTL must be positive", ErrInvalidConfig))
+	if c.TTL < time.Second {
+		errs = append(errs, fmt.Errorf("%w: TTL must be at least 1s", ErrInvalidConfig))
 	}
 
 	if c.Leeway < 0 {

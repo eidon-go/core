@@ -40,8 +40,13 @@ func New(secret []byte) (*Key, error) {
 	return &Key{secret: append([]byte(nil), secret...)}, nil
 }
 
-// Sign signs claims with HS256. ctx is not used. Implements jwt.Signer.
+// Sign signs claims with HS256. ctx is not used. A Key not made by New (a
+// zero or nil Key) returns an error. Implements jwt.Signer.
 func (k *Key) Sign(_ context.Context, claims gojwt.Claims) (string, error) {
+	if !k.valid() {
+		return "", fmt.Errorf("hs256: sign: %w", errNoKey)
+	}
+
 	token, err := gojwt.NewWithClaims(gojwt.SigningMethodHS256, claims).SignedString(k.secret)
 	if err != nil {
 		return "", fmt.Errorf("hs256: sign: %w", err)
@@ -64,11 +69,24 @@ func (k *Key) Verify(_ context.Context, token string, claims gojwt.Claims, opts 
 	return nil
 }
 
-// errAlgorithm rejects a token of another algorithm in keyfunc, so that a
-// WithValidMethods in Verify's opts cannot widen the accepted algorithms.
-var errAlgorithm = errors.New("hs256: token is not signed with HS256")
+var (
+	// errAlgorithm rejects a token of another algorithm in keyfunc, so that
+	// a WithValidMethods in Verify's opts cannot widen the accepted
+	// algorithms.
+	errAlgorithm = errors.New("hs256: token is not signed with HS256")
+
+	// errNoKey is returned by a Key not made by New, which would otherwise
+	// sign and verify with an empty secret.
+	errNoKey = errors.New("hs256: key not created with New")
+)
+
+func (k *Key) valid() bool { return k != nil && len(k.secret) >= MinSecretLength }
 
 func (k *Key) keyfunc(token *gojwt.Token) (any, error) {
+	if !k.valid() {
+		return nil, errNoKey
+	}
+
 	if token.Method != gojwt.SigningMethodHS256 {
 		return nil, errAlgorithm
 	}
