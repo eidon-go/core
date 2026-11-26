@@ -195,9 +195,39 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 
 // WithPropagators sets the propagators that inject the trace context into
 // published record headers and extract it from consumed ones. Default: the
-// global propagators at construction time.
+// global propagators at construction time, which propagate nothing until
+// otel.SetTextMapPropagator is called (the otel module's Provider.SetGlobal
+// does it); see WithTelemetry.
 func WithPropagators(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.propagators = p }
+}
+
+// Telemetry is the set of OpenTelemetry providers the module instruments
+// with. The Provider of github.com/eidon-go/core/contrib/otel implements it.
+type Telemetry interface {
+	TracerProvider() trace.TracerProvider
+	MeterProvider() metric.MeterProvider
+	Propagators() propagation.TextMapPropagator
+}
+
+// WithTelemetry sets the tracer provider, the meter provider and the
+// propagators from telemetry — the way to use an otel Provider that is not installed
+// as the global one. WithTracerProvider alone leaves the propagators at the
+// global default: spans are recorded, but the trace context is neither
+// written to published records nor read from consumed ones, so traces break
+// between producer and consumer. Options apply in order, so a
+// WithTracerProvider, WithMeterProvider or WithPropagators after it replaces
+// one of the three. A nil telemetry is ignored.
+func WithTelemetry(telemetry Telemetry) Option {
+	return func(o *options) {
+		if telemetry == nil {
+			return
+		}
+
+		o.tracerProvider = telemetry.TracerProvider()
+		o.meterProvider = telemetry.MeterProvider()
+		o.propagators = telemetry.Propagators()
+	}
 }
 
 // WithKgoOpts passes extra options to kgo.NewClient, applied after the ones

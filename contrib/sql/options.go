@@ -56,6 +56,29 @@ func WithMeterProvider(provider metric.MeterProvider) Option {
 	return func(o *options) { o.meterProvider = provider }
 }
 
+// Telemetry is the set of OpenTelemetry providers the otelsql
+// instrumentation uses. The Provider of github.com/eidon-go/core/contrib/otel
+// implements it.
+type Telemetry interface {
+	TracerProvider() trace.TracerProvider
+	MeterProvider() metric.MeterProvider
+}
+
+// WithTelemetry sets the tracer and meter providers from telemetry — the way to use
+// an otel Provider that is not installed as the global one. Options apply in
+// order, so a WithTracerProvider or WithMeterProvider after it replaces one
+// of the two. A nil telemetry is ignored. New only.
+func WithTelemetry(telemetry Telemetry) Option {
+	return func(o *options) {
+		if telemetry == nil {
+			return
+		}
+
+		o.tracerProvider = telemetry.TracerProvider()
+		o.meterProvider = telemetry.MeterProvider()
+	}
+}
+
 // WithOtelSQLOptions adds options to the otelsql instrumentation (span
 // names, filters, attributes, SQL commenter), after the providers. New only.
 func WithOtelSQLOptions(opts ...otelsql.Option) Option {

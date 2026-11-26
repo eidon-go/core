@@ -124,9 +124,38 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 }
 
 // WithPropagators sets the propagators used to extract the trace context from
-// incoming requests. Default: the global propagators at New time.
+// incoming requests. Default: the global propagators at New time, which
+// propagate nothing until otel.SetTextMapPropagator is called (the otel
+// module's Provider.SetGlobal does it); see WithTelemetry.
 func WithPropagators(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.propagators = p }
+}
+
+// Telemetry is the set of OpenTelemetry providers the server instruments
+// with. The Provider of github.com/eidon-go/core/contrib/otel implements it.
+type Telemetry interface {
+	TracerProvider() trace.TracerProvider
+	MeterProvider() metric.MeterProvider
+	Propagators() propagation.TextMapPropagator
+}
+
+// WithTelemetry sets the tracer provider, the meter provider and the
+// propagators from telemetry — the way to use an otel Provider that is not installed
+// as the global one. WithTracerProvider alone leaves the propagators at the
+// global default: spans are recorded, but the trace context of incoming
+// requests is lost and traces break between services. Options apply in
+// order, so a WithTracerProvider, WithMeterProvider or WithPropagators after
+// it replaces one of the three. A nil telemetry is ignored.
+func WithTelemetry(telemetry Telemetry) Option {
+	return func(o *options) {
+		if telemetry == nil {
+			return
+		}
+
+		o.tracerProvider = telemetry.TracerProvider()
+		o.meterProvider = telemetry.MeterProvider()
+		o.propagators = telemetry.Propagators()
+	}
 }
 
 // WithOtelHTTPOptions passes extra options to otelhttp.NewHandler, applied
