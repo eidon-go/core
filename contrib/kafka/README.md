@@ -78,6 +78,7 @@ franz-go setting through `WithKgoOpts`.
 | `WithConnectRetry(retry.Policy)` | all: the ping in `Start` | `retry.ConnectPolicy()`, logged |
 | `WithTLSConfig(*tls.Config)` | all | plaintext |
 | `WithTracerProvider` / `WithMeterProvider` / `WithPropagators` | all | the otel globals at construction time |
+| `WithTelemetry` (all three from the `otel` module's `Provider` when it is not global) | all | — |
 | `WithKgoOpts(...kgo.Opt)` | all, applied last | — |
 | `WithErrorHandler(ErrorHandler)` | consumer | `DefaultErrorHandler` |
 | `WithRedeliveryPolicy(retry.Policy)` | consumer | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s |

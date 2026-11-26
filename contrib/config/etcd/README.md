@@ -64,6 +64,7 @@ remote configuration can be read.
 | `WithTracerProvider(trace.TracerProvider)` | global, at `New` | Spans of the etcd gRPC calls (see [OpenTelemetry](#opentelemetry)) |
 | `WithMeterProvider(metric.MeterProvider)` | global, at `New` | Metrics of the etcd gRPC calls |
 | `WithPropagators(propagation.TextMapPropagator)` | global, at `New` | Trace context injected into the calls |
+| `WithTelemetry(Telemetry)` | — | All three from the `otel` module's `Provider` when it is not global |
 | `WithClientConfig(func(*clientv3.Config))` | — | Last-chance changes to the `clientv3.Config` (message sizes, gRPC dial options, retry backoff). `DialOptions` already holds the OpenTelemetry stats handler: append to it. Keep `DialTimeout` positive with credentials — it is the only bound on the authentication |
 
 `NewFromClient(*clientv3.Client)` uses a client the application already has (for leases or

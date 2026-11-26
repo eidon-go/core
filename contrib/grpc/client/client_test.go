@@ -18,6 +18,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -274,6 +276,37 @@ func TestConn_TracePropagation(t *testing.T) {
 	assert.Equal(t, "test.Echo/Echo", clientSpan.Name())
 	assert.Equal(t, trace.SpanKindClient, clientSpan.SpanKind())
 	assert.Equal(t, clientSpan.SpanContext().TraceID(), serverSpan.SpanContext().TraceID(), "the trace continues")
+	assert.Equal(t, clientSpan.SpanContext().SpanID(), serverSpan.Parent().SpanID())
+}
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{ spans *tracetest.SpanRecorder }
+
+func (t telemetry) TracerProvider() trace.TracerProvider {
+	return sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(t.spans))
+}
+
+func (telemetry) MeterProvider() metric.MeterProvider { return metricnoop.NewMeterProvider() }
+
+func (telemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }
+
+func TestConn_TracePropagationWithTelemetry(t *testing.T) {
+	t.Parallel()
+
+	clientSpans := tracetest.NewSpanRecorder()
+	serverSpans := tracetest.NewSpanRecorder()
+
+	srv, _ := startServer(t, grpcsrv.WithTelemetry(telemetry{spans: serverSpans}))
+	conn := newConn(t, plaintext(srv), client.WithTelemetry(telemetry{spans: clientSpans}))
+
+	require.NoError(t, echo(t.Context(), conn, nil))
+	require.Eventually(t, func() bool {
+		return len(clientSpans.Ended()) == 1 && len(serverSpans.Ended()) == 1
+	}, testTimeout, time.Millisecond)
+
+	clientSpan, serverSpan := clientSpans.Ended()[0], serverSpans.Ended()[0]
+	assert.Equal(t, clientSpan.SpanContext().TraceID(), serverSpan.SpanContext().TraceID(),
+		"WithTelemetry sets the propagators along with the tracer provider")
 	assert.Equal(t, clientSpan.SpanContext().SpanID(), serverSpan.Parent().SpanID())
 }
 

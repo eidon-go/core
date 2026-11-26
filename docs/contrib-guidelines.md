@@ -118,6 +118,11 @@ The rules below are what the adapters implement; a hand-written component follow
 
 - `WithTracerProvider(trace.TracerProvider)`, `WithMeterProvider(metric.MeterProvider)`,
   `WithPropagators(propagation.TextMapPropagator)`; defaults are the otel globals at `New` time.
+- `WithTelemetry(Telemetry)` sets all three at once. `Telemetry` is a small interface declared
+  in the module (`TracerProvider()`, `MeterProvider()`, `Propagators()` — fewer methods when the
+  module does not propagate) that the `otel` module's `Provider` satisfies structurally, so the
+  module does not import `contrib/otel`. Options apply in order; a single provider option after
+  it replaces one of them.
 - Instrumentation is on by default (disable with a noop provider); use semantic-convention
   attribute names. Only the `otel` module sets globals, and only when asked.
 

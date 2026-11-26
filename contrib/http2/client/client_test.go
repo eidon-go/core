@@ -12,9 +12,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eidon-go/core/contrib/http2"
 	"github.com/eidon-go/core/contrib/http2/client"
@@ -219,6 +222,41 @@ func TestClient_TracingAndPropagation(t *testing.T) {
 	defer mu.Unlock()
 
 	assert.Contains(t, traceparent, spans[0].SpanContext().TraceID().String(), "the trace context is propagated")
+}
+
+// telemetry stands in for the Provider of the otel module.
+type telemetry struct{ tp *sdktrace.TracerProvider }
+
+func (t telemetry) TracerProvider() trace.TracerProvider { return t.tp }
+
+func (telemetry) MeterProvider() metric.MeterProvider { return metricnoop.NewMeterProvider() }
+
+func (telemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }
+
+func TestClient_WithTelemetry(t *testing.T) {
+	t.Parallel()
+
+	traceparent := make(chan string, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceparent <- r.Header.Get("Traceparent")
+
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	rec := tracetest.NewSpanRecorder()
+
+	c, err := client.New(client.Config{},
+		client.WithTelemetry(telemetry{tp: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))}))
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusNoContent, get(t, c, srv.URL).status)
+
+	spans := rec.Ended()
+	require.Len(t, spans, 1)
+	assert.Contains(t, <-traceparent, spans[0].SpanContext().TraceID().String(),
+		"WithTelemetry sets the propagators along with the tracer provider")
 }
 
 // recordingTripper records the order in which wrappers see a request and tags

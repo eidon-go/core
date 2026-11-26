@@ -110,6 +110,7 @@ libpq's `PG*` environment variables, as pgx always does.
 | `WithLogger(*slog.Logger)` | ✓ | ✓ | `slog.Default()` (logs connect retries) |
 | `WithConnectRetry(retry.Policy)` | ✓ | ✓ | `retry.ConnectPolicy()`, logged |
 | `WithTracerProvider` / `WithMeterProvider` | ✓ | ✓ | the otel globals at `New` time; `New` only |
+| `WithTelemetry` (both from the `otel` module's `Provider` when it is not global) | ✓ | ✓ | `New` only |
 | `WithOtelSQLOptions(...otelsql.Option)` | ✓ | | — |
 | `WithOtelPgxOptions(...otelpgx.Option)` | | ✓ | — (`otelpgx.WithDisableAcquireTracer()` against noisy acquire spans) |
 | `WithPoolConfig(func(*pgxpool.Config))` | | ✓ | — (AfterConnect hooks, type registration), applied last |

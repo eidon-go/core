@@ -35,9 +35,12 @@ a.Add(telemetry)           // first: shut down last, after everything that emits
 a.Add(httpServer, worker)  // their spans and metrics recorded while stopping are still exported
 ```
 
-Without `SetGlobal`, hand the providers over explicitly:
-`http2.WithTracerProvider(telemetry.TracerProvider())`, `WithMeterProvider(telemetry.MeterProvider())`,
-`WithPropagators(telemetry.Propagators())`.
+Without `SetGlobal`, hand the provider over explicitly: every integration module takes
+`WithTelemetry(telemetry)` (`http2.WithTelemetry`, `kafka.WithTelemetry`, …), which sets the
+tracer provider, the meter provider and the propagators together. Passing only
+`WithTracerProvider(telemetry.TracerProvider())` is not enough: the propagators stay at the
+global default, which propagates nothing until `SetGlobal`, so spans are recorded but traces
+break between services.
 
 ## Configuration
 
