@@ -25,7 +25,7 @@ imports.
 
 ## Status and roadmap
 
-1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.10` is the latest tag.
+1. **Done:** core + `contrib/config/yaml` merged, CI green. Core `v1.0.0-rc.11` is the latest tag.
    Contrib modules are written against rc.N (cut rc.7… when a module needs core API changes —
    breaking changes are still allowed). Core `v1.0.0` + `contrib/config/yaml/v1.0.0` are tagged
    once the main contrib modules (`http2`, `config/etcd`, `otel`, `grpc`, `kafka`, `sql`) have
@@ -148,7 +148,7 @@ published `go.mod` files.
   JSON is built in; other formats plug in via `WithParser(func([]byte) (map[string]any, error), exts...)`.
   KV backends implement `config.KV`.
 - **`consume`** — `consume.Processor[M]`: the attempt loop every message consumer module builds on
-  (`OnError` → `Retry`/`Requeue`/`Reject`/`Stop`, redelivery waits, panics recovered, failure logs);
+  (`OnError` → `Retry`/`Requeue`/`Reject`/`Stop`/`Pause`, redelivery waits, panics recovered, failure logs);
   `consume.Transient(err)` errors are waited out without counting an attempt; `Delivery.Deadline`
   yields (Kafka's poll budget). Modules keep their own `ErrorAction`/`ErrorHandler` types and map them.
 - **`retry`** — `retry.Policy` with backoff; `OnRetry` hook for logging, `retry.Forever` only

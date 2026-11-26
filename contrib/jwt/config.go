@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// DefaultLeeway is the clock skew tolerated by default: services on
+// different nodes disagree on the time by up to a few hundred milliseconds,
+// enough to reject a token as "not valid yet" the moment it is issued.
+const DefaultLeeway = 30 * time.Second
+
 // Config configures an AuthService.
 type Config struct {
 	// Issuer is the "iss" claim of the issued tokens, required in the parsed
@@ -17,11 +22,12 @@ type Config struct {
 	// name at least one of them. Default: Issuer alone.
 	Audience []string `json:"audience" yaml:"audience"`
 
-	// Subject is the "sub" claim of the issued tokens, required in the
-	// parsed ones when set ("user", "service"). Default empty: no "sub" in
-	// issued tokens and any one accepted. The identity of the caller belongs
-	// in the payload.
-	Subject string `json:"subject" yaml:"subject"`
+	// RequiredSubject, when set, is the "sub" claim of every issued token and
+	// required in the parsed ones — for tokens of one kind ("service").
+	// Default empty: "sub" comes from a payload that implements Subjecter
+	// (the user's ID), and any one is accepted. It cannot be combined with a
+	// Subjecter payload.
+	RequiredSubject string `json:"requiredSubject" yaml:"requiredSubject"`
 
 	// TTL is how long an issued token is valid ("exp" = now + TTL).
 	// Required, at least a second: the time claims are whole seconds
@@ -30,7 +36,7 @@ type Config struct {
 	TTL time.Duration `json:"ttl" yaml:"ttl"`
 
 	// Leeway is the clock skew tolerated when checking "exp", "nbf" and
-	// "iat". Default 0.
+	// "iat". Default (0): DefaultLeeway.
 	Leeway time.Duration `json:"leeway" yaml:"leeway"`
 }
 
@@ -62,6 +68,10 @@ func (c Config) withDefaults() Config {
 		c.Audience = []string{c.Issuer}
 	} else {
 		c.Audience = slices.Clone(c.Audience)
+	}
+
+	if c.Leeway == 0 {
+		c.Leeway = DefaultLeeway
 	}
 
 	return c

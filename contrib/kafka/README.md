@@ -65,6 +65,7 @@ return a.Run(ctx)
 | `Topics` | topics to consume | required (consumer) |
 | `Offset` | where a partition without a committed offset starts: `OffsetNewest` or `OffsetOldest` | `OffsetNewest` |
 | `MaxPollRecords` | records taken per poll; rebalances wait while they are handled | `DefaultMaxPollRecords` (500) |
+| `Concurrency` | partitions of a poll handled at once, one goroutine each; a partition's records stay in order | `1` |
 
 TLS goes through `WithTLSConfig`; SASL, compression, partitioners, timeouts and every other
 franz-go setting through `WithKgoOpts`.
@@ -91,7 +92,7 @@ rebalance callbacks) passed through `WithKgoOpts` break its guarantees.
 
 | Component | `Start` | `Run` | `Shutdown` | `Healthcheck` |
 |---|---|---|---|---|
-| `Consumer` | creates the client (joins the group), pings with retry | consumes until stopped; returns `nil`, an error wrapping `ErrStopped` when the error handler stops it, or one wrapping `kgo.ErrMaxDecompress` when a partition can no longer be fetched (below) | stops `Run` (see below), then leaves the group and closes the client | `nil` while consuming, `ErrNotRunning` otherwise |
+| `Consumer` | creates the client (joins the group), pings with retry | consumes until stopped; returns `nil`, an error wrapping `ErrStopped` when the error handler stops it, or one wrapping `kgo.ErrMaxDecompress` when a partition can no longer be fetched (below) | stops `Run` (see below), then leaves the group and closes the client | `nil` while consuming, `ErrPaused` while `ErrorActionPause` holds partitions paused, `ErrNotRunning` otherwise |
 | `Producer` | creates the client, pings with retry | — | flushes buffered records until its ctx is done, then closes | pings |
 | `Client` | creates the client, pings with retry | — | closes | pings |
 
@@ -128,9 +129,9 @@ consumer has drained.
 ## Consuming
 
 A `Handler` gets `*Message` (`Topic`, `Partition`, `Offset`, `Key`, `Value`, `Headers`,
-`Timestamp`), one at a time, in partition order — partitions are handled sequentially, one
-consumer goroutine. Its ctx carries the message's process span (a child of the publisher's trace)
-and the values of `Run`'s ctx. A panic in the handler is recovered and treated as an error.
+`Timestamp`), in partition order: the partitions of a poll are handled one after another, or up
+to `Concurrency` at once, each on its own goroutine. Its ctx carries the message's process span (a
+child of the publisher's trace), the publisher's baggage and the values of `Run`'s ctx. A panic in the handler is recovered and treated as an error.
 
 **Commits.** A message is committed once it, and every earlier message of its partition, is
 handled or skipped. Offsets are committed every few seconds, when partitions are revoked in a
@@ -141,7 +142,7 @@ idempotent. Rebalances wait while a poll's records are handled (franz-go's
 that a rebalance never waits long enough to kick the member out of the group, a poll's records
 get a budget of three quarters of the rebalance timeout (`kgo.RebalanceTimeout`, 60s by default):
 once it runs out — before a record, or instead of a redelivery delay that would end past it — the
-consumer rewinds every partition to its first record not handled and lets the rebalance run; those
+consumer rewinds each partition to its first record not handled and lets the rebalance run; those
 records are fetched again, and a record cut off between its retries goes on with its next attempt,
 so `MaxAttempts` still bounds it.
 
@@ -156,6 +157,7 @@ message in a topic for later analysis.
 | `ErrorActionRetry` | handle the same message again after the delay of the redelivery policy; the partition waits (order is kept). Once the policy allows no more attempts, the error handler is asked again with `ErrRetriesExhausted` joined to the error, and `Retry` then means `Stop` |
 | `ErrorActionSkip` | commit the message as handled and go on |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped` and the handler's error, and `app.App` stops the service; the message is not committed (the earlier ones are), so it comes again after the restart |
+| `ErrorActionPause` | pause the message's partition and go on with the others: the message is not committed, `Healthcheck` reports `ErrPaused` (alert on it) and the service keeps running. `Consumer.Resume()` — or a restart — fetches the partition again from the message |
 
 Built-in handlers, following the usual practice of retrying transient errors, never retrying
 poison messages and recovering once the attempts are exhausted:

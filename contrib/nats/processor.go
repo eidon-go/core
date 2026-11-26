@@ -85,6 +85,8 @@ func (a ErrorAction) consume() consume.Action {
 		return consume.Reject
 	case ErrorActionStop:
 		return consume.Stop
+	case ErrorActionPause:
+		return consume.Pause
 	default:
 		return consume.Stop
 	}

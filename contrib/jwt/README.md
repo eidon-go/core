@@ -46,9 +46,9 @@ case errors.Is(err, jwt.ErrInvalidToken): // reject
 |---|---|---|
 | `Issuer` | required | `iss` of issued tokens; parsed tokens must carry it |
 | `Audience` | `[Issuer]` | `aud` of issued tokens; parsed tokens must name at least one |
-| `Subject` | empty | `sub` of issued tokens; when set, parsed tokens must carry it |
+| `RequiredSubject` | empty | `sub` of every issued token, required in parsed ones (tokens of one kind: `"service"`); not with a `Subjecter` payload |
 | `TTL` | required, ≥ 1s (time claims are whole seconds) | `exp` = now + TTL |
-| `Leeway` | `0` | clock skew tolerated on `exp`, `nbf`, `iat` |
+| `Leeway` | `jwt.DefaultLeeway` (30s) | clock skew tolerated on `exp`, `nbf`, `iat`: a token issued on one node is not "not valid yet" on another whose clock is behind |
 
 `Config.Validate` reports every problem at once (each wraps `ErrInvalidConfig`).
 
@@ -59,18 +59,26 @@ case errors.Is(err, jwt.ErrInvalidToken): // reject
 ## Tokens
 
 - `CreateToken(ctx, info)` sets `iss`, `sub`, `aud`, `iat`, `nbf` (now), `exp` (now + TTL), a
-  random `jti`, and the payload under `authInfo` (`AuthClaims[T]`).
+  random `jti`, and the payload under `authInfo` (`AuthClaims[T]`). `sub` is the subject of the
+  token — the user's ID, where gateways, meshes and audit logs look for it: a payload that
+  implements `jwt.Subjecter` (`Subject() string`) sets it; else it is `RequiredSubject`.
+
+```go
+func (s Session) Subject() string { return s.UserID }
+```
 - `ParseToken(ctx, token)` returns the payload; `ParseClaims` returns all claims (the `jti` for a
   revocation list, `exp` for a refresh). A token must be signed with the key's algorithm, issued
-  by `Issuer` for one of `Audience` (and `Subject` when set), carry `exp`, and be inside its
+  by `Issuer` for one of `Audience` (and `RequiredSubject` when set), carry `exp`, and be inside its
   `iat`/`nbf`/`exp` window widened by `Leeway`.
 - Every parse error wraps `ErrInvalidToken` and the golang-jwt cause, so `errors.Is` works with
   both `jwt.ErrTokenExpired` and golang-jwt's errors (`ErrTokenInvalidAudience`, …).
 
 ## Algorithms
 
-`Signer` and `Verifier` are small interfaces over golang-jwt claims; `AuthService` passes its claim
-checks to `Verify` as parser options. Both take a `ctx` for implementations that call out (a KMS
+`Signer` and `Verifier` are small interfaces over golang-jwt claims. A `Verifier` answers for the
+signature and the algorithm; `AuthService` passes its claim checks to `Verify` as parser options
+and checks the claims again itself afterwards, so a third-party `Verifier` that ignores the options
+(a JWKS verifier passing only its own) cannot let an expired or foreign token through. Both take a `ctx` for implementations that call out (a KMS
 signer, a JWKS verifier); the local ones ignore it.
 
 - **`hs256.Key`** — HMAC-SHA256 with a shared secret of at least `hs256.MinSecretLength` (32)
@@ -78,6 +86,19 @@ signer, a JWKS verifier); the local ones ignore it.
   (other HMAC variants and `none` are rejected, also when a caller's options would allow them).
   Every service that verifies the tokens can issue them too; use an asymmetric algorithm when that
   is not acceptable.
+
+- **`hs256.KeySet`** — several secrets, for a rotation without downtime: it signs with one, named
+  in the `kid` header, and verifies a token with the secret its `kid` names. The secret with the
+  empty ID verifies tokens without `kid` (those of a single `Key`). Rotate in three deploys: add the
+  new secret for verifying; sign with it; drop the old one once its tokens have expired.
+
+```go
+keys, err := hs256.NewKeySet(
+    hs256.Secret{ID: "2026-11", Secret: newSecret}, // signs and verifies
+    hs256.Secret{ID: "2026-10", Secret: oldSecret}, // verifies only
+)
+svc, err := jwt.NewAuthService[Session](cfg, keys, keys)
+```
 
 A `Key` can also be used on its own, with any golang-jwt claims:
 

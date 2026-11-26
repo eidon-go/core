@@ -113,5 +113,6 @@ func TestErrorAction_String(t *testing.T) {
 	assert.Equal(t, "retry", kafka.ErrorActionRetry.String())
 	assert.Equal(t, "skip", kafka.ErrorActionSkip.String())
 	assert.Equal(t, "stop", kafka.ErrorActionStop.String())
+	assert.Equal(t, "pause", kafka.ErrorActionPause.String())
 	assert.Equal(t, "unknown", kafka.ErrorAction(42).String())
 }

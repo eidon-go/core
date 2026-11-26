@@ -140,7 +140,8 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Subscriber`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Subscriber`, `Consumer` (also the delay of a `Consumer`'s `Requeue`) |
 | `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Subscriber`, `Consumer`: waits of a `consume.Transient` error |
-| `WithStream(jetstream.StreamConfig)` | none: the stream must exist | `Consumer`: create or update the stream before the consumer |
+| `WithStream(jetstream.StreamConfig)` | none: the stream must exist | `Consumer`: create the stream before the consumer, as `WithTopology` says |
+| `WithTopology(TopologyMode)` | `TopologyCreateIfMissing` | `Consumer`: create what is missing, update (`TopologyCreateOrUpdate`) or only check (`TopologyVerify`) the stream and the consumer |
 | `WithConsumerConfig(func(*jetstream.ConsumerConfig))` | none | `Consumer`: settings `ConsumerConfig` lacks (`DeliverPolicy`, `BackOff`, …) |
 
 ## Lifecycle
@@ -150,7 +151,7 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `Connection` | Starter, Resource | connects with retry | — | drains (subscriptions left on it, buffered publishes) and closes; bounded by the deadline and `DrainTimeout`, then closed at once | connected / `ErrNotConnected` while reconnecting |
 | `Publisher` | Resource | — (its connection connects) | — | refuses new calls, waits for the ones in flight, flushes; bounded by the deadline | — |
 | `Subscriber` | Runner | — | subscribes and handles; drains on stop | bounds the drain; at the deadline cancels the handlers' context, the messages not handled are lost | subscribed / `ErrNotRunning` |
-| `Consumer` | Runner | — | creates the stream (`WithStream`) and the consumer, pulls and handles; resubscribes with backoff after a failed subscription; on stop finishes the messages in flight and naks the prefetched ones | bounds the stop; at the deadline cancels the handlers' context and naks what was not acked | subscribed / `ErrNotConnected` while (re)subscribing |
+| `Consumer` | Runner | — | creates the stream (`WithStream`) and the consumer if missing (`WithTopology`), pulls and handles; resubscribes with backoff after a failed subscription; on stop finishes the messages in flight and naks the prefetched ones | bounds the stop; at the deadline cancels the handlers' context and naks what was not acked | subscribed / `ErrNotConnected` while (re)subscribing / `ErrPaused` while paused |
 
 Add these components to `app.App` without `app.WithReadiness()` unless the service cannot answer
 requests without NATS: a reconnect should not take every instance out of the load balancer. Their
@@ -210,6 +211,7 @@ one of:
 | `ErrorActionRequeue` | nak with the redelivery policy's delay for its delivery count: the server delivers it again later, to any instance, until `MaxDeliver` | dropped (logged) |
 | `ErrorActionReject` | terminated (`AckTerm`): never delivered again; the server publishes a `MSG_TERMINATED` advisory (`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.<stream>.<consumer>`) a dead-letter flow can capture | dropped (logged) |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is naked, delivered again at once | `Run` returns an error wrapping `ErrStopped` |
+| `ErrorActionPause` | the message is naked and the consumer unsubscribes; `Healthcheck` reports `ErrPaused` (alert on it) and the service keeps running. `Consumer.Resume()` — or a restart — subscribes again | dropped (logged) |
 
 **Transient errors.** An error of a dependency rather than of the message — a database that is
 down — is marked with `consume.Transient(err)` (package `github.com/eidon-go/core/consume`). The
@@ -228,8 +230,16 @@ meets it again after every restart — a crash loop. A handler or `ErrorHandler`
 becomes an error, the `ErrorHandler`'s stops the component. Failures are logged with the subject
 (and the stream, consumer, stream sequence and delivery count) — never the data or the headers.
 
-The consumer is created with `AckPolicy: explicit` from `ConsumerConfig` and `WithConsumerConfig`
-on every subscription, so a changed configuration is applied on the next start. If the
+The consumer is built with `AckPolicy: explicit` from `ConsumerConfig` and `WithConsumerConfig`.
+`WithTopology` says what the `Consumer` does with it on every subscription:
+
+| Mode | Stream (`WithStream`) and consumer |
+|---|---|
+| `TopologyCreateIfMissing` (default) | created when missing; existing ones are left as they are (a consumer configured differently is logged at Warn), so the instances of two versions in a rolling update do not overwrite each other's configuration |
+| `TopologyCreateOrUpdate` | created or updated to this instance's configuration |
+| `TopologyVerify` | nothing is created or changed — they are managed outside the service (nats CLI, Terraform, NACK) and it needs no rights to manage them; a missing one, or a consumer whose ack policy, filter subjects, `MaxDeliver` or `AckWait` differ, fails `Run` with `ErrTopology` |
+
+If the
 subscription fails — the consumer was deleted, the stream is gone, the server lost leadership — the
 consumer subscribes again with a backoff (at once after a subscription that lasted 5s or more);
 `Healthcheck` reports `ErrNotConnected` meanwhile. A `MaxRequestBatch` below `Prefetch` (or a

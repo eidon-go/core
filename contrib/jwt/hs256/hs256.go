@@ -6,7 +6,8 @@
 //	svc, err := jwt.NewAuthService[Session](cfg, key, key)
 //
 // Every service that verifies the tokens holds the secret and can therefore
-// issue them too.
+// issue them too. A KeySet holds several secrets, named by the "kid" header,
+// to rotate them without downtime.
 package hs256
 
 import (
@@ -60,9 +61,14 @@ func (k *Key) Sign(_ context.Context, claims gojwt.Claims) (string, error) {
 // jwt.ErrInvalidToken and the cause from github.com/golang-jwt/jwt/v5. ctx
 // is not used. Implements jwt.Verifier.
 func (k *Key) Verify(_ context.Context, token string, claims gojwt.Claims, opts ...gojwt.ParserOption) error {
+	return verify(token, claims, k.keyfunc, opts)
+}
+
+// verify parses token into claims with keyfunc, HS256 only.
+func verify(token string, claims gojwt.Claims, keyfunc gojwt.Keyfunc, opts []gojwt.ParserOption) error {
 	parse := append([]gojwt.ParserOption{gojwt.WithValidMethods([]string{gojwt.SigningMethodHS256.Alg()})}, opts...)
 
-	if _, err := gojwt.ParseWithClaims(token, claims, k.keyfunc, parse...); err != nil {
+	if _, err := gojwt.ParseWithClaims(token, claims, keyfunc, parse...); err != nil {
 		return fmt.Errorf("%w: %w", jwt.ErrInvalidToken, err)
 	}
 
@@ -78,6 +84,9 @@ var (
 	// errNoKey is returned by a Key not made by New, which would otherwise
 	// sign and verify with an empty secret.
 	errNoKey = errors.New("hs256: key not created with New")
+
+	// errUnknownKey rejects a token whose "kid" names no secret of a KeySet.
+	errUnknownKey = errors.New("hs256: unknown key ID")
 )
 
 func (k *Key) valid() bool { return k != nil && len(k.secret) >= MinSecretLength }

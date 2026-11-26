@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -21,8 +22,8 @@ import (
 )
 
 // ConsumerConfig describes a durable JetStream pull consumer. The Consumer
-// creates it on its stream, or updates it to this configuration, every
-// time it subscribes; WithConsumerConfig sets what is not here.
+// creates it on its stream when it is missing (WithTopology for other
+// modes); WithConsumerConfig sets what is not here.
 type ConsumerConfig struct {
 	// Stream is the name of the stream to consume. It must exist, unless
 	// WithStream creates it. Required.
@@ -196,6 +197,7 @@ type Consumer struct {
 	cfg      ConsumerConfig
 	jsConfig jetstream.ConsumerConfig
 	stream   *jetstream.StreamConfig
+	topology TopologyMode
 	name     string
 	logger   *slog.Logger
 	proc     *processor
@@ -206,6 +208,11 @@ type Consumer struct {
 	progressEvery time.Duration
 	// maxProcessing bounds the handling of one message; 0 for no bound.
 	maxProcessing time.Duration
+
+	// paused is set while an ErrorActionPause holds the consumer
+	// unsubscribed; resume wakes the loop (Resume).
+	paused atomic.Bool
+	resume chan struct{}
 
 	runner *runner
 }
@@ -253,6 +260,7 @@ func NewConsumer(
 		cfg:      cfg,
 		jsConfig: jsConfig,
 		stream:   o.stream,
+		topology: o.topology,
 		name:     o.name,
 		logger:   o.logger,
 		proc: newProcessor(handler, onError, &o, newTelemetry(&o), &subscription{
@@ -266,6 +274,7 @@ func NewConsumer(
 		prefetch:      prefetch,
 		progressEvery: ackDeadline(jsConfig) / 2, //nolint:mnd // half of it
 		maxProcessing: cfg.processingLimit(ackDeadline(jsConfig)),
+		resume:        make(chan struct{}, 1),
 	}
 	c.runner = newRunner(c.loop, c.logger, ErrNotConnected)
 
@@ -294,10 +303,28 @@ func (c *Consumer) Shutdown(ctx context.Context) error {
 }
 
 // Healthcheck returns nil while Run is subscribed, ErrNotConnected while it
-// creates its consumer or subscribes again, and ErrNotRunning when Run is
-// not running. Implements lifecycle.Healthchecker.
+// creates its consumer or subscribes again, ErrPaused while an
+// ErrorActionPause holds it unsubscribed, and ErrNotRunning when Run is not
+// running. Implements lifecycle.Healthchecker.
 func (c *Consumer) Healthcheck(ctx context.Context) error {
+	if c.paused.Load() {
+		return ErrPaused
+	}
+
 	return c.runner.healthcheck(ctx)
+}
+
+// Resume subscribes again a consumer that an ErrorActionPause paused; the
+// paused message is delivered again. Without a pause it does nothing.
+func (c *Consumer) Resume() {
+	if !c.paused.Load() {
+		return
+	}
+
+	select {
+	case c.resume <- struct{}{}:
+	default: // already signalled
+	}
 }
 
 // stableSession is how long a subscription must have lasted for its loss
@@ -338,7 +365,15 @@ func (c *Consumer) loop(stop, work context.Context) error {
 			return err
 		case stop.Err() != nil:
 			return nil //nolint:nilerr // the stop is not an error
-		case errors.Is(err, ErrClosed), errors.Is(err, ErrNotStarted):
+		case errors.Is(err, errPaused):
+			if !c.waitResume(stop, err) {
+				return nil
+			}
+
+			failures = 0
+
+			continue
+		case errors.Is(err, ErrClosed), errors.Is(err, ErrNotStarted), errors.Is(err, ErrTopology):
 			return err
 		case subscribed && time.Since(began) >= stableSession:
 			failures = 0
@@ -360,6 +395,34 @@ func (c *Consumer) loop(stop, work context.Context) error {
 	}
 }
 
+// errPaused ends a session on an ErrorActionPause.
+var errPaused = errors.New("nats: consumer paused")
+
+// waitResume holds the consumer unsubscribed until Resume (true) or the
+// stop (false).
+func (c *Consumer) waitResume(stop context.Context, cause error) bool {
+	select { // a Resume of an earlier pause does not end this one
+	case <-c.resume:
+	default:
+	}
+
+	c.paused.Store(true)
+	defer c.paused.Store(false)
+
+	c.logger.ErrorContext(stop, "nats consumer paused, waiting for Resume",
+		slog.String("stream", c.cfg.Stream), slog.String("durable", c.cfg.Durable), slog.Any("error", cause))
+
+	select {
+	case <-c.resume:
+		c.logger.InfoContext(stop, "nats consumer resumed",
+			slog.String("stream", c.cfg.Stream), slog.String("durable", c.cfg.Durable))
+
+		return true
+	case <-stop.Done():
+		return false
+	}
+}
+
 // session creates the stream and the consumer, then handles its messages
 // until the stop, the end of the subscription or a stopping handler error.
 // It reports whether the subscription was made.
@@ -374,16 +437,13 @@ func (c *Consumer) session(stop, work context.Context) (bool, error) {
 		return false, wrap(err)
 	}
 
-	if c.stream != nil {
-		if _, err := js.CreateOrUpdateStream(stop, *c.stream); err != nil {
-			return false, closedOr(fmt.Errorf("nats: create stream %q: %w", c.cfg.Stream, err))
-		}
+	if err := c.ensureStream(stop, js); err != nil {
+		return false, err
 	}
 
-	cons, err := js.CreateOrUpdateConsumer(stop, c.cfg.Stream, c.jsConfig)
+	cons, err := c.ensureConsumer(stop, js)
 	if err != nil {
-		return false, closedOr(fmt.Errorf("nats: create consumer %q on stream %q: %w",
-			c.cfg.Durable, c.cfg.Stream, err))
+		return false, err
 	}
 
 	iter, err := cons.Messages(jetstream.PullMaxMessages(c.prefetch))
@@ -563,6 +623,14 @@ func (c *Consumer) handle(end, work context.Context, jsMsg jetstream.Msg) error 
 			append(attrs, slog.Duration("max_processing_time", c.maxProcessing))...)
 	}
 
+	return c.settleOutcome(work, jsMsg, res, delivered)
+}
+
+// settleOutcome settles a handled message according to res. It returns an
+// error only to stop (ErrStopped) or pause (errPaused) the consumer.
+func (c *Consumer) settleOutcome(
+	work context.Context, jsMsg jetstream.Msg, res consume.Result, delivered uint64,
+) error {
 	switch res.Outcome {
 	case consume.Handled:
 		c.settle(work, jsMsg, "ack", jsMsg.Ack())
@@ -577,6 +645,10 @@ func (c *Consumer) handle(end, work context.Context, jsMsg jetstream.Msg) error 
 		c.settle(work, jsMsg, "nak", jsMsg.Nak())
 
 		return fmt.Errorf("%w: stream %q, consumer %q: %w", ErrStopped, c.cfg.Stream, c.cfg.Durable, res.Err)
+	case consume.Paused:
+		c.settle(work, jsMsg, "nak", jsMsg.Nak())
+
+		return fmt.Errorf("%w: %w", errPaused, res.Err)
 	}
 
 	return nil

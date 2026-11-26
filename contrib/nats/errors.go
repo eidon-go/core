@@ -54,6 +54,16 @@ var (
 	// ErrStopped is wrapped by the error Run returns when the ErrorHandler
 	// chose ErrorActionStop; the handler's error is wrapped too.
 	ErrStopped = errors.New("nats: stopped on a handler error")
+
+	// ErrPaused is returned by Consumer.Healthcheck while an
+	// ErrorActionPause holds the consumer unsubscribed, until
+	// Consumer.Resume.
+	ErrPaused = errors.New("nats: consumer paused on a handler error")
+
+	// ErrTopology is wrapped by the error of Consumer.Run when, with
+	// TopologyVerify, the stream or the consumer is missing or the
+	// consumer's configuration does not match.
+	ErrTopology = errors.New("nats: topology does not match")
 )
 
 // wrap prefixes err with the module name; nil stays nil.

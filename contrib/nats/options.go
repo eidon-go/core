@@ -73,6 +73,7 @@ type options struct {
 	transientPolicy  *retry.Policy
 	stream           *jetstream.StreamConfig
 	consumerConfig   []func(*jetstream.ConsumerConfig)
+	topology         TopologyMode
 }
 
 func newOptions(opts []Option) options {
@@ -237,10 +238,10 @@ func WithTransientPolicy(p retry.Policy) Option {
 	return func(o *options) { o.transientPolicy = &p }
 }
 
-// WithStream makes the Consumer create the stream from cfg, or update it to
-// cfg, before it creates its consumer — on every (re)subscription. Without
-// it the stream must exist. cfg.Name must be ConsumerConfig.Stream. Consumer
-// only.
+// WithStream makes the Consumer create the stream from cfg before it
+// creates its consumer, as WithTopology says (by default only when it is
+// missing). Without it the stream must exist. cfg.Name must be
+// ConsumerConfig.Stream. Consumer only.
 func WithStream(cfg jetstream.StreamConfig) Option {
 	return func(o *options) { o.stream = &cfg }
 }

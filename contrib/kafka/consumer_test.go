@@ -11,7 +11,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
@@ -389,6 +391,89 @@ func TestConsumer_SkipCommits(t *testing.T) {
 	assert.Equal(t, []string{"next"}, next.values())
 }
 
+func TestConsumer_PauseAndResume(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	produce(t, brokers, testTopic, "a", "bad", "c")
+
+	var fixed atomic.Bool
+
+	rec := newRecorder()
+	rec.handle = func(_ context.Context, msg *kafka.Message, _ int) error {
+		if string(msg.Value) == "bad" && !fixed.Load() {
+			return errors.New("invalid")
+		}
+
+		return nil
+	}
+
+	pause := func(context.Context, *kafka.Message, error) kafka.ErrorAction { return kafka.ErrorActionPause }
+
+	c, stop := startConsumerOnError(t, consumerConfig(brokers), rec, pause)
+
+	require.Eventually(t, func() bool { return errors.Is(c.Healthcheck(t.Context()), kafka.ErrPaused) },
+		waitFor, 10*time.Millisecond)
+	assert.Equal(t, []string{"a"}, rec.values(), "the partition stops at the paused message")
+	assert.Zero(t, rec.callsOf("c"))
+
+	fixed.Store(true)
+	c.Resume()
+
+	rec.waitSeen(t, "c")
+	require.NoError(t, c.Healthcheck(t.Context()))
+	require.NoError(t, stop())
+	assert.Equal(t, []string{"a", "bad", "c"}, rec.values(), "fetched again from the paused message")
+	assert.Equal(t, 2, rec.callsOf("bad"))
+}
+
+// With Concurrency 2, a partition whose handler waits does not hold up the
+// other one.
+func TestConsumer_ConcurrentPartitions(t *testing.T) {
+	t.Parallel()
+
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(2, testTopic))
+	require.NoError(t, err)
+	t.Cleanup(cluster.Close)
+
+	brokers := cluster.ListenAddrs()
+
+	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.RecordPartitioner(kgo.ManualPartitioner()))
+	require.NoError(t, err)
+
+	for partition, value := range []string{"slow", "fast"} {
+		rec := &kgo.Record{Topic: testTopic, Partition: int32(partition), Value: []byte(value)}
+		require.NoError(t, client.ProduceSync(t.Context(), rec).FirstErr())
+	}
+
+	client.Close()
+
+	fastDone := make(chan struct{})
+	handled := make(chan string, 2)
+
+	cfg := consumerConfig(brokers)
+	cfg.Concurrency = 2
+
+	_, stop := startConsumer(t, cfg, kafka.HandlerFunc(func(ctx context.Context, msg *kafka.Message) error {
+		if string(msg.Value) == "slow" {
+			select {
+			case <-fastDone: // only reachable while the other partition is handled meanwhile
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		} else {
+			close(fastDone)
+		}
+
+		handled <- string(msg.Value)
+
+		return nil
+	}))
+
+	assert.ElementsMatch(t, []string{"fast", "slow"}, []string{receive(t, handled), receive(t, handled)})
+	require.NoError(t, stop())
+}
+
 func TestConsumer_HandlerPanicGoesToTheErrorHandler(t *testing.T) {
 	t.Parallel()
 
@@ -544,6 +629,37 @@ func TestConsumer_ProcessSpan(t *testing.T) {
 
 	assert.Contains(t, names, testTopic+" publish")
 	assert.Contains(t, names, testTopic+" process")
+}
+
+// The baggage of the publisher reaches the handler.
+func TestConsumer_HandlerGetsBaggage(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	props := kafka.WithPropagators(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{}, propagation.Baggage{}))
+
+	p := newProducer(t, brokers, props)
+
+	tenant, err := baggage.NewMember("tenant", "acme")
+	require.NoError(t, err)
+
+	bag, err := baggage.New(tenant)
+	require.NoError(t, err)
+
+	require.NoError(t, p.Produce(baggage.ContextWithBaggage(t.Context(), bag), testTopic, nil, []byte("a")))
+
+	got := make(chan string, 1)
+	_, stop := startConsumer(t, consumerConfig(brokers),
+		kafka.HandlerFunc(func(ctx context.Context, _ *kafka.Message) error {
+			got <- baggage.FromContext(ctx).Member("tenant").Value()
+
+			return nil
+		}),
+		props)
+
+	assert.Equal(t, "acme", receive(t, got))
+	require.NoError(t, stop())
 }
 
 // telemetry stands in for the Provider of the otel module.

@@ -23,6 +23,15 @@ func TestDollar(t *testing.T) {
 		{in: "???", want: "?$1"},
 		{in: "?", want: "$1"},
 		{in: "", want: ""},
+		{in: "SELECT 'what?' || ? FROM t", want: "SELECT 'what?' || $1 FROM t"},
+		{in: "SELECT 'it''s ?' , ?", want: "SELECT 'it''s ?' , $1"},
+		{in: `SELECT E'it\'s ?', ?`, want: `SELECT E'it\'s ?', $1`},
+		{in: `SELECT "odd?col" FROM t WHERE a = ?`, want: `SELECT "odd?col" FROM t WHERE a = $1`},
+		{in: "SELECT $$ a ? b $$, $fn$ ? $fn$, ?", want: "SELECT $$ a ? b $$, $fn$ ? $fn$, $1"},
+		{in: "SELECT ? -- why?\n, ?", want: "SELECT $1 -- why?\n, $2"},
+		{in: "SELECT /* ? */ ?", want: "SELECT /* ? */ $1"},
+		{in: "SELECT a$b, ?", want: "SELECT a$b, $1"},
+		{in: "SELECT 'unterminated ?", want: "SELECT 'unterminated ?"},
 	}
 
 	for _, tt := range tests {

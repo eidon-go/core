@@ -50,7 +50,9 @@ type Signer interface {
 // implements gojwt.Claims (*AuthClaims[T], *gojwt.RegisteredClaims, …).
 // Implementations accept only their own algorithm, apply opts after their
 // own parser options, and wrap every error with ErrInvalidToken. They are
-// safe for concurrent use.
+// safe for concurrent use. A Verifier answers for the signature and the
+// algorithm: AuthService checks the claims again after Verify, whatever the
+// Verifier did with opts.
 type Verifier interface {
 	// Verify checks the token and fills claims. ctx is for verifiers that
 	// call out (a JWKS endpoint); local ones ignore it.
@@ -64,6 +66,13 @@ type AuthClaims[T any] struct {
 
 	// AuthInfo is the caller's payload, encoded as JSON.
 	AuthInfo T `json:"authInfo"`
+}
+
+// Subjecter is implemented by a payload that names the subject of its token
+// (the user's ID): CreateToken puts Subject() into the "sub" claim, where
+// gateways, meshes and audit logs look for it.
+type Subjecter interface {
+	Subject() string
 }
 
 // Option configures NewAuthService.
@@ -87,11 +96,12 @@ func WithClock(now func() time.Time) Option {
 // AuthService issues and parses tokens that carry a payload T. It is safe
 // for concurrent use.
 type AuthService[T any] struct {
-	cfg      Config
-	signer   Signer
-	verifier Verifier
-	now      func() time.Time
-	parse    []gojwt.ParserOption
+	cfg       Config
+	signer    Signer
+	verifier  Verifier
+	now       func() time.Time
+	parse     []gojwt.ParserOption
+	validator *gojwt.Validator
 }
 
 // NewAuthService validates cfg and builds an AuthService on signer and
@@ -108,6 +118,10 @@ func NewAuthService[T any](cfg Config, signer Signer, verifier Verifier, opts ..
 
 	if verifier == nil {
 		err = errors.Join(err, fmt.Errorf("%w: nil Verifier", ErrInvalidConfig))
+	}
+
+	if _, ok := any(*new(T)).(Subjecter); ok && cfg.RequiredSubject != "" {
+		err = errors.Join(err, fmt.Errorf("%w: RequiredSubject with a Subjecter payload", ErrInvalidConfig))
 	}
 
 	if err != nil {
@@ -133,23 +147,36 @@ func NewAuthService[T any](cfg Config, signer Signer, verifier Verifier, opts ..
 		gojwt.WithTimeFunc(o.now),
 	}
 
-	if cfg.Subject != "" {
-		parse = append(parse, gojwt.WithSubject(cfg.Subject))
+	if cfg.RequiredSubject != "" {
+		parse = append(parse, gojwt.WithSubject(cfg.RequiredSubject))
 	}
 
-	return &AuthService[T]{cfg: cfg, signer: signer, verifier: verifier, now: o.now, parse: parse}, nil
+	return &AuthService[T]{
+		cfg:       cfg,
+		signer:    signer,
+		verifier:  verifier,
+		now:       o.now,
+		parse:     parse,
+		validator: gojwt.NewValidator(parse...),
+	}, nil
 }
 
-// CreateToken signs a new token carrying info. It sets iss and sub from the
-// Config, aud to Config.Audience, iat and nbf to now, exp to now + TTL and a
-// random jti.
+// CreateToken signs a new token carrying info. It sets iss from the Config,
+// sub to info.Subject() when info is a Subjecter (else Config.RequiredSubject),
+// aud to Config.Audience, iat and nbf to now, exp to now + TTL and a random
+// jti.
 func (s *AuthService[T]) CreateToken(ctx context.Context, info T) (string, error) {
 	now := s.now()
+
+	subject := s.cfg.RequiredSubject
+	if subjecter, ok := any(info).(Subjecter); ok {
+		subject = subjecter.Subject()
+	}
 
 	claims := &AuthClaims[T]{
 		RegisteredClaims: gojwt.RegisteredClaims{
 			Issuer:    s.cfg.Issuer,
-			Subject:   s.cfg.Subject,
+			Subject:   subject,
 			Audience:  gojwt.ClaimStrings(s.cfg.Audience),
 			ExpiresAt: gojwt.NewNumericDate(now.Add(s.cfg.TTL)),
 			NotBefore: gojwt.NewNumericDate(now),
@@ -184,19 +211,30 @@ func (s *AuthService[T]) ParseToken(ctx context.Context, token string) (T, error
 // ParseClaims verifies token and returns all of its claims (the jti for a
 // revocation list, the expiry for a refresh). The token must be signed by
 // the Verifier's algorithm and key, issued by Config.Issuer for one of
-// Config.Audience (and for Config.Subject when set), carry an expiry, and be
-// within its iat/nbf/exp window, widened by Config.Leeway. Every error wraps
-// ErrInvalidToken; an expired token also wraps ErrTokenExpired.
+// Config.Audience (and for Config.RequiredSubject when set), carry an expiry,
+// and be within its iat/nbf/exp window, widened by Config.Leeway. The
+// Verifier answers for the signature; the claims are checked here again
+// after it, whatever it did with the parser options it was given. Every
+// error wraps ErrInvalidToken; an expired token also wraps ErrTokenExpired.
 func (s *AuthService[T]) ParseClaims(ctx context.Context, token string) (*AuthClaims[T], error) {
 	var claims AuthClaims[T]
 
 	if err := s.verifier.Verify(ctx, token, &claims, s.parse...); err != nil {
-		if !errors.Is(err, ErrInvalidToken) {
-			err = fmt.Errorf("%w: %w", ErrInvalidToken, err)
-		}
+		return nil, invalid(err)
+	}
 
-		return nil, err
+	if err := s.validator.Validate(&claims); err != nil {
+		return nil, invalid(err)
 	}
 
 	return &claims, nil
+}
+
+// invalid wraps err with ErrInvalidToken unless it already is one.
+func invalid(err error) error {
+	if errors.Is(err, ErrInvalidToken) {
+		return err
+	}
+
+	return fmt.Errorf("%w: %w", ErrInvalidToken, err)
 }

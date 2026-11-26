@@ -156,6 +156,13 @@ const (
 	// down. A Consumer naks the message, so that it is delivered again —
 	// to another instance — at once. Use it when going on would lose data.
 	ErrorActionStop
+
+	// ErrorActionPause pauses a Consumer: it naks the message and
+	// unsubscribes, Healthcheck reports ErrPaused, and the service keeps
+	// running; Consumer.Resume (or a restart) subscribes again and the
+	// message is delivered again — also to another instance meanwhile. A
+	// Subscriber cannot pause: the message is dropped (logged).
+	ErrorActionPause
 )
 
 // String returns the action's name.
@@ -169,6 +176,8 @@ func (a ErrorAction) String() string {
 		return "reject"
 	case ErrorActionStop:
 		return "stop"
+	case ErrorActionPause:
+		return "pause"
 	default:
 		return "unknown"
 	}

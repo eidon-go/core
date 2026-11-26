@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -120,7 +119,7 @@ func newServer(o options, srv *http.Server, logger *slog.Logger, useTLS bool) *S
 	}
 
 	if o.listener != nil {
-		s.listener = &onceCloseListener{Listener: o.listener} //nolint:exhaustruct_v5 // once state starts at zero
+		s.listener = lifecycle.ListenerOnce(o.listener)
 	}
 
 	s.lc = lifecycle.NewServer(lifecycle.ServerFuncs{
@@ -194,14 +193,12 @@ func (s *Server) Healthcheck(ctx context.Context) error {
 // listen opens the listener unless WithListener preset one; called by Start.
 func (s *Server) listen(ctx context.Context) error {
 	if s.listener == nil {
-		var lc net.ListenConfig
-
-		ln, err := lc.Listen(ctx, "tcp", s.srv.Addr)
+		ln, err := lifecycle.ListenTCP(ctx, s.srv.Addr)
 		if err != nil {
 			return fmt.Errorf("listen on %s: %w", s.srv.Addr, err)
 		}
 
-		s.listener = &onceCloseListener{Listener: ln} //nolint:exhaustruct_v5 // once state starts at zero
+		s.listener = ln
 	}
 
 	addr := s.listener.Addr()
@@ -252,22 +249,6 @@ func wrap(err error) error {
 	}
 
 	return fmt.Errorf("http2: %w", err)
-}
-
-// onceCloseListener closes the listener once: Serve closes the listener it is
-// given, and Shutdown closes it again in case Run never served it. Not every
-// net.Listener tolerates a second Close.
-type onceCloseListener struct {
-	net.Listener
-
-	once sync.Once
-	err  error
-}
-
-func (l *onceCloseListener) Close() error {
-	l.once.Do(func() { l.err = l.Listener.Close() })
-
-	return l.err
 }
 
 // buildHandler wraps handler with otelhttp and, outermost, the probes, so that

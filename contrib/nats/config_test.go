@@ -140,6 +140,7 @@ func TestErrorAction_String(t *testing.T) {
 		nats.ErrorActionRequeue: "requeue",
 		nats.ErrorActionReject:  "reject",
 		nats.ErrorActionStop:    "stop",
+		nats.ErrorActionPause:   "pause",
 		nats.ErrorAction(42):    "unknown",
 	} {
 		assert.Equal(t, want, action.String())
