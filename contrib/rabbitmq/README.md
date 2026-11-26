@@ -116,7 +116,8 @@ once, wrapping `ErrInvalidConfig`.
 | `WithLogger(*slog.Logger)` | `slog.Default()` | all |
 | `WithConnectRetry(retry.Policy)` | `retry.ConnectPolicy()` | `Connection`: `Start`; its delays also space the redials, which go on until `Shutdown` |
 | `WithTLSConfig(*tls.Config)` | none | `Connection` |
-| `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals | `Publisher`, `Consumer` |
+| `WithTracerProvider`, `WithMeterProvider` | otel globals | `Publisher`, `Consumer` |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | `Publisher`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Consumer` |
 | `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Consumer` |

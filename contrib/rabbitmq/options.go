@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eidon-go/core/consume"
+	"github.com/eidon-go/core/contrib/rabbitmq/internal/propagator"
 	"github.com/eidon-go/core/retry"
 )
 
@@ -98,7 +99,7 @@ func newOptions(opts []Option) options {
 	}
 
 	if o.propagators == nil {
-		o.propagators = otel.GetTextMapPropagator()
+		o.propagators = propagator.Default()
 	}
 
 	return o
@@ -181,10 +182,10 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 }
 
 // WithPropagators sets the propagators that write the trace context into the
-// headers of published messages and read it from consumed ones (default: the
-// otel global at construction, which propagates nothing until
-// otel.SetTextMapPropagator is called — the otel module's Provider.SetGlobal
-// does it; see WithTelemetry). Publisher and Consumer.
+// headers of published messages and read it from consumed ones. Default: the
+// global propagators once otel.SetTextMapPropagator is called (the otel
+// module's Provider.SetGlobal does it), also after construction, and W3C Trace
+// Context and Baggage until then. Publisher and Consumer.
 func WithPropagators(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.propagators = p }
 }
@@ -199,12 +200,10 @@ type Telemetry interface {
 
 // WithTelemetry sets the tracer provider, the meter provider and the
 // propagators from telemetry — the way to use an otel Provider that is not installed
-// as the global one. WithTracerProvider alone leaves the propagators at the
-// global default: spans are recorded, but the trace context is neither
-// written to published messages nor read from consumed ones, so traces break
-// between publisher and consumer. Options apply in order, so a
-// WithTracerProvider, WithMeterProvider or WithPropagators after it replaces
-// one of the three. A nil telemetry is ignored. Publisher and Consumer.
+// as the global one. WithTracerProvider alone keeps the default propagators
+// (see WithPropagators). Options apply in order, so a WithTracerProvider,
+// WithMeterProvider or WithPropagators after it replaces one of the three. A
+// nil telemetry is ignored. Publisher and Consumer.
 func WithTelemetry(telemetry Telemetry) Option {
 	return func(o *options) {
 		if telemetry == nil {

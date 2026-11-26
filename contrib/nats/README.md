@@ -135,7 +135,8 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `WithConnectRetry(retry.Policy)` | `retry.ConnectPolicy()` | `Connection.Start`; once connected nats.go reconnects by itself |
 | `WithTLSConfig(*tls.Config)` | none | `Connection` |
 | `WithConnOptions(...nats.Option)` | none | `Connection`: any nats.go option, applied last; handlers set by them run after the module's own |
-| `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals | `Publisher`, `Subscriber`, `Consumer` |
+| `WithTracerProvider`, `WithMeterProvider` | otel globals | `Publisher`, `Subscriber`, `Consumer` |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | `Publisher`, `Subscriber`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Subscriber`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Subscriber`, `Consumer` (also the delay of a `Consumer`'s `Requeue`) |
 | `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Subscriber`, `Consumer`: waits of a `consume.Transient` error |

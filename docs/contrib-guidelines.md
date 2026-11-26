@@ -130,7 +130,10 @@ The rules below are what the adapters implement; a hand-written component follow
 ## 7. OpenTelemetry
 
 - `WithTracerProvider(trace.TracerProvider)`, `WithMeterProvider(metric.MeterProvider)`,
-  `WithPropagators(propagation.TextMapPropagator)`; defaults are the otel globals at `New` time.
+  `WithPropagators(propagation.TextMapPropagator)`; defaults are the otel globals at `New` time,
+  except the propagators: the global ones once set (also after `New`), and W3C Trace Context +
+  Baggage until then — a module-local `internal/propagator` package (copy it from `http2`), so
+  that traces do not break between services when only a tracer provider is configured.
 - `WithTelemetry(Telemetry)` sets all three at once. `Telemetry` is a small interface declared
   in the module (`TracerProvider()`, `MeterProvider()`, `Propagators()` — fewer methods when the
   module does not propagate) that the `otel` module's `Provider` satisfies structurally, so the
