@@ -40,18 +40,23 @@ const (
 // closed (or the RPC is cancelled), Echo returns its input and Stream sends
 // one message, then blocks like Wait.
 type testServer struct {
-	entered  chan struct{}
-	release  chan struct{}
-	once     sync.Once
-	finished atomic.Bool
+	entered    chan struct{}
+	release    chan struct{}
+	once       sync.Once
+	finished   atomic.Bool
+	exited     chan struct{} // closed when the first handler returns
+	exitedOnce sync.Once
 }
 
 func newTestServer() *testServer {
-	return &testServer{entered: make(chan struct{}), release: make(chan struct{})}
+	return &testServer{entered: make(chan struct{}), release: make(chan struct{}), exited: make(chan struct{})}
 }
 
 func (s *testServer) wait(ctx context.Context) error {
-	defer s.finished.Store(true)
+	defer func() {
+		s.finished.Store(true)
+		s.exitedOnce.Do(func() { close(s.exited) })
+	}()
 
 	s.once.Do(func() { close(s.entered) })
 

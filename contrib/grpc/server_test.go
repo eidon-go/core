@@ -274,7 +274,9 @@ func TestServer_StreamDrainIsBoundedByShutdown(t *testing.T) {
 	require.ErrorIs(t, srv.Shutdown(ctx), context.DeadlineExceeded, "a stream that does not end holds the drain")
 	require.Error(t, stream.RecvMsg(&emptypb.Empty{}))
 	require.NoError(t, waitFor(t, done))
-	assert.True(t, ts.finished.Load(), "the handler's context is cancelled by the force-close")
+	// The force-close cancels the handler's context but does not wait for the
+	// handler to return.
+	waitFor(t, ts.exited)
 }
 
 // A finished stop is reported as clean even when the ctx of a later Shutdown
