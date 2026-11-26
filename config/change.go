@@ -21,7 +21,9 @@ import (
 // callbacks of one change run one after another, in registration order. The
 // watcher does not wait for them: a slow callback delays only the next
 // callbacks, never the new values, and the updates published meanwhile are
-// merged into one notification. A panic in callback is recovered and logged.
+// merged into one notification. Start heavy or blocking work in a goroutine
+// of its own, so that it does not hold up the other callbacks. A panic in
+// callback is recovered and logged.
 // The environment layer is not watched, so callback may be called for a key
 // that an environment variable pins. FromMap configs and configs without
 // watched keys never call it; nor does a Config after Shutdown.

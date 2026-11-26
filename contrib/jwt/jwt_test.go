@@ -452,3 +452,32 @@ func TestAuthService_SubjectFromPayload(t *testing.T) {
 	_, err = jwt.NewAuthService[user](cfg, key, key)
 	require.ErrorIs(t, err, jwt.ErrInvalidConfig, "RequiredSubject and a Subjecter payload")
 }
+
+// account names its subject with a pointer receiver.
+type account struct {
+	ID string `json:"id"`
+}
+
+func (a *account) Subject() string { return a.ID }
+
+func TestAuthService_SubjectFromPointerReceiver(t *testing.T) {
+	t.Parallel()
+
+	key := newKey(t, secret())
+
+	svc, err := jwt.NewAuthService[account](baseConfig(), key, key)
+	require.NoError(t, err)
+
+	token, err := svc.CreateToken(t.Context(), account{ID: "7"})
+	require.NoError(t, err)
+
+	claims, err := svc.ParseClaims(t.Context(), token)
+	require.NoError(t, err)
+	assert.Equal(t, "7", claims.Subject)
+
+	cfg := baseConfig()
+	cfg.RequiredSubject = "service"
+
+	_, err = jwt.NewAuthService[account](cfg, key, key)
+	require.ErrorIs(t, err, jwt.ErrInvalidConfig, "RequiredSubject and a pointer-receiver Subjecter")
+}

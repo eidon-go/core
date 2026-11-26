@@ -1,6 +1,7 @@
 package sql
 
 import (
+	stdsql "database/sql"
 	"log/slog"
 
 	"github.com/XSAM/otelsql"
@@ -26,6 +27,7 @@ type options struct {
 	meterProvider  metric.MeterProvider
 	otelSQLOpts    []otelsql.Option
 	scanner        Scanner
+	defaultIso     stdsql.IsolationLevel
 }
 
 // WithName sets the component name (default DefaultName); give two
@@ -88,6 +90,15 @@ func WithOtelSQLOptions(opts ...otelsql.Option) Option {
 // WithScanner replaces the scanner of Get and Select (default
 // DefaultScanner()).
 func WithScanner(scanner Scanner) Option { return func(o *options) { o.scanner = scanner } }
+
+// WithDefaultIsolation sets the server's default isolation level, the level
+// a transaction begun with LevelDefault counts as when a joined or nested
+// call asks for one (see WithIsolation). Default Read Committed, right for
+// PostgreSQL and SQL Server; pass stdsql.LevelRepeatableRead for MySQL and
+// MariaDB (InnoDB), so that a call asking for Repeatable Read may join.
+func WithDefaultIsolation(level stdsql.IsolationLevel) Option {
+	return func(o *options) { o.defaultIso = level }
+}
 
 func newOptions(opts []Option) options {
 	var o options

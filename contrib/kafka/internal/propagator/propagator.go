@@ -1,4 +1,8 @@
 // Package propagator holds the default propagator of the module's packages.
+//
+// Every module that propagates the trace context has a byte-identical copy
+// of this file (modules cannot share an internal package);
+// scripts/check-copies.sh fails CI when they diverge. Change them together.
 package propagator
 
 import (
@@ -14,6 +18,11 @@ import (
 // called — also after the component was built — and W3C Trace Context and
 // Baggage until then, so that a service that sets only a tracer provider
 // still continues the traces of its callers.
+//
+// A global propagator that declares no fields — an empty composite set to
+// switch propagation off — cannot be told from otel's default no-op and is
+// replaced by the fallback as well; a component that must not propagate is
+// given an empty composite with its WithPropagators instead.
 //
 //nolint:ireturn // the propagator interface of otel
 func Default() propagation.TextMapPropagator { return global{} }

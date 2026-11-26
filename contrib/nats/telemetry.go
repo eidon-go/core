@@ -45,6 +45,7 @@ type telemetry struct {
 	sent        metric.Int64Counter
 	consumed    metric.Int64Counter
 	duration    metric.Float64Histogram
+	paused      metric.Int64Gauge
 }
 
 func newTelemetry(o *options) *telemetry {
@@ -58,6 +59,11 @@ func newTelemetry(o *options) *telemetry {
 		consumed: counter(meter, "messaging.client.consumed.messages",
 			"Number of messages that were delivered to the application."),
 		duration: histogram(meter, "messaging.process.duration", "Duration of processing operation."),
+		paused: gauge(
+			meter,
+			"nats.consumer.paused",
+			"Whether a consumer is paused by ErrorActionPause (1) or not (0).",
+		),
 	}
 }
 
@@ -85,6 +91,32 @@ func histogram(meter metric.Meter, name, description string) metric.Float64Histo
 	}
 
 	return h
+}
+
+// gauge creates a consumer state gauge, like counter.
+func gauge(meter metric.Meter, name, description string) metric.Int64Gauge {
+	g, err := meter.Int64Gauge(name, metric.WithUnit("{consumer}"), metric.WithDescription(description))
+	if err != nil || g == nil {
+		otel.Handle(err)
+
+		return noop.Int64Gauge{} //nolint:exhaustruct_v5 // the embedded interface is unused
+	}
+
+	return g
+}
+
+// setPaused records whether the consumer of durable on stream is paused.
+func (t *telemetry) setPaused(ctx context.Context, stream, durable string, paused bool) {
+	var v int64
+	if paused {
+		v = 1
+	}
+
+	t.paused.Record(ctx, v, metric.WithAttributes(
+		messagingSystem,
+		semconv.MessagingDestinationName(stream),
+		semconv.MessagingConsumerGroupName(durable),
+	))
 }
 
 // publishDestination returns the destination name of a send operation: the

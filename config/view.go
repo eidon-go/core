@@ -30,8 +30,8 @@ func (c *Config) Sub(prefix string) *Config {
 // ["a", "b"]. Read each one with Sub("tenants." + name).
 //
 // Keys sees the loaded sources and the defaults. It does not see the
-// environment: a variable name cannot be mapped back to a key, so a variable
-// only overrides keys that a source or a default already has.
+// environment: a variable name cannot be mapped back to a key, so a key set
+// only by an environment variable is read by Get but not listed by Keys.
 func (c *Config) Keys(prefix string) []string {
 	if c == nil || c.store == nil {
 		return nil

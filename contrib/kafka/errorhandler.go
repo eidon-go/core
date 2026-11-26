@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"unicode/utf8"
 
@@ -52,9 +53,20 @@ func StopOnFailure(_ context.Context, _ *Message, err error) ErrorAction {
 // key, value and headers and adds HeaderDLTOriginalTopic,
 // HeaderDLTOriginalPartition, HeaderDLTOriginalOffset,
 // HeaderDLTOriginalTimestamp and HeaderDLTError; its own timestamp is the
-// time of publishing. If the publish fails, the consumer stops (the message
-// is not lost).
-func DeadLetter(publisher Publisher, topic string) ErrorHandler {
+// time of publishing. If the publish fails — the dead-letter topic is a
+// dependency that is down, not a fault of the message — the failure is
+// logged (slog.Default) and the message's partition is paused
+// (ErrorActionPause): the message is not lost, Healthcheck reports ErrPaused
+// and the service keeps running. OnDLTFailure chooses another action.
+func DeadLetter(publisher Publisher, topic string, opts ...DeadLetterOption) ErrorHandler {
+	o := deadLetterOptions{onFailure: ErrorActionPause}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+
 	return func(ctx context.Context, msg *Message, err error) ErrorAction {
 		if !final(err) {
 			return ErrorActionRetry
@@ -77,12 +89,30 @@ func DeadLetter(publisher Publisher, topic string) ErrorHandler {
 			Headers: headers,
 		}
 
-		if publisher.Publish(ctx, dead) != nil {
-			return ErrorActionStop
+		if pubErr := publisher.Publish(ctx, dead); pubErr != nil {
+			slog.Default().ErrorContext(ctx, "kafka dead letter publish failed",
+				slog.String("topic", msg.Topic), slog.Int("partition", int(msg.Partition)),
+				slog.Int64("offset", msg.Offset), slog.String("dlt", topic), slog.Any("error", pubErr))
+
+			return o.onFailure
 		}
 
 		return ErrorActionSkip
 	}
+}
+
+// DeadLetterOption configures DeadLetter.
+type DeadLetterOption func(*deadLetterOptions)
+
+type deadLetterOptions struct {
+	onFailure ErrorAction
+}
+
+// OnDLTFailure sets the action DeadLetter returns when publishing the dead
+// letter fails: ErrorActionPause (default) or ErrorActionStop, which stops
+// the consumer (and, under app.App, the service) as before.
+func OnDLTFailure(action ErrorAction) DeadLetterOption {
+	return func(o *deadLetterOptions) { o.onFailure = action }
 }
 
 // truncate cuts s to at most limit bytes on a rune boundary, marking the cut

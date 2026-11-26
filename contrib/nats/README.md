@@ -136,11 +136,12 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `WithTLSConfig(*tls.Config)` | none | `Connection` |
 | `WithConnOptions(...nats.Option)` | none | `Connection`: any nats.go option, applied last; handlers set by them run after the module's own |
 | `WithTracerProvider`, `WithMeterProvider` | otel globals | `Publisher`, `Subscriber`, `Consumer` |
-| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | `Publisher`, `Subscriber`, `Consumer` |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`); an empty `propagation.NewCompositeTextMapPropagator()` switches it off | `Publisher`, `Subscriber`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Subscriber`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Subscriber`, `Consumer` (also the delay of a `Consumer`'s `Requeue`) |
 | `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Subscriber`, `Consumer`: waits of a `consume.Transient` error |
 | `WithStream(jetstream.StreamConfig)` | none: the stream must exist | `Consumer`: create the stream before the consumer, as `WithTopology` says |
+| `WithPauseFor(time.Duration)` | 0 (until `Resume`) | `Consumer`: end an `ErrorActionPause` by itself after this long, doubling for pauses in a row up to `MaxPause` |
 | `WithTopology(TopologyMode)` | `TopologyCreateIfMissing` | `Consumer`: create what is missing, update (`TopologyCreateOrUpdate`) or only check (`TopologyVerify`) the stream and the consumer |
 | `WithConsumerConfig(func(*jetstream.ConsumerConfig))` | none | `Consumer`: settings `ConsumerConfig` lacks (`DeliverPolicy`, `BackOff`, …) |
 
@@ -211,7 +212,16 @@ one of:
 | `ErrorActionRequeue` | nak with the redelivery policy's delay for its delivery count: the server delivers it again later, to any instance, until `MaxDeliver` | dropped (logged) |
 | `ErrorActionReject` | terminated (`AckTerm`): never delivered again; the server publishes a `MSG_TERMINATED` advisory (`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.<stream>.<consumer>`) a dead-letter flow can capture | dropped (logged) |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is naked, delivered again at once | `Run` returns an error wrapping `ErrStopped` |
-| `ErrorActionPause` | the message is naked and the consumer unsubscribes; `Healthcheck` reports `ErrPaused` (alert on it) and the service keeps running. `Consumer.Resume()` — or a restart — subscribes again | dropped (logged) |
+| `ErrorActionPause` | the message is naked with a delay and the consumer unsubscribes; `Healthcheck` reports `ErrPaused` and the gauge `nats.consumer.paused` is 1 (alert on either) while the service keeps running. `Consumer.Resume()`, the end of the `WithPauseFor` length, or a restart subscribes again | dropped (logged) |
+
+**Pause stops the consumer on every instance.** The paused message goes back to the server and
+reaches another instance, which pauses too: within seconds the consumer stands still everywhere
+until the cause is gone. Pause is for a cause shared by every message (a schema that is behind,
+a feature switched off); for an error of the message itself use `Reject` (or `Discard`), for a
+dependency that is down `consume.Transient`. To soften it, the message is naked with a delay —
+the redelivery delay, or the pause's length under `WithPauseFor(d)` — and `WithPauseFor(d)` ends
+each pause by itself after `d`, doubling for a pause that follows soon after, up to `MaxPause`
+(15m); `Resume()` still ends one at once, and a restart forgets it.
 
 **Transient errors.** An error of a dependency rather than of the message — a database that is
 down — is marked with `consume.Transient(err)` (package `github.com/eidon-go/core/consume`). The
@@ -237,7 +247,13 @@ The consumer is built with `AckPolicy: explicit` from `ConsumerConfig` and `With
 |---|---|
 | `TopologyCreateIfMissing` (default) | created when missing; existing ones are left as they are (a consumer configured differently is logged at Warn), so the instances of two versions in a rolling update do not overwrite each other's configuration |
 | `TopologyCreateOrUpdate` | created or updated to this instance's configuration |
-| `TopologyVerify` | nothing is created or changed — they are managed outside the service (nats CLI, Terraform, NACK) and it needs no rights to manage them; a missing one, or a consumer whose ack policy, filter subjects, `MaxDeliver` or `AckWait` differ, fails `Run` with `ErrTopology` |
+| `TopologyVerify` | nothing is created or changed — they are managed outside the service (nats CLI, Terraform, NACK) and it needs no rights to manage them; a missing one, or a consumer whose ack policy, filter subjects, `MaxDeliver`, `AckWait`, `MaxAckPending` or `BackOff` differ, fails `Run` with `ErrTopology` |
+
+> **Upgrading from a version before `WithTopology`:** the consumer used to be created or updated on
+> every subscription. With the default `TopologyCreateIfMissing` a change to `AckWait`,
+> `MaxDeliver`, the filters or anything set with `WithConsumerConfig` is no longer applied to an
+> existing consumer — only logged at Warn. Pass `WithTopology(TopologyCreateOrUpdate)` to keep
+> the old behavior, or update the consumer outside the service.
 
 If the
 subscription fails — the consumer was deleted, the stream is gone, the server lost leadership — the

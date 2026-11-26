@@ -577,8 +577,13 @@ func TestConsumer_PauseAndResume(t *testing.T) {
 	require.Eventually(t, func() bool { return errors.Is(c.Healthcheck(t.Context()), ErrPaused) },
 		5*time.Second, time.Millisecond)
 
-	_, requeued, rejected := broker.snapshot()
-	assert.Len(t, requeued, 1, "unacked, requeued with the channel")
+	require.Eventually(t, func() bool {
+		_, requeued, _ := broker.snapshot()
+
+		return len(requeued) == 1
+	}, 5*time.Second, time.Millisecond, "unacked, requeued with the channel after the redelivery delay")
+
+	_, _, rejected := broker.snapshot()
 	assert.Empty(t, rejected)
 
 	fixed.Store(true)
@@ -591,6 +596,70 @@ func TestConsumer_PauseAndResume(t *testing.T) {
 	cancel()
 	require.NoError(t, receive(t, done))
 	assert.Equal(t, []string{"b"}, h.handled())
+}
+
+// With WithPauseFor the paused message is held unacked for the pause, then
+// requeued, and the consumer subscribes again without Resume.
+func TestConsumer_PauseEndsByItself(t *testing.T) {
+	t.Parallel()
+
+	const pauseFor = 300 * time.Millisecond
+
+	broker := newFakeBroker()
+	h := &recordingHandler{failFor: func(int32) error { return errHandler }}
+	pause := func(context.Context, *Message, error) ErrorAction { return ErrorActionPause }
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h, pause,
+		fastRedelivery(2), WithPauseFor(pauseFor))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := run(ctx, c)
+
+	began := time.Now()
+
+	broker.deliver(t, body("a"))
+	require.Eventually(t, func() bool { return errors.Is(c.Healthcheck(t.Context()), ErrPaused) },
+		5*time.Second, time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		_, requeued, _ := broker.snapshot()
+
+		return len(requeued) == 1
+	}, 5*time.Second, time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(began), pauseFor, "held for the pause before the requeue")
+
+	require.Eventually(t, func() bool { return c.Healthcheck(t.Context()) == nil }, 5*time.Second, time.Millisecond,
+		"subscribed again without Resume")
+
+	cancel()
+	require.NoError(t, receive(t, done))
+}
+
+func TestPauser_Lengths(t *testing.T) {
+	t.Parallel()
+
+	p := pauser{base: 5 * time.Minute}
+	now := time.Now()
+
+	got := make([]time.Duration, 0, 4)
+
+	for range 4 {
+		length := p.begin(now)
+		got = append(got, length)
+		assert.Equal(t, length, p.remaining(now))
+		now = now.Add(length)
+		assert.Zero(t, p.remaining(now))
+		p.end(now, true)
+		now = now.Add(time.Second) // paused again soon after
+	}
+
+	assert.Equal(t, []time.Duration{5 * time.Minute, 10 * time.Minute, MaxPause, MaxPause}, got)
+
+	p.end(now, false)
+	assert.Equal(t, 5*time.Minute, p.begin(now), "Resume resets the streak")
+
+	manual := pauser{}
+	assert.Zero(t, manual.begin(now))
+	assert.Zero(t, manual.remaining(now))
 }
 
 func TestConsumer_RetriesAFailedSubscription(t *testing.T) {

@@ -84,6 +84,8 @@ func newDB(db *stdsql.DB, o options, stats metric.Registration) *DB {
 		core:    txcore.New[*stdsql.Tx](stdDriver{db: db}),
 	}
 
+	d.core.SetDefaultIsolation(o.defaultIso)
+
 	d.releaser = lifecycle.CloseOnce(func() error {
 		var errs []error
 

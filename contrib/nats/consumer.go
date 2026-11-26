@@ -213,6 +213,8 @@ type Consumer struct {
 	// unsubscribed; resume wakes the loop (Resume).
 	paused atomic.Bool
 	resume chan struct{}
+	pause  pauser
+	tel    *telemetry
 
 	runner *runner
 }
@@ -254,6 +256,7 @@ func NewConsumer(
 	}
 
 	jsConfig := cfg.jetStreamConfig(o.consumerConfig)
+	tel := newTelemetry(&o)
 
 	c := &Consumer{ //nolint:exhaustruct_v5 // worker is set below, state starts at zero
 		conn:     conn,
@@ -263,7 +266,7 @@ func NewConsumer(
 		topology: o.topology,
 		name:     o.name,
 		logger:   o.logger,
-		proc: newProcessor(handler, onError, &o, newTelemetry(&o), &subscription{
+		proc: newProcessor(handler, onError, &o, tel, &subscription{
 			name: cfg.Stream,
 			attrs: []attribute.KeyValue{
 				semconv.MessagingConsumerGroupName(cfg.Durable),
@@ -275,6 +278,8 @@ func NewConsumer(
 		progressEvery: ackDeadline(jsConfig) / 2, //nolint:mnd // half of it
 		maxProcessing: cfg.processingLimit(ackDeadline(jsConfig)),
 		resume:        make(chan struct{}, 1),
+		pause:         pauser{base: o.pauseFor}, //nolint:exhaustruct_v5 // state starts at zero
+		tel:           tel,
 	}
 	c.runner = newRunner(c.loop, c.logger, ErrNotConnected)
 
@@ -314,8 +319,9 @@ func (c *Consumer) Healthcheck(ctx context.Context) error {
 	return c.runner.healthcheck(ctx)
 }
 
-// Resume subscribes again a consumer that an ErrorActionPause paused; the
-// paused message is delivered again. Without a pause it does nothing.
+// Resume subscribes again a consumer that an ErrorActionPause paused, before
+// WithPauseFor would; the paused message is delivered again once its
+// redelivery delay is over. Without a pause it does nothing.
 func (c *Consumer) Resume() {
 	if !c.paused.Load() {
 		return
@@ -398,27 +404,55 @@ func (c *Consumer) loop(stop, work context.Context) error {
 // errPaused ends a session on an ErrorActionPause.
 var errPaused = errors.New("nats: consumer paused")
 
-// waitResume holds the consumer unsubscribed until Resume (true) or the
-// stop (false).
+// waitResume holds the consumer unsubscribed until Resume or the end of the
+// pause's length under WithPauseFor (true), or the stop (false).
 func (c *Consumer) waitResume(stop context.Context, cause error) bool {
 	select { // a Resume of an earlier pause does not end this one
 	case <-c.resume:
 	default:
 	}
 
+	length := c.pause.current()
+
+	var timeout <-chan time.Time
+
+	if length > 0 {
+		timer := time.NewTimer(length)
+		defer timer.Stop()
+
+		timeout = timer.C
+	}
+
 	c.paused.Store(true)
 	defer c.paused.Store(false)
 
-	c.logger.ErrorContext(stop, "nats consumer paused, waiting for Resume",
-		slog.String("stream", c.cfg.Stream), slog.String("durable", c.cfg.Durable), slog.Any("error", cause))
+	c.tel.setPaused(stop, c.cfg.Stream, c.cfg.Durable, true)
+	defer c.tel.setPaused(stop, c.cfg.Stream, c.cfg.Durable, false)
+
+	attrs := []any{slog.String("stream", c.cfg.Stream), slog.String("durable", c.cfg.Durable)}
+
+	if length > 0 {
+		c.logger.ErrorContext(stop, "nats consumer paused", append(attrs,
+			slog.Duration("pause_for", length), slog.Any("error", cause))...)
+	} else {
+		c.logger.ErrorContext(stop, "nats consumer paused, waiting for Resume", append(attrs,
+			slog.Any("error", cause))...)
+	}
 
 	select {
 	case <-c.resume:
-		c.logger.InfoContext(stop, "nats consumer resumed",
-			slog.String("stream", c.cfg.Stream), slog.String("durable", c.cfg.Durable))
+		c.pause.end(time.Now(), false)
+		c.logger.InfoContext(stop, "nats consumer resumed", attrs...)
+
+		return true
+	case <-timeout:
+		c.pause.end(time.Now(), true)
+		c.logger.InfoContext(stop, "nats consumer pause ended, subscribing again", attrs...)
 
 		return true
 	case <-stop.Done():
+		c.pause.end(time.Now(), false)
+
 		return false
 	}
 }
@@ -646,7 +680,14 @@ func (c *Consumer) settleOutcome(
 
 		return fmt.Errorf("%w: stream %q, consumer %q: %w", ErrStopped, c.cfg.Stream, c.cfg.Durable, res.Err)
 	case consume.Paused:
-		c.settle(work, jsMsg, "nak", jsMsg.Nak())
+		// Given back with a delay, so that the other instances do not get it
+		// (and pause) at once.
+		delay := c.pause.begin(time.Now())
+		if delay <= 0 {
+			delay = c.proc.redelivery.Delay(int(min(delivered, math.MaxInt32)))
+		}
+
+		c.settle(work, jsMsg, "nak", jsMsg.NakWithDelay(delay))
 
 		return fmt.Errorf("%w: %w", errPaused, res.Err)
 	}

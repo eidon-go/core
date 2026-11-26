@@ -74,6 +74,7 @@ type options struct {
 	stream           *jetstream.StreamConfig
 	consumerConfig   []func(*jetstream.ConsumerConfig)
 	topology         TopologyMode
+	pauseFor         time.Duration
 }
 
 func newOptions(opts []Option) options {
@@ -186,6 +187,8 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 // the global propagators once otel.SetTextMapPropagator is called (the otel
 // module's Provider.SetGlobal does it), also after construction, and W3C
 // Trace Context and Baggage until then. Publisher, Subscriber and Consumer.
+// A global propagator without fields counts as unset; to switch propagation
+// off, pass WithPropagators(propagation.NewCompositeTextMapPropagator()).
 func WithPropagators(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.propagators = p }
 }

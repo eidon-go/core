@@ -107,6 +107,8 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 // the etcd gRPC calls. Default: the global propagators once
 // otel.SetTextMapPropagator is called (the otel module's Provider.SetGlobal
 // does it), also after New, and W3C Trace Context and Baggage until then.
+// A global propagator without fields counts as unset; to switch propagation
+// off, pass WithPropagators(propagation.NewCompositeTextMapPropagator()).
 func WithPropagators(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.propagators = p }
 }

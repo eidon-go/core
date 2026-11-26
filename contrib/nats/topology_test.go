@@ -87,13 +87,26 @@ func TestConsumer_TopologyVerify(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		setup   func(t *testing.T, s *testServer)
-		ackWait time.Duration
-		wantErr string
+		name          string
+		setup         func(t *testing.T, s *testServer)
+		ackWait       time.Duration
+		maxAckPending int
+		opts          []nats.Option
+		wantErr       string
 	}{
 		{name: "missing consumer", setup: func(*testing.T, *testServer) {}, wantErr: "does not exist"},
 		{name: "different ack wait", setup: existingConsumer, ackWait: 2 * time.Minute, wantErr: "ack wait 1m0s"},
+		{
+			name: "different max ack pending", setup: existingConsumer, ackWait: time.Minute,
+			maxAckPending: 7, wantErr: "max ack pending",
+		},
+		{
+			name: "different backoff", setup: existingConsumer, ackWait: time.Minute,
+			opts: []nats.Option{nats.WithConsumerConfig(func(cc *jetstream.ConsumerConfig) {
+				cc.BackOff = []time.Duration{time.Second, 5 * time.Second}
+			})},
+			wantErr: "backoff",
+		},
 		{name: "matching", setup: existingConsumer, ackWait: time.Minute},
 	}
 
@@ -107,8 +120,10 @@ func TestConsumer_TopologyVerify(t *testing.T) {
 
 			cfg := ordersConsumer()
 			cfg.AckWait = tt.ackWait
+			cfg.MaxAckPending = tt.maxAckPending
 
-			c := newConsumer(t, startConnection(t, s), cfg, newReceived(), nats.WithTopology(nats.TopologyVerify))
+			opts := append([]nats.Option{nats.WithTopology(nats.TopologyVerify)}, tt.opts...)
+			c := newConsumer(t, startConnection(t, s), cfg, newReceived(), opts...)
 
 			if tt.wantErr == "" {
 				runInBackground(t, c)

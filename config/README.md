@@ -109,7 +109,7 @@ for _, route := range routes {
   reload and can be passed to anything that takes a `*config.Config`. It is not a component:
   register the root `cfg` with `app.App`.
 - `Keys` sees the files, KV documents and defaults, not the environment (a variable name cannot be
-  mapped back to a key).
+  mapped back to a key): a key set only by an environment variable is read by `Get` but not listed.
 - `Items` copies each element: no environment layer, no defaults, no hot reload — read it again
   in `OnChange`. A value that is not a list of objects is a `*KeyError` wrapping `ErrKeyMistyped`.
 - **Keys with dots.** A map key that contains a dot (`"api.example.com": {...}`) cannot be told
@@ -188,7 +188,8 @@ The callback runs after the new values are visible, when an update changed a key
 prefix, on the config's notification goroutine: the callbacks of one change run one after another
 in registration order. The watcher does not wait for them — a slow callback delays only the next
 callbacks, never the new values — and the updates published while callbacks run are merged into
-one notification. A panic in a callback is recovered and logged.
+one notification. Start heavy or blocking work in a goroutine of its own, so that it does not hold
+up the other callbacks. A panic in a callback is recovered and logged.
 
 ### Writing a KV backend
 

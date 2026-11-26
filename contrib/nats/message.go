@@ -157,11 +157,14 @@ const (
 	// to another instance — at once. Use it when going on would lose data.
 	ErrorActionStop
 
-	// ErrorActionPause pauses a Consumer: it naks the message and
+	// ErrorActionPause pauses a Consumer: it naks the message with a delay
+	// (the redelivery delay, or the pause's length with WithPauseFor) and
 	// unsubscribes, Healthcheck reports ErrPaused, and the service keeps
-	// running; Consumer.Resume (or a restart) subscribes again and the
-	// message is delivered again — also to another instance meanwhile. A
-	// Subscriber cannot pause: the message is dropped (logged).
+	// running; Consumer.Resume, the end of the WithPauseFor length (or a
+	// restart) subscribes again and the message is delivered again — also to
+	// another instance, which pauses too: a pause soon stops the consumer on
+	// every instance. A Subscriber cannot pause: the message is dropped
+	// (logged).
 	ErrorActionPause
 )
 

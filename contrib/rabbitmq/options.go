@@ -69,6 +69,7 @@ type options struct {
 	redeliveryPolicy *retry.Policy
 	transientPolicy  *retry.Policy
 	topologyMode     TopologyMode
+	pauseFor         time.Duration
 	dial             dialFunc // tests only
 }
 
@@ -187,6 +188,8 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 // global propagators once otel.SetTextMapPropagator is called (the otel
 // module's Provider.SetGlobal does it), also after construction, and W3C Trace
 // Context and Baggage until then. Publisher and Consumer.
+// A global propagator without fields counts as unset; to switch propagation
+// off, pass WithPropagators(propagation.NewCompositeTextMapPropagator()).
 func WithPropagators(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.propagators = p }
 }

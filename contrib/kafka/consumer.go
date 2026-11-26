@@ -223,11 +223,51 @@ func (c *Consumer) Resume() {
 
 // onRevoked commits the handled messages of the partitions being revoked
 // (and of the others: commits are per group member) before another member
-// takes them over.
-func (c *Consumer) onRevoked(ctx context.Context, client *kgo.Client, _ map[string][]int32) {
+// takes them over, and resumes the revoked ones an ErrorActionPause paused:
+// kgo keeps a pause across rebalances, so a partition assigned back later
+// would stay paused, and Healthcheck would report partitions this member no
+// longer owns. kgo calls it for lost partitions too (no OnPartitionsLost).
+func (c *Consumer) onRevoked(ctx context.Context, client *kgo.Client, revoked map[string][]int32) {
 	if err := client.CommitMarkedOffsets(ctx); err != nil {
 		c.logger.WarnContext(ctx, "kafka commit on revoke failed", slog.Any("error", err))
 	}
+
+	if resume := c.unpause(revoked); len(resume) > 0 {
+		client.ResumeFetchPartitions(resume)
+	}
+}
+
+// unpause removes the partitions of revoked from the paused ones and returns
+// those that were paused.
+func (c *Consumer) unpause(revoked map[string][]int32) map[string][]int32 {
+	c.pausedMu.Lock()
+	defer c.pausedMu.Unlock()
+
+	var resume map[string][]int32
+
+	for topic, partitions := range revoked {
+		paused := c.paused[topic]
+
+		for _, p := range partitions {
+			if i := slices.Index(paused, p); i >= 0 {
+				paused = slices.Delete(paused, i, i+1)
+
+				if resume == nil {
+					resume = map[string][]int32{}
+				}
+
+				resume[topic] = append(resume[topic], p)
+			}
+		}
+
+		if len(paused) == 0 {
+			delete(c.paused, topic)
+		} else {
+			c.paused[topic] = paused
+		}
+	}
+
+	return resume
 }
 
 // loop is the worker's loop: it polls with stop and handles with work.

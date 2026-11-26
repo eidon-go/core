@@ -128,9 +128,14 @@ type Consumer struct {
 	subscribed atomic.Bool
 
 	// paused is set while an ErrorActionPause holds the consumer
-	// unsubscribed; resume wakes the loop (Resume).
+	// unsubscribed — from the handler's pause on, the hold of the message
+	// included; resume wakes the loop (Resume).
 	paused atomic.Bool
 	resume chan struct{}
+	pause  pauser
+	// holdFor is how long, without WithPauseFor, the paused message is held
+	// unacked before the channel closes (its redelivery delay).
+	holdFor atomic.Int64
 }
 
 // NewConsumer validates cfg and builds a consumer of conn for handler; it
@@ -180,6 +185,7 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError 
 		tagPrefix:    tagPrefix,
 		topologyMode: o.topologyMode,
 		resume:       make(chan struct{}, 1),
+		pause:        pauser{base: o.pauseFor}, //nolint:exhaustruct_v5 // state starts at zero
 	}
 	c.proc = consume.Processor[*Message]{
 		Handle:  handler.Handle,
@@ -263,8 +269,8 @@ func (c *Consumer) Healthcheck(ctx context.Context) error {
 	return nil
 }
 
-// Resume subscribes again a consumer that an ErrorActionPause paused.
-// Without a pause it does nothing.
+// Resume subscribes again a consumer that an ErrorActionPause paused, before
+// WithPauseFor would. Without a pause it does nothing.
 func (c *Consumer) Resume() {
 	if !c.paused.Load() {
 		return
@@ -281,6 +287,8 @@ func (c *Consumer) Resume() {
 func (c *Consumer) loop(stop, work context.Context) error {
 	failures := 0
 
+	defer c.endPause(stop, false) // a pause cut off by a stop or another error
+
 	for {
 		subscribed, err := c.session(stop, work)
 
@@ -288,7 +296,7 @@ func (c *Consumer) loop(stop, work context.Context) error {
 		case errors.Is(err, ErrStopped):
 			return err
 		case stop.Err() != nil:
-			return nil //nolint:nilerr // the stop is not an error
+			return nil
 		case errors.Is(err, errPaused):
 			if !c.waitResume(stop, err) {
 				return nil
@@ -324,23 +332,83 @@ func (c *Consumer) loop(stop, work context.Context) error {
 // errPaused ends a session on an ErrorActionPause.
 var errPaused = errors.New("rabbitmq: consumer paused")
 
-// waitResume holds the consumer unsubscribed until Resume (true) or the
-// stop (false).
-func (c *Consumer) waitResume(stop context.Context, cause error) bool {
+// beginPause marks the consumer paused by the handler of a message, once
+// for the handlers that pause together, and sets how long to hold the
+// message unacked: the pause's length with WithPauseFor, else the redelivery
+// delay of its delivery number n.
+func (c *Consumer) beginPause(ctx context.Context, n int, cause error) {
+	if c.pause.begin(time.Now()) <= 0 {
+		c.holdFor.Store(int64(c.redelivery.Delay(n)))
+	}
+
+	if !c.paused.CompareAndSwap(false, true) {
+		return
+	}
+
 	select { // a Resume of an earlier pause does not end this one
 	case <-c.resume:
 	default:
 	}
 
-	c.paused.Store(true)
-	defer c.paused.Store(false)
+	c.tel.setPaused(ctx, c.cfg.Queue, true)
 
-	c.logger.ErrorContext(stop, "rabbitmq consumer paused, waiting for Resume",
-		slog.String("queue", c.cfg.Queue), slog.Any("error", cause))
+	if length := c.pause.remaining(time.Now()); length > 0 {
+		c.logger.ErrorContext(ctx, "rabbitmq consumer paused",
+			slog.String("queue", c.cfg.Queue), slog.Duration("pause_for", length), slog.Any("error", cause))
+	} else {
+		c.logger.ErrorContext(ctx, "rabbitmq consumer paused, waiting for Resume",
+			slog.String("queue", c.cfg.Queue), slog.Any("error", cause))
+	}
+}
+
+// endPause ends a pause, if any; auto tells whether it ended by itself.
+func (c *Consumer) endPause(ctx context.Context, auto bool) {
+	if !c.paused.CompareAndSwap(true, false) {
+		return
+	}
+
+	c.pause.end(time.Now(), auto)
+	c.tel.setPaused(ctx, c.cfg.Queue, false)
+}
+
+// hold keeps the paused message — and the others not acked on the channel —
+// from the broker for the hold time before the channel closes and requeues
+// them, so that the other consumers of the queue do not get it at once.
+func (c *Consumer) hold(stop context.Context) {
+	length := time.Duration(c.holdFor.Load())
+	if c.pause.base > 0 {
+		length = c.pause.remaining(time.Now())
+	}
+
+	sleep(stop, length)
+}
+
+// waitResume holds the consumer unsubscribed until Resume or the end of the
+// pause's length under WithPauseFor (true), or the stop (false).
+func (c *Consumer) waitResume(stop context.Context, cause error) bool {
+	if !c.paused.Load() { // ended meanwhile
+		return true
+	}
+
+	var timeout <-chan time.Time
+
+	if c.pause.base > 0 {
+		timer := time.NewTimer(c.pause.remaining(time.Now()))
+		defer timer.Stop()
+
+		timeout = timer.C
+	}
 
 	select {
 	case <-c.resume:
+		c.endPause(stop, false)
 		c.logger.InfoContext(stop, "rabbitmq consumer resumed", slog.String("queue", c.cfg.Queue))
+
+		return true
+	case <-timeout:
+		c.endPause(stop, true)
+		c.logger.InfoContext(stop, "rabbitmq consumer pause ended, subscribing again",
+			slog.String("queue", c.cfg.Queue), slog.Any("error", cause))
 
 		return true
 	case <-stop.Done():
@@ -434,6 +502,10 @@ func (c *Consumer) consume(
 
 	wg.Wait()
 
+	if errors.Is(stopErr, errPaused) {
+		c.hold(stop)
+	}
+
 	return stopErr
 }
 
@@ -491,7 +563,9 @@ func (c *Consumer) handle(stop, work context.Context, d *amqp.Delivery) error {
 		c.settle(work, d, ErrorActionReject)
 	case consume.Stopped:
 		return fmt.Errorf("%w: queue %q: %w", ErrStopped, c.cfg.Queue, res.Err)
-	case consume.Paused: // unacked: requeued when the channel closes
+	case consume.Paused: // unacked: held, then requeued when the channel closes
+		c.beginPause(work, deliveryNumber(d), res.Err)
+
 		return fmt.Errorf("%w: queue %q: %w", errPaused, c.cfg.Queue, res.Err)
 	case consume.Abandoned, consume.Yielded: // unacked: requeued when the channel closes
 	}

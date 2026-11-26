@@ -55,7 +55,7 @@ var (
 
 	// ErrPaused is returned by Consumer.Healthcheck while an
 	// ErrorActionPause holds the consumer unsubscribed, until
-	// Consumer.Resume.
+	// Consumer.Resume or the end of the WithPauseFor length.
 	ErrPaused = errors.New("rabbitmq: consumer paused on a handler error")
 
 	// ErrTopology is wrapped by the error of Consumer.Run when, with
