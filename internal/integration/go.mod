@@ -6,15 +6,18 @@ require (
 	github.com/eidon-go/core v1.0.0-rc.6
 	github.com/eidon-go/core/contrib/config/etcd v0.0.0
 	github.com/eidon-go/core/contrib/kafka v0.0.0
+	github.com/eidon-go/core/contrib/rabbitmq v0.0.0
 	github.com/eidon-go/core/contrib/sql v0.0.0
 	github.com/go-sql-driver/mysql v1.10.2
 	github.com/google/uuid v1.6.0
+	github.com/rabbitmq/amqp091-go v1.17.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/etcd v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/kafka v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/rabbitmq v0.45.0
 	github.com/twmb/franz-go v1.22.3
 	go.etcd.io/etcd/client/v3 v3.6.16
 )
@@ -105,5 +108,6 @@ replace (
 	github.com/eidon-go/core => ../..
 	github.com/eidon-go/core/contrib/config/etcd => ../../contrib/config/etcd
 	github.com/eidon-go/core/contrib/kafka => ../../contrib/kafka
+	github.com/eidon-go/core/contrib/rabbitmq => ../../contrib/rabbitmq
 	github.com/eidon-go/core/contrib/sql => ../../contrib/sql
 )
