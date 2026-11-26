@@ -53,6 +53,8 @@ type Connection struct {
 	cancelClosing context.CancelFunc
 
 	releaser *lifecycle.Releaser
+
+	sockets sockets // the TCP connections, interrupted by a cut-off Shutdown
 }
 
 // NewConnection validates cfg and builds a connection; it does no I/O
@@ -292,6 +294,7 @@ func (c *Connection) options() (natsgo.Options, chan struct{}, error) {
 
 	done := make(chan struct{})
 	c.handlers(&o, done)
+	o.CustomDialer = c.sockets.dialer(&o)
 
 	return o, done, nil
 }
@@ -372,30 +375,33 @@ func (c *Connection) close(ctx context.Context) error {
 		return err //nolint:wrapcheck // the caller's own context error
 	}
 
-	// Drain fails on a connection that is reconnecting or closed: what was
-	// buffered is lost then.
-	if err := nc.Drain(); err != nil {
-		c.abort(ctx, nc, "nats closed without a drain: "+err.Error())
+	// Every call into nats.go may wait for its connection mutex, which a
+	// write to a peer that stops reading holds: they run in the background,
+	// and a cut-off interrupts the socket.
+	drainErr := make(chan error, 1)
 
-		return nil
-	}
+	go func() { drainErr <- nc.Drain() }()
+
+	closed := watchClosed(nc, done)
 
 	// nats.go bounds the drain by Config.DrainTimeout too, but its final
 	// flush has a timeout of its own: the module enforces the bound.
 	timeout := time.NewTimer(c.cfg.DrainTimeout)
 	defer timeout.Stop()
 
-	// The closed handler may be suppressed (nats.NoCallbacksAfterClientClose):
-	// the state is polled as well.
-	poll := time.NewTicker(closedPollInterval)
-	defer poll.Stop()
-
 	for {
 		select {
-		case <-done:
-		case <-poll.C:
-			if !nc.IsClosed() {
-				continue
+		case <-closed:
+			c.logger.InfoContext(ctx, "nats closed")
+
+			return nil
+		case err := <-drainErr:
+			// Drain fails on a connection that is reconnecting or closed:
+			// what was buffered is lost then.
+			if err != nil {
+				c.abort(ctx, nc, "nats closed without a drain: "+err.Error())
+
+				return nil
 			}
 		case <-timeout.C:
 			c.abort(ctx, nc, "nats drain cut off by drainTimeout")
@@ -406,21 +412,46 @@ func (c *Connection) close(ctx context.Context) error {
 
 			return ctx.Err() //nolint:wrapcheck // the caller's own context error
 		}
-
-		c.logger.InfoContext(ctx, "nats closed")
-
-		return nil
 	}
 }
 
-// closedPollInterval is how often Shutdown checks whether the drain has
-// closed the connection.
+// closedPollInterval is how often the end of a drain is checked.
 const closedPollInterval = 50 * time.Millisecond
 
-// abort closes nc without waiting: nats.go flushes what is buffered when it
-// closes, and a peer that stops reading would hold Shutdown past its bound.
-// The close finishes on its own.
+// watchClosed returns a channel closed once nc is closed: by its closed
+// handler, or — when nats.NoCallbacksAfterClientClose suppresses it — as
+// polled. The poll may wait for nats.go's mutex, so it runs in the
+// background; it ends with the connection.
+func watchClosed(nc *natsgo.Conn, done <-chan struct{}) <-chan struct{} {
+	closed := make(chan struct{})
+
+	go func() {
+		defer close(closed)
+
+		poll := time.NewTicker(closedPollInterval)
+		defer poll.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-poll.C:
+				if nc.IsClosed() {
+					return
+				}
+			}
+		}
+	}()
+
+	return closed
+}
+
+// abort closes nc without waiting for it: the socket is closed first, so a
+// write blocked on a peer that stops reading fails at once and releases
+// nats.go's mutex, then nats.go closes the connection in the background.
 func (c *Connection) abort(ctx context.Context, nc *natsgo.Conn, msg string) {
+	c.sockets.interrupt()
+
 	go nc.Close()
 
 	c.logger.WarnContext(ctx, msg)

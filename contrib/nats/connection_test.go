@@ -206,6 +206,47 @@ func TestConnection_ShutdownWithoutClosedCallback(t *testing.T) {
 	assert.True(t, conn.Conn().IsClosed())
 }
 
+// TestConnection_ShutdownWithStalledPeer: a server that stops reading
+// blocks nats.go's writes, which hold its connection mutex; Shutdown must
+// still return at its deadline, and interrupt the blocked write.
+func TestConnection_ShutdownWithStalledPeer(t *testing.T) {
+	t.Parallel()
+
+	s := runServer(t)
+	proxy := newStallingProxy(t, s.clientURL())
+	conn := newConnection(t, proxy.url())
+	require.NoError(t, conn.Start(t.Context()))
+
+	proxy.stall()
+
+	payload := make([]byte, 256*1024)
+	published := make(chan error, 1)
+
+	go func() {
+		for {
+			if err := conn.Conn().Publish("stalled", payload); err != nil {
+				published <- err
+
+				return
+			}
+		}
+	}()
+
+	// The socket buffers fill up: a write blocks, holding nats.go's mutex.
+	require.Eventually(t, func() bool { return mutexHeld(conn.Conn()) }, waitFor, tick)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	began := time.Now()
+
+	require.ErrorIs(t, conn.Shutdown(ctx), context.DeadlineExceeded)
+	assert.Less(t, time.Since(began), 2*time.Second, "Shutdown waited for the stalled write")
+
+	require.Error(t, recv(t, published), "the blocked write is interrupted")
+	require.Eventually(t, conn.Conn().IsClosed, waitFor, tick)
+}
+
 func TestConnection_InvalidSeedFile(t *testing.T) {
 	t.Parallel()
 
