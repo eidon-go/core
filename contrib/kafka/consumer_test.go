@@ -3,6 +3,8 @@ package kafka_test
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +30,8 @@ func TestConsumer_Contract(t *testing.T) {
 	lifecycletest.Runner(t, func(t *testing.T) lifecycle.Runner {
 		t.Helper()
 
-		c, err := kafka.NewConsumer(consumerConfig(newCluster(t, testTopic)), newRecorder(), testOptions()...)
+		c, err := kafka.NewConsumer(consumerConfig(newCluster(t, testTopic)), newRecorder(), kafka.StopOnFailure,
+			testOptions()...)
 		require.NoError(t, err)
 
 		return c
@@ -40,16 +43,19 @@ func TestNewConsumer_Errors(t *testing.T) {
 
 	cfg := consumerConfig([]string{"localhost:9092"})
 
-	_, err := kafka.NewConsumer(cfg, nil)
+	_, err := kafka.NewConsumer(cfg, nil, kafka.StopOnFailure)
 	require.ErrorIs(t, err, kafka.ErrInvalidConfig)
 
 	var nilHandler *recorder
 
-	_, err = kafka.NewConsumer(cfg, nilHandler)
+	_, err = kafka.NewConsumer(cfg, nilHandler, kafka.StopOnFailure)
 	require.ErrorIs(t, err, kafka.ErrInvalidConfig)
 
+	_, err = kafka.NewConsumer(cfg, newRecorder(), nil)
+	require.ErrorIs(t, err, kafka.ErrInvalidConfig, "the error strategy is required")
+
 	cfg.Group = ""
-	_, err = kafka.NewConsumer(cfg, newRecorder())
+	_, err = kafka.NewConsumer(cfg, newRecorder(), kafka.StopOnFailure)
 	require.ErrorIs(t, err, kafka.ErrInvalidConfig)
 }
 
@@ -61,7 +67,7 @@ func TestConsumer_StateErrors(t *testing.T) {
 	t.Run("Run without Start", func(t *testing.T) {
 		t.Parallel()
 
-		c, err := kafka.NewConsumer(consumerConfig(brokers), newRecorder(), testOptions()...)
+		c, err := kafka.NewConsumer(consumerConfig(brokers), newRecorder(), kafka.StopOnFailure, testOptions()...)
 		require.NoError(t, err)
 		require.ErrorIs(t, c.Run(t.Context()), kafka.ErrNotStarted)
 		require.NoError(t, c.Shutdown(t.Context()))
@@ -70,7 +76,7 @@ func TestConsumer_StateErrors(t *testing.T) {
 	t.Run("Start twice, Start after Shutdown", func(t *testing.T) {
 		t.Parallel()
 
-		c, err := kafka.NewConsumer(consumerConfig(brokers), newRecorder(), testOptions()...)
+		c, err := kafka.NewConsumer(consumerConfig(brokers), newRecorder(), kafka.StopOnFailure, testOptions()...)
 		require.NoError(t, err)
 		require.NoError(t, c.Start(t.Context()))
 		require.ErrorIs(t, c.Start(t.Context()), kafka.ErrAlreadyStarted)
@@ -83,7 +89,7 @@ func TestConsumer_StateErrors(t *testing.T) {
 		t.Parallel()
 
 		cfg := consumerConfig([]string{"127.0.0.1:1"})
-		c, err := kafka.NewConsumer(cfg, newRecorder(), testOptions()...)
+		c, err := kafka.NewConsumer(cfg, newRecorder(), kafka.StopOnFailure, testOptions()...)
 		require.NoError(t, err)
 		require.Error(t, c.Start(t.Context()))
 		require.NoError(t, c.Shutdown(t.Context()))
@@ -172,7 +178,7 @@ func TestConsumer_StopFinishesTheMessageInFlight(t *testing.T) {
 		return nil
 	}
 
-	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, testOptions()...)
+	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, kafka.StopOnFailure, testOptions()...)
 	require.NoError(t, err)
 	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
@@ -215,10 +221,10 @@ func TestConsumer_ShutdownDeadlineCancelsTheHandler(t *testing.T) {
 		return ctx.Err()
 	})
 
-	c, err := kafka.NewConsumer(consumerConfig(brokers), h, testOptions(
-		kafka.WithErrorHandler(func(context.Context, *kafka.Message, error) kafka.ErrorAction {
+	c, err := kafka.NewConsumer(consumerConfig(brokers), h,
+		func(context.Context, *kafka.Message, error) kafka.ErrorAction {
 			return kafka.ErrorActionRetry
-		}))...)
+		}, testOptions()...)
 	require.NoError(t, err)
 	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
@@ -288,7 +294,7 @@ func TestConsumer_DefaultStopsWhenRetriesAreExhausted(t *testing.T) {
 		return nil
 	}
 
-	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, testOptions()...)
+	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, kafka.StopOnFailure, testOptions()...)
 	require.NoError(t, err)
 	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
@@ -319,7 +325,7 @@ func TestConsumer_PermanentErrorStopsAtOnce(t *testing.T) {
 		return retry.Permanent(errors.New("cannot decode"))
 	}
 
-	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, testOptions()...)
+	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, kafka.StopOnFailure, testOptions()...)
 	require.NoError(t, err)
 	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
@@ -337,7 +343,7 @@ func TestConsumer_UndecompressableBatchFailsRun(t *testing.T) {
 	gzip := kafka.WithKgoOpts(kgo.ProducerBatchCompression(kgo.GzipCompression()))
 	require.NoError(t, newProducer(t, brokers, gzip).Produce(t.Context(), testTopic, nil, make([]byte, 4096)))
 
-	c, err := kafka.NewConsumer(consumerConfig(brokers), newRecorder(),
+	c, err := kafka.NewConsumer(consumerConfig(brokers), newRecorder(), kafka.StopOnFailure,
 		testOptions(kafka.WithKgoOpts(kgo.MaxDecompressBatchBytes(64)))...)
 	require.NoError(t, err)
 	shutdownOnCleanup(t, c)
@@ -363,11 +369,11 @@ func TestConsumer_SkipCommits(t *testing.T) {
 		return nil
 	}
 
-	skip := kafka.WithErrorHandler(func(context.Context, *kafka.Message, error) kafka.ErrorAction {
+	skip := func(context.Context, *kafka.Message, error) kafka.ErrorAction {
 		return kafka.ErrorActionSkip
-	})
+	}
 
-	_, stop := startConsumer(t, consumerConfig(brokers), rec, skip)
+	_, stop := startConsumerOnError(t, consumerConfig(brokers), rec, skip)
 	rec.waitSeen(t, "good")
 	require.NoError(t, stop())
 	assert.Equal(t, 1, rec.callsOf("bad"))
@@ -390,12 +396,12 @@ func TestConsumer_HandlerPanicGoesToTheErrorHandler(t *testing.T) {
 	got := make(chan error, 1)
 	h := kafka.HandlerFunc(func(context.Context, *kafka.Message) error { panic("boom") })
 
-	_, stop := startConsumer(t, consumerConfig(brokers), h,
-		kafka.WithErrorHandler(func(_ context.Context, _ *kafka.Message, err error) kafka.ErrorAction {
+	_, stop := startConsumerOnError(t, consumerConfig(brokers), h,
+		func(_ context.Context, _ *kafka.Message, err error) kafka.ErrorAction {
 			got <- err
 
 			return kafka.ErrorActionSkip
-		}))
+		})
 
 	require.ErrorContains(t, receive(t, got), "kafka: handler panicked: boom")
 	require.NoError(t, stop())
@@ -408,8 +414,8 @@ func TestConsumer_ErrorHandlerPanicStops(t *testing.T) {
 	produce(t, brokers, testTopic, "a")
 
 	h := kafka.HandlerFunc(func(context.Context, *kafka.Message) error { return errors.New("failed") })
-	c, err := kafka.NewConsumer(consumerConfig(brokers), h, testOptions(
-		kafka.WithErrorHandler(func(context.Context, *kafka.Message, error) kafka.ErrorAction { panic("boom") }))...)
+	c, err := kafka.NewConsumer(consumerConfig(brokers), h,
+		func(context.Context, *kafka.Message, error) kafka.ErrorAction { panic("boom") }, testOptions()...)
 	require.NoError(t, err)
 	shutdownOnCleanup(t, c)
 	require.NoError(t, c.Start(t.Context()))
@@ -474,7 +480,7 @@ func TestConsumer_DeadLetter(t *testing.T) {
 		return nil
 	}
 
-	_, stop := startConsumer(t, consumerConfig(brokers), rec, kafka.WithErrorHandler(kafka.DeadLetter(p, dlt)))
+	_, stop := startConsumerOnError(t, consumerConfig(brokers), rec, kafka.DeadLetter(p, dlt))
 	rec.waitSeen(t, "good")
 	require.NoError(t, stop())
 	assert.Equal(t, 3, rec.callsOf("bad"), "retried before dead-lettering")
@@ -546,3 +552,122 @@ func (t telemetry) TracerProvider() trace.TracerProvider { return t.tp }
 func (telemetry) MeterProvider() metric.MeterProvider { return noop.NewMeterProvider() }
 
 func (telemetry) Propagators() propagation.TextMapPropagator { return propagation.TraceContext{} }
+
+// budgetOptions shrink the rebalance timeout, so that a poll's budget (three
+// quarters of it) is 300ms.
+func budgetOptions(extra ...kafka.Option) []kafka.Option {
+	return testOptions(append([]kafka.Option{
+		kafka.WithKgoOpts(kgo.RebalanceTimeout(400 * time.Millisecond)),
+	}, extra...)...)
+}
+
+// Records that would hold a rebalance past the poll's budget are fetched
+// again instead: each is handled once, in order, and the commit never skips
+// one.
+func TestConsumer_PollBudgetYields(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	produce(t, brokers, testTopic, "a", "b", "c", "d", "e", "f")
+
+	rec := newRecorder()
+	rec.handle = func(ctx context.Context, _ *kafka.Message, _ int) error {
+		// A slow handler is the point; the stop does not cut it short.
+		select {
+		case <-time.After(120 * time.Millisecond):
+		case <-ctx.Done():
+		}
+
+		return nil
+	}
+
+	logs := &logRecorder{}
+	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, kafka.StopOnFailure,
+		budgetOptions(kafka.WithLogger(slog.New(logs)))...)
+	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
+	require.NoError(t, c.Start(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+
+	go func() { done <- c.Run(ctx) }()
+
+	rec.waitSeen(t, "a", "b", "c", "d", "e", "f")
+	cancel()
+	require.NoError(t, receive(t, done))
+	require.NoError(t, c.Shutdown(t.Context()))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e", "f"}, rec.values(), "each once, in order")
+	assert.Positive(t, logs.count("kafka poll ran out of its budget, the rest is fetched again"),
+		"six records of 120ms do not fit one 300ms budget")
+
+	produce(t, brokers, testTopic, "next")
+
+	next := newRecorder()
+	_, stop := startConsumer(t, consumerConfig(brokers), next)
+	next.waitSeen(t, "next")
+	require.NoError(t, stop())
+	assert.Equal(t, []string{"next"}, next.values(), "all six were committed")
+}
+
+// A redelivery delay past the poll's budget yields; when the record comes
+// again its attempts go on instead of starting over, so MaxAttempts still
+// bounds them.
+func TestConsumer_PollBudgetKeepsAttempts(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	produce(t, brokers, testTopic, "bad")
+
+	errDown := errors.New("down")
+	rec := newRecorder()
+	rec.handle = func(context.Context, *kafka.Message, int) error { return errDown }
+
+	c, err := kafka.NewConsumer(consumerConfig(brokers), rec, kafka.StopOnFailure, budgetOptions(
+		kafka.WithRedeliveryPolicy(retry.Policy{MaxAttempts: 2, InitialDelay: time.Second}),
+	)...)
+	require.NoError(t, err)
+	shutdownOnCleanup(t, c)
+	require.NoError(t, c.Start(t.Context()))
+
+	err = runToEnd(t, c)
+	require.ErrorIs(t, err, kafka.ErrStopped)
+	require.ErrorIs(t, err, kafka.ErrRetriesExhausted)
+	assert.Equal(t, 2, rec.callsOf("bad"), "the second attempt came after the yield")
+}
+
+// logRecorder is a slog.Handler that keeps the messages logged.
+type logRecorder struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (*logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.msgs = append(l.msgs, r.Message)
+
+	return nil
+}
+
+func (l *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *logRecorder) WithGroup(string) slog.Handler { return l }
+
+func (l *logRecorder) count(msg string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	n := 0
+
+	for _, m := range l.msgs {
+		if m == msg {
+			n++
+		}
+	}
+
+	return n
+}

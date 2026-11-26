@@ -9,8 +9,23 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/retry"
 )
+
+// checkArgs validates the arguments shared by NewSubscriber and NewConsumer.
+func checkArgs(conn *Connection, handler Handler, onError ErrorHandler) error {
+	switch {
+	case conn == nil:
+		return fmt.Errorf("%w: connection is nil", ErrInvalidConfig)
+	case lifecycle.IsNil(handler):
+		return fmt.Errorf("%w: handler is nil", ErrInvalidConfig)
+	case onError == nil:
+		return fmt.Errorf("%w: error handler is nil", ErrInvalidConfig)
+	default:
+		return nil
+	}
+}
 
 // outcome is what becomes of a message after its handling.
 type outcome int

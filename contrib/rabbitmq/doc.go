@@ -11,9 +11,10 @@
 //   - Consumer — a queue consumer (Runner): every message goes to a Handler,
 //     with Concurrency workers; a handled message is acked, a failed one is
 //     retried, requeued, rejected (to the queue's dead-letter exchange) or
-//     stops the consumer, as an ErrorHandler decides (DefaultErrorHandler,
-//     DeadLetter). On stop the broker stops delivering, the messages in
-//     flight finish and are acked, the prefetched ones are requeued.
+//     stops the consumer, as the ErrorHandler given to NewConsumer decides
+//     (DeadLetter, StopOnFailure). On stop the broker stops delivering, the
+//     messages in flight finish and are acked, the prefetched ones are
+//     requeued.
 //
 // Use one Connection for publishers and another for consumers: the broker
 // blocks a connection that publishes faster than it can take (flow control,

@@ -23,12 +23,21 @@ func newSubscriber(
 ) *nats.Subscriber {
 	t.Helper()
 
+	return newSubscriberOnError(t, conn, cfg, h, nats.StopOnFailure, opts...)
+}
+
+func newSubscriberOnError(
+	t *testing.T, conn *nats.Connection, cfg nats.SubscriberConfig, h nats.Handler, onError nats.ErrorHandler,
+	opts ...nats.Option,
+) *nats.Subscriber {
+	t.Helper()
+
 	opts = append([]nats.Option{
 		nats.WithLogger(quietLogger()),
 		nats.WithRedeliveryPolicy(retry.Policy{MaxAttempts: 3, InitialDelay: time.Millisecond}),
 	}, opts...)
 
-	s, err := nats.NewSubscriber(conn, cfg, h, opts...)
+	s, err := nats.NewSubscriber(conn, cfg, h, onError, opts...)
 	require.NoError(t, err)
 
 	return s
@@ -188,10 +197,10 @@ func TestSubscriber_DiscardGoesOn(t *testing.T) {
 	conn := startConnection(t, s)
 	got := newReceived()
 
-	sub := newSubscriber(t, conn, nats.SubscriberConfig{Subject: "mixed"},
+	sub := newSubscriberOnError(t, conn, nats.SubscriberConfig{Subject: "mixed"},
 		nats.JSON(func(ctx context.Context, _ struct{ N int }, msg *nats.Message) error {
 			return got.Handle(ctx, msg)
-		}), nats.WithErrorHandler(nats.Discard))
+		}), nats.Discard)
 	runInBackground(t, sub)
 	healthy(t, sub)
 
@@ -362,18 +371,21 @@ func TestNewSubscriber_Invalid(t *testing.T) {
 	conn := newConnection(t, "nats://127.0.0.1:4222")
 	valid := nats.SubscriberConfig{Subject: "x"}
 
-	_, err := nats.NewSubscriber(nil, valid, newReceived())
+	_, err := nats.NewSubscriber(nil, valid, newReceived(), nats.Discard)
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 
-	_, err = nats.NewSubscriber(conn, valid, nil)
+	_, err = nats.NewSubscriber(conn, valid, nil, nats.Discard)
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 
-	_, err = nats.NewSubscriber(conn, nats.SubscriberConfig{}, newReceived())
+	_, err = nats.NewSubscriber(conn, valid, newReceived(), nil)
+	require.ErrorIs(t, err, nats.ErrInvalidConfig, "the error strategy is required")
+
+	_, err = nats.NewSubscriber(conn, nats.SubscriberConfig{}, newReceived(), nats.Discard)
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 
 	var nilHandler nats.HandlerFunc
 
-	_, err = nats.NewSubscriber(conn, valid, nilHandler)
+	_, err = nats.NewSubscriber(conn, valid, nilHandler, nats.Discard)
 	require.ErrorIs(t, err, nats.ErrInvalidConfig)
 }
 

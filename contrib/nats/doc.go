@@ -13,9 +13,9 @@
 //   - Consumer — a durable JetStream pull consumer (Runner), created or
 //     updated by Run: every message goes to a Handler and is acked once
 //     handled; a failed one is retried, redelivered later, terminated or
-//     stops the consumer, as an ErrorHandler decides (DefaultErrorHandler,
-//     Discard). On stop the messages in flight finish and are acked, the
-//     prefetched ones are naked.
+//     stops the consumer, as the ErrorHandler given to NewConsumer decides
+//     (Discard, StopOnFailure). On stop the messages in flight finish and
+//     are acked, the prefetched ones are naked.
 //
 // Register the components in this order: the connection, then publishers,
 // then subscribers and consumers. app.App stops the subscribers and

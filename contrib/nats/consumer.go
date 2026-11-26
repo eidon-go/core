@@ -65,6 +65,15 @@ type ConsumerConfig struct {
 	// Prefetch is the number of messages the client pulls ahead and holds
 	// for the handlers. Default: Concurrency.
 	Prefetch int `json:"prefetch" yaml:"prefetch"`
+
+	// MaxProcessingTime bounds the handling of one message — its attempts
+	// and the redelivery delays between them. Past it the handler's context
+	// is cancelled, the consumer stops telling the server the message is in
+	// progress, and the message is naked (or, if the handler ignores its
+	// context, delivered again once its AckWait expires), so a hung handler
+	// cannot hold a message forever: MaxDeliver still applies. Default: 10 ×
+	// AckWait (30s when unset). Negative: no limit.
+	MaxProcessingTime time.Duration `json:"maxProcessingTime" yaml:"maxProcessingTime"`
 }
 
 // Validate reports every invalid field at once. Each error wraps
@@ -94,6 +103,22 @@ func (c ConsumerConfig) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// defaultProcessingFactor × the ack deadline is the default
+// MaxProcessingTime.
+const defaultProcessingFactor = 10
+
+// processingLimit returns the bound of one message's handling, 0 for none.
+func (c ConsumerConfig) processingLimit(ackDeadline time.Duration) time.Duration {
+	switch {
+	case c.MaxProcessingTime < 0:
+		return 0
+	case c.MaxProcessingTime == 0:
+		return defaultProcessingFactor * ackDeadline
+	default:
+		return c.MaxProcessingTime
+	}
 }
 
 // validateName checks a stream or consumer name: required, and none of the
@@ -145,7 +170,8 @@ func (c ConsumerConfig) jetStreamConfig(changes []func(*jetstream.ConsumerConfig
 // Consumer is a JetStream consumer: every message of its durable consumer
 // goes to a Handler, with Concurrency workers; a handled message is acked,
 // a failed one is retried, redelivered later, terminated or stops the
-// consumer, as an ErrorHandler decides (DefaultErrorHandler, Discard).
+// consumer, as the ErrorHandler given to NewConsumer decides (Discard,
+// StopOnFailure).
 // Delivery is at least once: a handler must cope with a message it has
 // seen. It is a Runner, Healthchecker and Namer, built on lifecycle.Worker:
 //
@@ -177,19 +203,27 @@ type Consumer struct {
 	// progressEvery is the interval of the in-progress acks while a
 	// message is handled: half its AckWait.
 	progressEvery time.Duration
+	// maxProcessing bounds the handling of one message; 0 for no bound.
+	maxProcessing time.Duration
 
 	runner *runner
 }
 
 // NewConsumer validates cfg and builds a consumer of conn for handler; it
-// does no I/O.
-func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer, error) {
-	if conn == nil {
-		return nil, fmt.Errorf("%w: connection is nil", ErrInvalidConfig)
-	}
-
-	if lifecycle.IsNil(handler) {
-		return nil, fmt.Errorf("%w: handler is nil", ErrInvalidConfig)
+// does no I/O. onError decides what happens to a message whose handler
+// failed. There is no default, because every choice has a cost: Discard keeps
+// the consumer going and terminates the message, StopOnFailure stops the
+// consumer — and with app.App the whole service, which then meets the same
+// message again after a restart.
+func NewConsumer(
+	conn *Connection,
+	cfg ConsumerConfig,
+	handler Handler,
+	onError ErrorHandler,
+	opts ...Option,
+) (*Consumer, error) {
+	if err := checkArgs(conn, handler, onError); err != nil {
+		return nil, err
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -222,7 +256,7 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, opts ...
 		logger:   o.logger,
 		proc: &processor{
 			handler:      handler,
-			errorHandler: o.errorHandler,
+			errorHandler: onError,
 			redelivery:   o.redelivery(),
 			logger:       o.logger,
 			tel:          newTelemetry(&o),
@@ -237,6 +271,7 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, opts ...
 		workers:       workers,
 		prefetch:      prefetch,
 		progressEvery: ackDeadline(jsConfig) / 2, //nolint:mnd // half of it
+		maxProcessing: cfg.processingLimit(ackDeadline(jsConfig)),
 	}
 	c.runner = newRunner(c.loop, c.logger, ErrNotConnected)
 
@@ -521,10 +556,18 @@ func (c *Consumer) handle(end, work context.Context, jsMsg jetstream.Msg) error 
 			slog.Uint64("delivered", meta.NumDelivered))
 	}
 
-	stopProgress := c.keepInProgress(work, jsMsg)
-	out, err := c.proc.process(end, work, msg, attrs)
+	msgCtx, cancel := c.processingContext(work)
+	defer cancel()
+
+	stopProgress := c.keepInProgress(msgCtx, jsMsg)
+	out, err := c.proc.process(end, msgCtx, msg, attrs)
 
 	stopProgress()
+
+	if out == outcomeAbandon && work.Err() == nil {
+		c.logger.LogAttrs(work, slog.LevelWarn, "nats message processing exceeded MaxProcessingTime, nak",
+			append(attrs, slog.Duration("max_processing_time", c.maxProcessing))...)
+	}
 
 	switch out {
 	case outcomeAck:
@@ -544,6 +587,16 @@ func (c *Consumer) handle(end, work context.Context, jsMsg jetstream.Msg) error 
 	}
 
 	return nil
+}
+
+// processingContext derives the context of one message's handling from
+// work, bounded by MaxProcessingTime.
+func (c *Consumer) processingContext(work context.Context) (context.Context, context.CancelFunc) {
+	if c.maxProcessing <= 0 {
+		return context.WithCancel(work)
+	}
+
+	return context.WithTimeout(work, c.maxProcessing)
 }
 
 // keepInProgress tells the server every AckWait/2 that the message is in

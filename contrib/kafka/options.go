@@ -58,7 +58,6 @@ type options struct {
 	meterProvider    metric.MeterProvider
 	propagators      propagation.TextMapPropagator
 	kgoOpts          []kgo.Opt
-	errorHandler     ErrorHandler
 	redeliveryPolicy *retry.Policy
 }
 
@@ -91,10 +90,6 @@ func newOptions(opts []Option) options {
 
 	if o.propagators == nil {
 		o.propagators = otel.GetTextMapPropagator()
-	}
-
-	if o.errorHandler == nil {
-		o.errorHandler = DefaultErrorHandler
 	}
 
 	return o
@@ -237,12 +232,6 @@ func WithTelemetry(telemetry Telemetry) Option {
 // and topic settings, commit and rebalance callbacks) break its guarantees.
 func WithKgoOpts(opts ...kgo.Opt) Option {
 	return func(o *options) { o.kgoOpts = append(o.kgoOpts, opts...) }
-}
-
-// WithErrorHandler sets what a Consumer does with a message whose handler
-// failed. Default: DefaultErrorHandler. Consumer only.
-func WithErrorHandler(h ErrorHandler) Option {
-	return func(o *options) { o.errorHandler = h }
 }
 
 // WithRedeliveryPolicy sets the delays between attempts at a message whose

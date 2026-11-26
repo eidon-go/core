@@ -67,7 +67,7 @@ consumer, err := rabbitmq.NewConsumer(consumeConn, rabbitmq.ConsumerConfig{
     },
 }, rabbitmq.JSON(func(ctx context.Context, o Order, _ *rabbitmq.Message) error {
     return billing.Charge(ctx, o) // idempotent: delivery is at least once
-}), rabbitmq.WithErrorHandler(rabbitmq.DeadLetter))
+}), rabbitmq.DeadLetter) // the error strategy is required: see Errors
 if err != nil {
     return err
 }
@@ -118,7 +118,6 @@ once, wrapping `ErrInvalidConfig`.
 | `WithTLSConfig(*tls.Config)` | none | `Connection` |
 | `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals | `Publisher`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
-| `WithErrorHandler(ErrorHandler)` | `DefaultErrorHandler` | `Consumer` |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Consumer` |
 
 ## Lifecycle
@@ -185,17 +184,23 @@ off there is not a failure: the `ErrorHandler` is not asked, and the message is 
 in place passes the same `*Message` again, changes the handler made to it included. `JSON[T]`
 decodes the body into a `T`; a body that does not decode is a `retry.Permanent` error.
 
-A handler error goes to the `ErrorHandler`, which returns one of:
+A handler error goes to the `ErrorHandler` passed to `NewConsumer`, which returns one of:
 
 | Action | What happens |
 |---|---|
 | `ErrorActionRetry` | handled again after the `WithRedeliveryPolicy` delay, in the same worker (which holds the message meanwhile); once the attempts are exhausted the `ErrorHandler` is asked again with `ErrRetriesExhausted` joined, and `Retry` counts as `Stop` |
-| `ErrorActionRequeue` | `basic.nack` with requeue: back to the queue, delivered again at once — bound it with a quorum queue's `x-delivery-limit` |
+| `ErrorActionRequeue` | after the redelivery policy's delay for the message's delivery number (a quorum queue's `x-delivery-count`; otherwise 1, or 2 once redelivered), `basic.nack` with requeue: back to the queue, to any consumer. The worker holds the message during the delay, so a failing message cannot loop hot; a stop during the delay leaves it to be requeued when the channel closes. Bound it with a quorum queue's `x-delivery-limit` |
 | `ErrorActionReject` | `basic.nack` without requeue: to the queue's dead-letter exchange (`x-dead-letter-exchange`), or dropped when it has none |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is not acked and is requeued |
 
-`DefaultErrorHandler` retries, then stops (no silent loss). `DeadLetter` retries, then rejects —
-at once for `retry.Permanent` errors. A handler or `ErrorHandler` panic is recovered: the handler's
+There is no default strategy: choose it for production deliberately. For a message that fails
+repeatedly, prefer the broker's own bounds over requeueing without end: a quorum queue with
+`x-delivery-limit` and `x-dead-letter-exchange` (see `ExampleDeadLetter`) dead-letters it after
+the limit. `DeadLetter` (recommended)
+retries, then rejects — at once for `retry.Permanent` errors; declare the queue with
+`x-dead-letter-exchange` to keep the rejected messages. `StopOnFailure` retries, then stops: no
+message is lost, but with `app.App` one message that can never be handled stops the whole service,
+and it meets the message again after every restart — a crash loop. A handler or `ErrorHandler` panic is recovered: the handler's
 becomes an error, the `ErrorHandler`'s stops the consumer. Failures are logged with the queue,
 exchange, routing key, message ID and delivery tag — never the body or the headers.
 

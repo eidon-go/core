@@ -40,9 +40,9 @@ var fetchErrorPolicy = retry.Policy{ //nolint:gochecknoglobals,exhaustruct_v5 //
 //   - Shutdown bounds that stop, then leaves the group and closes the client.
 //   - Healthcheck reports whether Run is consuming.
 //
-// A message whose handler fails goes to the ErrorHandler (WithErrorHandler,
-// default DefaultErrorHandler): retry it in place (WithRedeliveryPolicy),
-// skip it, or stop the consumer. Offsets are committed every few seconds,
+// A message whose handler fails goes to the ErrorHandler given to
+// NewConsumer: retry it in place (WithRedeliveryPolicy), skip it, or stop
+// the consumer. Offsets are committed every few seconds,
 // when partitions are revoked and when the consumer stops; a message is
 // committed only once it and every earlier message of its partition are
 // handled or skipped.
@@ -57,16 +57,29 @@ type Consumer struct {
 	tracer       *kotel.Tracer
 	maxPoll      int
 
+	// budget and resume belong to the loop's goroutine: the time one poll's
+	// records may take, and where a record cut off by it resumes.
+	budget time.Duration
+	resume resumePoint
+
 	lazy     *lazyClient
 	worker   *lifecycle.Worker
 	releaser *lifecycle.Releaser
 }
 
 // NewConsumer validates cfg and builds a consumer for handler; it does no
-// network I/O (the group is joined in Start).
-func NewConsumer(cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer, error) {
+// network I/O (the group is joined in Start). onError decides what happens to
+// a message whose handler failed. There is no default, because every choice
+// has a cost: DeadLetter keeps the consumer going and the message in a
+// dead-letter topic, StopOnFailure stops the consumer — and with app.App the
+// whole service, which then fails again on the same message after a restart.
+func NewConsumer(cfg ConsumerConfig, handler Handler, onError ErrorHandler, opts ...Option) (*Consumer, error) {
 	if lifecycle.IsNil(handler) {
 		return nil, fmt.Errorf("%w: handler is nil", ErrInvalidConfig)
+	}
+
+	if onError == nil {
+		return nil, fmt.Errorf("%w: error handler is nil", ErrInvalidConfig)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -92,7 +105,7 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, opts ...Option) (*Consumer
 		logger:       o.logger,
 		connect:      o.connectPolicy(),
 		redelivery:   o.redelivery(),
-		errorHandler: o.errorHandler,
+		errorHandler: onError,
 		tracer:       tracer,
 		maxPoll:      maxPoll,
 	}
@@ -182,10 +195,12 @@ func (c *Consumer) onRevoked(ctx context.Context, client *kgo.Client, _ map[stri
 // loop is the worker's loop: it polls with stop and handles with work.
 func (c *Consumer) loop(stop, work context.Context) error {
 	client := c.lazy.get()
+	c.budget = pollBudget(client)
 	errStreak := 0
 
 	for {
 		fetches := client.PollRecords(stop, c.maxPoll)
+		deadline := time.Now().Add(c.budget)
 
 		if fetches.IsClientClosed() {
 			client.AllowRebalance()
@@ -226,7 +241,7 @@ func (c *Consumer) loop(stop, work context.Context) error {
 
 		errStreak = 0
 
-		err := c.handleFetches(stop, work, client, fetches)
+		err := c.handleFetches(stop, work, client, fetches, deadline)
 
 		client.AllowRebalance()
 
@@ -273,15 +288,60 @@ func fatalFetchError(fetches kgo.Fetches) error {
 	return fatal
 }
 
+// defaultRebalanceTimeout is franz-go's kgo.RebalanceTimeout.
+const defaultRebalanceTimeout = time.Minute
+
+// pollBudget is the time the records of one poll may take: three quarters
+// of the group's rebalance timeout, since a rebalance waits for them
+// (BlockRebalanceOnPoll) and a member that does not rejoin within the
+// timeout is kicked out of the group.
+func pollBudget(client *kgo.Client) time.Duration {
+	timeout, _ := client.OptValue(kgo.RebalanceTimeout).(time.Duration)
+	if timeout <= 0 {
+		timeout = defaultRebalanceTimeout
+	}
+
+	return timeout * 3 / 4 //nolint:mnd // three quarters
+}
+
+// errYield ends the handling of a poll early: its budget ran out.
+var errYield = errors.New("kafka: poll budget exhausted")
+
+// resumePoint is the record whose retries a yield cut off, and its last
+// attempt: when the record comes again its attempts go on from there
+// instead of starting over.
+type resumePoint struct {
+	topic     string
+	partition int32
+	offset    int64
+	attempt   int
+}
+
 // handleFetches handles the polled records in order until one stops the
-// consumer or the stop begins.
-func (c *Consumer) handleFetches(stop, work context.Context, client *kgo.Client, fetches kgo.Fetches) error {
+// consumer, the stop begins or the poll's budget runs out; then the records
+// not handled are fetched again (see yield).
+func (c *Consumer) handleFetches(
+	stop, work context.Context, client *kgo.Client, fetches kgo.Fetches, deadline time.Time,
+) error {
 	for iter := fetches.RecordIter(); !iter.Done(); {
 		if stop.Err() != nil {
 			return nil //nolint:nilerr // the stop is not an error
 		}
 
-		if err := c.handleRecord(stop, work, client, iter.Next()); err != nil {
+		r := iter.Next()
+
+		err := errYield
+		if time.Now().Before(deadline) {
+			err = c.handleRecord(stop, work, client, r, deadline)
+		}
+
+		if errors.Is(err, errYield) {
+			c.yield(work, client, r, iter)
+
+			return nil
+		}
+
+		if err != nil {
 			return err
 		}
 	}
@@ -289,13 +349,44 @@ func (c *Consumer) handleFetches(stop, work context.Context, client *kgo.Client,
 	return nil
 }
 
+// yield rewinds every partition of the poll to its first record not handled
+// — r and the ones iter still holds — so that the next polls fetch them
+// again, after the rebalance waiting for this poll has run. Nothing past
+// them is marked, so no commit skips them.
+func (c *Consumer) yield(ctx context.Context, client *kgo.Client, r *kgo.Record, iter *kgo.FetchesRecordIter) {
+	rewind := map[string]map[int32]kgo.EpochOffset{}
+	add := func(r *kgo.Record) {
+		if rewind[r.Topic] == nil {
+			rewind[r.Topic] = map[int32]kgo.EpochOffset{}
+		}
+
+		if _, ok := rewind[r.Topic][r.Partition]; !ok { // the first is the earliest
+			rewind[r.Topic][r.Partition] = kgo.EpochOffset{Epoch: r.LeaderEpoch, Offset: r.Offset}
+		}
+	}
+
+	for add(r); !iter.Done(); {
+		add(iter.Next())
+	}
+
+	client.SetOffsets(rewind)
+
+	c.logger.WarnContext(ctx, "kafka poll ran out of its budget, the rest is fetched again",
+		slog.Duration("budget", c.budget), slog.String("topic", r.Topic),
+		slog.Int("partition", int(r.Partition)), slog.Int64("offset", r.Offset))
+}
+
 // handleRecord handles one record, with the attempts the ErrorHandler and
 // the redelivery policy allow, and marks it for commit once it is handled
-// or skipped. A stop during a redelivery delay leaves it unmarked.
-func (c *Consumer) handleRecord(stop, work context.Context, client *kgo.Client, r *kgo.Record) error {
+// or skipped. A stop during a redelivery delay leaves it unmarked; a delay
+// past the poll's deadline returns errYield, and the attempts go on when the
+// record comes again.
+func (c *Consumer) handleRecord(
+	stop, work context.Context, client *kgo.Client, r *kgo.Record, deadline time.Time,
+) error {
 	msg := messageFromRecord(r)
 
-	for attempt := 1; ; attempt++ {
+	for attempt := c.resumeAttempt(r) + 1; ; attempt++ {
 		err := c.handleOnce(work, r, msg)
 		if err == nil {
 			client.MarkCommitRecords(r)
@@ -317,8 +408,8 @@ func (c *Consumer) handleRecord(stop, work context.Context, client *kgo.Client, 
 
 			return nil
 		case action == ErrorActionRetry && !exhausted:
-			if !c.waitRedelivery(stop, work, attempt, err) {
-				return nil
+			if again, waitErr := c.waitRedelivery(stop, work, r, attempt, err, deadline); !again {
+				return waitErr
 			}
 		default:
 			return fmt.Errorf("%w: %s[%d] offset %d: %w", ErrStopped, r.Topic, r.Partition, r.Offset, err)
@@ -333,16 +424,45 @@ func (c *Consumer) logFailure(ctx context.Context, r *kgo.Record, attempt int, a
 		slog.String("action", action.String()), slog.Any("error", err))
 }
 
-// waitRedelivery waits for the redelivery delay after the failed attempt,
-// unless the stop begins first; it reports whether a new attempt may start.
-func (c *Consumer) waitRedelivery(stop, work context.Context, attempt int, err error) bool {
+// resumeAttempt returns the attempts r already had before a yield cut them
+// off, 0 for none. A resume point of r's partition is used up either way: a
+// record at another offset means r's partition moved on.
+func (c *Consumer) resumeAttempt(r *kgo.Record) int {
+	p := c.resume
+	if p.topic != r.Topic || p.partition != r.Partition {
+		return 0
+	}
+
+	c.resume = resumePoint{} //nolint:exhaustruct_v5 // cleared
+
+	if p.offset != r.Offset {
+		return 0
+	}
+
+	return p.attempt
+}
+
+// waitRedelivery waits for the redelivery delay after r's failed attempt
+// and reports whether a new attempt may start. If not, the error is what
+// handleRecord returns: nil when the stop began first, errYield when the
+// delay would end past the poll's deadline — it is not waited then, and r's
+// attempts are kept for when it comes again.
+func (c *Consumer) waitRedelivery(
+	stop, work context.Context, r *kgo.Record, attempt int, err error, deadline time.Time,
+) (bool, error) {
 	delay := c.redelivery.Delay(attempt)
+	if time.Until(deadline) < delay {
+		c.resume = resumePoint{topic: r.Topic, partition: r.Partition, offset: r.Offset, attempt: attempt}
+
+		return false, errYield
+	}
+
 	if c.redelivery.OnRetry != nil {
 		c.redelivery.OnRetry(work, retry.Attempt{Number: attempt, Err: err, Delay: delay})
 	}
 
 	// The stop may have begun just as the delay ended: no new attempt then.
-	return sleep(stop, delay) && stop.Err() == nil
+	return sleep(stop, delay) && stop.Err() == nil, nil
 }
 
 // handleOnce calls the handler in the record's process span; a panic is an

@@ -58,7 +58,8 @@ consumer, err := nats.NewConsumer(conn, nats.ConsumerConfig{
     _, err = publisher.PublishJetStream(ctx, msg, jetstream.WithMsgID("invoice-"+order.ID))
 
     return err
-}), nats.WithStream(jetstream.StreamConfig{Name: "ORDERS", Subjects: []string{"orders.>"}}))
+}), nats.Discard, // the error strategy is required: see Errors
+    nats.WithStream(jetstream.StreamConfig{Name: "ORDERS", Subjects: []string{"orders.>"}}))
 if err != nil {
     return err
 }
@@ -66,7 +67,7 @@ if err != nil {
 status, err := nats.NewSubscriber(conn, nats.SubscriberConfig{Subject: "billing.status", Queue: "billing"},
     nats.HandlerFunc(func(ctx context.Context, msg *nats.Message) error {
         return msg.Respond(ctx, &nats.Message{Data: []byte("ok")})
-    }))
+    }), nats.Discard)
 if err != nil {
     return err
 }
@@ -123,6 +124,7 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `MaxAckPending` | server's, 1000 | delivered messages waiting for their ack, all instances together; keep it ≥ (`Concurrency` + `Prefetch`) × instances; negative: no limit |
 | `Concurrency` | 1 | messages handled at the same time; above 1 the order is lost |
 | `Prefetch` | `Concurrency` | messages pulled ahead of the handlers |
+| `MaxProcessingTime` | 10 × `AckWait` (300s by default) | bound of one message's handling, retries included; past it the handler's `ctx` is cancelled, the in-progress acks stop and the message is naked; negative: no limit |
 
 ## Options
 
@@ -135,7 +137,6 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `WithConnOptions(...nats.Option)` | none | `Connection`: any nats.go option, applied last; handlers set by them run after the module's own |
 | `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals | `Publisher`, `Subscriber`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Subscriber`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
-| `WithErrorHandler(ErrorHandler)` | `DefaultErrorHandler` | `Subscriber`, `Consumer` |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Subscriber`, `Consumer` (also the delay of a `Consumer`'s `Requeue`) |
 | `WithStream(jetstream.StreamConfig)` | none: the stream must exist | `Consumer`: create or update the stream before the consumer |
 | `WithConsumerConfig(func(*jetstream.ConsumerConfig))` | none | `Consumer`: settings `ConsumerConfig` lacks (`DeliverPolicy`, `BackOff`, …) |
@@ -186,7 +187,10 @@ messages the client already holds are handled, then `Run` returns.
 
 A `Handler` gets every message; `nil` acks it. While a message is handled — its attempts and the
 retry delays between them — the consumer tells the server every `AckWait/2` that it is in progress,
-so a slow handler does not get the message delivered again elsewhere. Delivery is still **at least
+so a slow handler does not get the message delivered again elsewhere — up to `MaxProcessingTime`.
+Past it the handler's `ctx` is cancelled and the message is naked; a handler that ignores its `ctx`
+no longer keeps the message in progress either, so the server delivers it again once `AckWait`
+expires and `MaxDeliver` still applies: a hung handler cannot hold a message forever. Delivery is still **at least
 once**: an ack lost with the connection, or an instance that dies mid-handling, makes the server
 deliver the message again, so handlers must be idempotent (`msg.Metadata` has the stream sequence and the delivery count). The
 handler's `ctx` is the consumer's work context: it is not cancelled when the consumer stops — the
@@ -195,7 +199,8 @@ failure: the `ErrorHandler` is not asked, and the message is naked. A retry in p
 `*Message` again, changes the handler made to it included. `JSON[T]` decodes the data into a `T`;
 data that does not decode is a `retry.Permanent` error.
 
-A handler error goes to the `ErrorHandler`, which returns one of:
+A handler error goes to the `ErrorHandler` passed to `NewConsumer` / `NewSubscriber`, which returns
+one of:
 
 | Action | Consumer | Subscriber |
 |---|---|---|
@@ -204,8 +209,11 @@ A handler error goes to the `ErrorHandler`, which returns one of:
 | `ErrorActionReject` | terminated (`AckTerm`): never delivered again; the server publishes a `MSG_TERMINATED` advisory (`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.<stream>.<consumer>`) a dead-letter flow can capture | dropped (logged) |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is naked, delivered again at once | `Run` returns an error wrapping `ErrStopped` |
 
-`DefaultErrorHandler` retries, then stops (no silent loss). `Discard` retries, then rejects — at
-once for `retry.Permanent` errors. A handler or `ErrorHandler` panic is recovered: the handler's
+There is no default strategy: choose it for production deliberately. `Discard` (recommended)
+retries, then rejects — at once for `retry.Permanent` errors; capture the `MSG_TERMINATED`
+advisories to keep the rejected messages. `StopOnFailure` retries, then stops: no message is lost,
+but with `app.App` one message that can never be handled stops the whole service, and a `Consumer`
+meets it again after every restart — a crash loop. A handler or `ErrorHandler` panic is recovered: the handler's
 becomes an error, the `ErrorHandler`'s stops the component. Failures are logged with the subject
 (and the stream, consumer, stream sequence and delivery count) — never the data or the headers.
 

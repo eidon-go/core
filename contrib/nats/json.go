@@ -18,7 +18,7 @@ const headerContentType = "Content-Type"
 
 // JSON returns a Handler that decodes the data of every message as JSON into
 // a T and calls handle with it. Data that does not decode is an error marked
-// with retry.Permanent — retrying cannot help — so DefaultErrorHandler stops
+// with retry.Permanent — retrying cannot help — so StopOnFailure stops
 // at once and Discard rejects the message at once. The content type is not
 // checked.
 func JSON[T any](handle func(ctx context.Context, v T, msg *Message) error) Handler {

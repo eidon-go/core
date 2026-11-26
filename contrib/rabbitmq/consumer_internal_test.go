@@ -32,7 +32,15 @@ func fastRedelivery(attempts int) Option {
 func newTestConsumer(t *testing.T, conn *Connection, cfg ConsumerConfig, h Handler, opts ...Option) *Consumer {
 	t.Helper()
 
-	c, err := NewConsumer(conn, cfg, h, append([]Option{WithLogger(discard)}, opts...)...)
+	return newTestConsumerOnError(t, conn, cfg, h, StopOnFailure, opts...)
+}
+
+func newTestConsumerOnError(
+	t *testing.T, conn *Connection, cfg ConsumerConfig, h Handler, onError ErrorHandler, opts ...Option,
+) *Consumer {
+	t.Helper()
+
+	c, err := NewConsumer(conn, cfg, h, onError, append([]Option{WithLogger(discard)}, opts...)...)
 	require.NoError(t, err)
 
 	t.Cleanup(func() { _ = c.Shutdown(cleanupContext(t)) })
@@ -247,8 +255,8 @@ func TestConsumer_ErrorActions(t *testing.T) {
 			h := &recordingHandler{
 				failFor: func(int32) error { return tt.handlerErr },
 			}
-			c := newTestConsumer(t, newTestConnection(t, broker, true), ordersConfig, h,
-				fastRedelivery(2), WithErrorHandler(tt.handler))
+			c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h,
+				tt.handler, fastRedelivery(2))
 
 			ctx, cancel := context.WithCancel(t.Context())
 			done := run(ctx, c)
@@ -272,13 +280,97 @@ func TestConsumer_ErrorActions(t *testing.T) {
 	}
 }
 
+func requeueAlways(context.Context, *Message, error) ErrorAction { return ErrorActionRequeue }
+
+// A requeue waits the redelivery delay first, so a failing message does not
+// come straight back from the broker in a hot loop.
+func TestConsumer_RequeueWaitsForTheDelay(t *testing.T) {
+	t.Parallel()
+
+	const delay = 200 * time.Millisecond
+
+	broker := newFakeBroker()
+	h := &recordingHandler{failFor: func(int32) error { return errHandler }}
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h, requeueAlways,
+		WithRedeliveryPolicy(retry.Policy{MaxAttempts: 1, InitialDelay: delay}))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := run(ctx, c)
+
+	start := time.Now()
+
+	broker.deliver(t, body("a"))
+	require.Eventually(t, func() bool {
+		_, requeued, _ := broker.snapshot()
+
+		return len(requeued) == 1
+	}, 5*time.Second, time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(start), delay)
+
+	cancel()
+	require.NoError(t, receive(t, done))
+}
+
+// A stop during the wait before a requeue ends it at once; the message is
+// left unacked, so the broker requeues it when the channel closes.
+func TestConsumer_StopDuringRequeueDelay(t *testing.T) {
+	t.Parallel()
+
+	broker := newFakeBroker()
+	h := &recordingHandler{failFor: func(int32) error { return errHandler }}
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h, requeueAlways,
+		WithRedeliveryPolicy(retry.Policy{MaxAttempts: 1, InitialDelay: time.Hour}))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := run(ctx, c)
+
+	broker.deliver(t, body("a"))
+	require.Eventually(t, func() bool { return h.calls.Load() == 1 }, 5*time.Second, time.Millisecond)
+
+	cancel()
+	require.NoError(t, receive(t, done))
+
+	acked, requeued, rejected := broker.snapshot()
+	assert.Empty(t, acked)
+	assert.Len(t, requeued, 1)
+	assert.Empty(t, rejected)
+}
+
+func TestDeliveryNumber(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		d    amqp.Delivery
+		want int
+	}{
+		{name: "first delivery", d: amqp.Delivery{}, want: 1},
+		{name: "redelivered, uncounted", d: amqp.Delivery{Redelivered: true}, want: 2},
+		{
+			name: "quorum queue count",
+			d:    amqp.Delivery{Redelivered: true, Headers: amqp.Table{headerDeliveryCount: int64(4)}},
+			want: 5,
+		},
+		{name: "int32 count", d: amqp.Delivery{Headers: amqp.Table{headerDeliveryCount: int32(1)}}, want: 2},
+		{name: "foreign type ignored", d: amqp.Delivery{Headers: amqp.Table{headerDeliveryCount: "x"}}, want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, deliveryNumber(&tt.d))
+		})
+	}
+}
+
 func TestConsumer_PanicsAreErrors(t *testing.T) {
 	t.Parallel()
 
 	broker := newFakeBroker()
 	h := HandlerFunc(func(context.Context, *Message) error { panic("boom") })
-	c := newTestConsumer(t, newTestConnection(t, broker, true), ordersConfig, h,
-		fastRedelivery(1), WithErrorHandler(func(context.Context, *Message, error) ErrorAction { panic("again") }))
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h,
+		func(context.Context, *Message, error) ErrorAction { panic("again") }, fastRedelivery(1))
 
 	done := run(t.Context(), c)
 
@@ -360,8 +452,8 @@ func TestConsumer_ShutdownDeadlineCutsOffTheHandler(t *testing.T) {
 
 		return DeadLetter(ctx, msg, err)
 	}
-	c := newTestConsumer(t, newTestConnection(t, broker, true), ordersConfig, h,
-		fastRedelivery(1), WithErrorHandler(errorHandler))
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h,
+		errorHandler, fastRedelivery(1))
 
 	done := run(t.Context(), c)
 
@@ -576,22 +668,25 @@ func TestNewConsumer_Invalid(t *testing.T) {
 
 	conn := newTestConnection(t, newFakeBroker(), false)
 	h := &recordingHandler{}
-	_, err := NewConsumer(nil, ordersConfig, h)
+	_, err := NewConsumer(nil, ordersConfig, h, DeadLetter)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 
-	_, err = NewConsumer(conn, ordersConfig, nil)
+	_, err = NewConsumer(conn, ordersConfig, nil, DeadLetter)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 
 	var nilHandler HandlerFunc
 
-	_, err = NewConsumer(conn, ordersConfig, nilHandler)
+	_, err = NewConsumer(conn, ordersConfig, nilHandler, DeadLetter)
 	require.ErrorIs(t, err, ErrInvalidConfig)
+
+	_, err = NewConsumer(conn, ordersConfig, h, nil)
+	require.ErrorIs(t, err, ErrInvalidConfig, "the error strategy is required")
 
 	_, err = NewConsumer(conn, ConsumerConfig{
 		Concurrency: -1,
 		Prefetch:    -1,
 		Topology:    Topology{Exchanges: []Exchange{{}}, Queues: []Queue{{}}, Bindings: []Binding{{}}},
-	}, h)
+	}, h, DeadLetter)
 	require.ErrorIs(t, err, ErrInvalidConfig)
 
 	for _, want := range []string{

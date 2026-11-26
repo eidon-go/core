@@ -7,12 +7,13 @@ import (
 	"github.com/eidon-go/core/retry"
 )
 
-// DefaultErrorHandler is the ErrorHandler of a Consumer without
-// WithErrorHandler. It retries an error (see WithRedeliveryPolicy) and stops
-// the consumer once the attempts are exhausted or for an error marked with
-// retry.Permanent: no message is ever dropped silently. Use DeadLetter, or an
-// ErrorHandler of your own, to go on past a message that cannot be handled.
-func DefaultErrorHandler(_ context.Context, _ *Message, err error) ErrorAction {
+// StopOnFailure is an ErrorHandler that retries an error (see
+// WithRedeliveryPolicy) and stops the consumer once the attempts are
+// exhausted or for an error marked with retry.Permanent: no message is ever
+// dropped. Run then returns an error, so with app.App the whole service
+// stops — and after a restart it meets the same message again. Prefer
+// DeadLetter in production.
+func StopOnFailure(_ context.Context, _ *Message, err error) ErrorAction {
 	if final(err) {
 		return ErrorActionStop
 	}
@@ -21,7 +22,7 @@ func DefaultErrorHandler(_ context.Context, _ *Message, err error) ErrorAction {
 }
 
 // DeadLetter is an ErrorHandler that retries an error like
-// DefaultErrorHandler, but once the attempts are exhausted — or at once for
+// StopOnFailure, but once the attempts are exhausted — or at once for
 // an error marked with retry.Permanent (a message that cannot be decoded) —
 // rejects the message, so that the broker moves it to the dead-letter
 // exchange of its queue. Declare the queue with "x-dead-letter-exchange":

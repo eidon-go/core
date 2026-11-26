@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,7 +125,7 @@ func TestOptions(t *testing.T) {
 	assert.Nil(t, p.Kgo(), "created in Start")
 	require.NoError(t, p.Shutdown(t.Context()))
 
-	c, err := kafka.NewConsumer(consumerConfig(cfg.Brokers), newRecorder(), opts...)
+	c, err := kafka.NewConsumer(consumerConfig(cfg.Brokers), newRecorder(), kafka.StopOnFailure, opts...)
 	require.NoError(t, err)
 	assert.Equal(t, "events", c.Name())
 	require.NoError(t, c.Shutdown(t.Context()))
@@ -224,15 +226,15 @@ func TestJSONProducer(t *testing.T) {
 	require.ErrorContains(t, bad.Produce(t.Context(), "", make(chan int)), "kafka: encode")
 }
 
-func TestDefaultErrorHandler(t *testing.T) {
+func TestStopOnFailure(t *testing.T) {
 	t.Parallel()
 
 	msg := &kafka.Message{}
 	errDown := errors.New("down")
 
-	assert.Equal(t, kafka.ErrorActionRetry, kafka.DefaultErrorHandler(t.Context(), msg, errDown))
+	assert.Equal(t, kafka.ErrorActionRetry, kafka.StopOnFailure(t.Context(), msg, errDown))
 	assert.Equal(t, kafka.ErrorActionStop,
-		kafka.DefaultErrorHandler(t.Context(), msg, errors.Join(kafka.ErrRetriesExhausted, errDown)))
+		kafka.StopOnFailure(t.Context(), msg, errors.Join(kafka.ErrRetriesExhausted, errDown)))
 }
 
 func TestDeadLetter_PublishFailureStops(t *testing.T) {
@@ -245,4 +247,60 @@ func TestDeadLetter_PublishFailureStops(t *testing.T) {
 	msg := &kafka.Message{Topic: testTopic}
 	assert.Equal(t, kafka.ErrorActionRetry, h(t.Context(), msg, errors.New("transient")))
 	assert.Equal(t, kafka.ErrorActionStop, h(t.Context(), msg, kafka.ErrRetriesExhausted))
+}
+
+// The dead letter gets the time of publishing (the original goes to a
+// header) and a bounded error header.
+func TestDeadLetter_Record(t *testing.T) {
+	t.Parallel()
+
+	original := time.UnixMilli(1_700_000_000_123)
+
+	tests := []struct {
+		name      string
+		err       error
+		wantError string
+	}{
+		{
+			name:      "short error is kept",
+			err:       retry.Permanent(errors.New("bad order")),
+			wantError: "bad order",
+		},
+		{
+			name:      "long error is cut on a rune boundary",
+			err:       retry.Permanent(errors.New(strings.Repeat("é", kafka.MaxDLTErrorLength))),
+			wantError: strings.Repeat("é", (kafka.MaxDLTErrorLength-3)/2) + "...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var dead *kafka.Message
+
+			h := kafka.DeadLetter(publisherFunc(func(_ context.Context, msgs ...*kafka.Message) error {
+				dead = msgs[0]
+
+				return nil
+			}), "dlt")
+
+			msg := &kafka.Message{Topic: testTopic, Offset: 7, Timestamp: original, Value: []byte("v")}
+			require.Equal(t, kafka.ErrorActionSkip, h(t.Context(), msg, tt.err))
+			require.NotNil(t, dead)
+
+			assert.True(t, dead.Timestamp.IsZero(), "set when published, so DLT retention counts from then")
+
+			headers := map[string]string{}
+			for _, hd := range dead.Headers {
+				headers[hd.Key] = string(hd.Value)
+			}
+
+			assert.Equal(t, "1700000000123", headers[kafka.HeaderDLTOriginalTimestamp])
+			assert.Equal(t, "7", headers[kafka.HeaderDLTOriginalOffset])
+			assert.LessOrEqual(t, len(headers[kafka.HeaderDLTError]), kafka.MaxDLTErrorLength)
+			assert.True(t, utf8.ValidString(headers[kafka.HeaderDLTError]))
+			assert.Equal(t, tt.wantError, headers[kafka.HeaderDLTError])
+		})
+	}
 }

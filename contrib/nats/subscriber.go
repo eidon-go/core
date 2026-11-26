@@ -80,9 +80,9 @@ func (c SubscriberConfig) Validate() error {
 //     cancelled and the messages not handled yet are lost.
 //   - Healthcheck reports whether Run is subscribed.
 //
-// A message whose handler fails goes to the ErrorHandler (WithErrorHandler,
-// default DefaultErrorHandler): retry it in place (WithRedeliveryPolicy),
-// drop it (Requeue and Reject: core NATS cannot redeliver) or stop.
+// A message whose handler fails goes to the ErrorHandler given to
+// NewSubscriber: retry it in place (WithRedeliveryPolicy), drop it (Requeue
+// and Reject: core NATS cannot redeliver) or stop.
 type Subscriber struct {
 	conn        *Connection
 	cfg         SubscriberConfig
@@ -96,14 +96,15 @@ type Subscriber struct {
 }
 
 // NewSubscriber validates cfg and builds a subscriber of conn for handler;
-// it does no I/O.
-func NewSubscriber(conn *Connection, cfg SubscriberConfig, handler Handler, opts ...Option) (*Subscriber, error) {
-	if conn == nil {
-		return nil, fmt.Errorf("%w: connection is nil", ErrInvalidConfig)
-	}
-
-	if lifecycle.IsNil(handler) {
-		return nil, fmt.Errorf("%w: handler is nil", ErrInvalidConfig)
+// it does no I/O. onError decides what happens to a message whose handler
+// failed; Discard (drop and log it) suits most subscribers, since core NATS
+// delivers at most once anyway. StopOnFailure stops the subscriber — and with
+// app.App the whole service.
+func NewSubscriber(conn *Connection, cfg SubscriberConfig, handler Handler, onError ErrorHandler,
+	opts ...Option,
+) (*Subscriber, error) {
+	if err := checkArgs(conn, handler, onError); err != nil {
+		return nil, err
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -126,7 +127,7 @@ func NewSubscriber(conn *Connection, cfg SubscriberConfig, handler Handler, opts
 		tel:    tel,
 		proc: &processor{
 			handler:      handler,
-			errorHandler: o.errorHandler,
+			errorHandler: onError,
 			redelivery:   o.redelivery(),
 			logger:       o.logger,
 			tel:          tel,

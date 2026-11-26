@@ -278,7 +278,7 @@ func TestRabbitMQ_ConsumerContract(t *testing.T) {
 		c, err := rabbitmq.NewConsumer(newRabbitConnection(t, rabbitConfig, "contract"),
 			rabbitmq.ConsumerConfig{Queue: queue, Topology: rabbitmq.Topology{
 				Queues: []rabbitmq.Queue{{Name: queue, AutoDelete: true}},
-			}}, newRabbitCollector(), rabbitOptions("consumer")...)
+			}}, newRabbitCollector(), rabbitmq.StopOnFailure, rabbitOptions("consumer")...)
 		require.NoError(t, err)
 
 		return c
@@ -297,7 +297,7 @@ func TestRabbitMQ_PublishAndConsume(t *testing.T) {
 		Queue:       queue,
 		Topology:    queueTopology(exchange, queue, nil),
 		Concurrency: 4,
-	}, collector, rabbitOptions("consumer")...)
+	}, collector, rabbitmq.StopOnFailure, rabbitOptions("consumer")...)
 	require.NoError(t, err)
 
 	stop := runRabbitConsumer(t, c)
@@ -386,7 +386,7 @@ func TestRabbitMQ_DrainOnStop(t *testing.T) {
 
 	c, err := rabbitmq.NewConsumer(newRabbitConnection(t, rabbitConfig, "consume"), rabbitmq.ConsumerConfig{
 		Queue: queue, Topology: queueTopology(exchange, queue, nil), Prefetch: 10,
-	}, h, rabbitOptions("consumer")...)
+	}, h, rabbitmq.StopOnFailure, rabbitOptions("consumer")...)
 	require.NoError(t, err)
 
 	stop := runRabbitConsumer(t, c)
@@ -438,8 +438,8 @@ func TestRabbitMQ_DeadLetter(t *testing.T) {
 	})
 
 	c, err := rabbitmq.NewConsumer(newRabbitConnection(t, rabbitConfig, "consume"),
-		rabbitmq.ConsumerConfig{Queue: queue, Topology: topology}, h,
-		append(rabbitOptions("consumer"), rabbitmq.WithErrorHandler(rabbitmq.DeadLetter))...)
+		rabbitmq.ConsumerConfig{Queue: queue, Topology: topology}, h, rabbitmq.DeadLetter,
+		rabbitOptions("consumer")...)
 	require.NoError(t, err)
 
 	runRabbitConsumer(t, c)
@@ -497,7 +497,7 @@ func TestRabbitMQ_HandlerPublishesDuringDrain(t *testing.T) {
 	})
 
 	c, err := rabbitmq.NewConsumer(consumeConn, rabbitmq.ConsumerConfig{Queue: in, Topology: topology}, h,
-		rabbitOptions("consumer")...)
+		rabbitmq.StopOnFailure, rabbitOptions("consumer")...)
 	require.NoError(t, err)
 
 	a := app.New(app.WithSignals(), app.WithLogger(slog.New(slog.DiscardHandler)),
@@ -564,7 +564,7 @@ func TestRabbitMQ_ReconnectAfterBrokerRestart(t *testing.T) {
 
 	c, err := rabbitmq.NewConsumer(consumeConn, rabbitmq.ConsumerConfig{
 		Queue: queue, Topology: queueTopology(exchange, queue, nil),
-	}, collector, rabbitOptions("consumer")...)
+	}, collector, rabbitmq.StopOnFailure, rabbitOptions("consumer")...)
 	require.NoError(t, err)
 
 	runRabbitConsumer(t, c)
