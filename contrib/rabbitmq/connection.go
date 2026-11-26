@@ -56,8 +56,7 @@ type Connection struct {
 
 	loops sync.WaitGroup // the reconnect loop
 
-	closing       context.Context //nolint:containedctx // the close signal of Start and the loop
-	cancelClosing context.CancelFunc
+	closing context.Context //nolint:containedctx // releaser.Context(): the close signal of the loop
 
 	releaser *lifecycle.Releaser
 }
@@ -88,22 +87,19 @@ func NewConnection(cfg Config, opts ...Option) (*Connection, error) {
 		}
 	}
 
-	closing, cancel := context.WithCancel(context.Background())
-
 	c := &Connection{ //nolint:exhaustruct_v5 // state starts at zero
-		name:          o.name,
-		logger:        o.logger,
-		addr:          cfg.address(tlsConfig != nil),
-		amqpCfg:       cfg.amqpConfig(tlsConfig),
-		connect:       o.connectPolicy(),
-		reconnect:     o.reconnectPolicy(),
-		dial:          dial,
-		closeTimeout:  cfg.DialTimeout,
-		ready:         make(chan struct{}),
-		closing:       closing,
-		cancelClosing: cancel,
+		name:         o.name,
+		logger:       o.logger,
+		addr:         cfg.address(tlsConfig != nil),
+		amqpCfg:      cfg.amqpConfig(tlsConfig),
+		connect:      o.connectPolicy(),
+		reconnect:    o.reconnectPolicy(),
+		dial:         dial,
+		closeTimeout: cfg.DialTimeout,
+		ready:        make(chan struct{}),
 	}
 	c.releaser = lifecycle.ShutdownOnce(c.close)
+	c.closing = c.releaser.Context()
 
 	return c, nil
 }
@@ -132,19 +128,18 @@ func (c *Connection) Start(ctx context.Context) error {
 	c.started = true
 	c.mu.Unlock()
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var conn amqpConn
 
-	stop := context.AfterFunc(c.closing, cancel) //nolint:contextcheck // the close signal, not a parent context
-	defer stop()
-
-	conn, err := retry.DoValue(ctx, c.connect, c.dialOnce)
-	if err != nil {
-		if c.closing.Err() != nil {
-			return wrap(ErrClosed)
+	err := c.releaser.Do(ctx, func(ctx context.Context) error {
+		var err error
+		if conn, err = retry.DoValue(ctx, c.connect, c.dialOnce); err != nil {
+			return fmt.Errorf("connect: %w", err)
 		}
 
-		return fmt.Errorf("rabbitmq: connect: %w", err)
+		return nil
+	})
+	if err != nil {
+		return wrap(err)
 	}
 
 	c.mu.Lock()
@@ -337,8 +332,6 @@ func (c *Connection) close(ctx context.Context) error {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
-
-	c.cancelClosing()
 
 	loopDone := make(chan struct{})
 

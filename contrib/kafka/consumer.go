@@ -122,7 +122,7 @@ func NewConsumer(cfg ConsumerConfig, handler Handler, onError ErrorHandler, opts
 	// rebalance is allowed so that leaving the group does not wait for it.
 	c.lazy = newLazyClient(kgoOpts, (*kgo.Client).CloseAllowingRebalance)
 	c.worker = lifecycle.NewWorker(lifecycle.WorkerFuncs{Run: c.loop, Logger: c.logger})
-	c.releaser = lifecycle.CloseOnce(c.lazy.close)
+	c.releaser = c.lazy.releaser
 
 	return c, nil
 }

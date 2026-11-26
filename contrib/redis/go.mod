@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.41.0
-	github.com/eidon-go/core v1.0.0-rc.7
+	github.com/eidon-go/core v1.0.0-rc.10
 	github.com/redis/go-redis/extra/redisotel/v9 v9.24.0
 	github.com/redis/go-redis/v9 v9.24.0
 	github.com/stretchr/testify v1.12.1

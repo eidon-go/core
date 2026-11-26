@@ -49,9 +49,6 @@ type Connection struct {
 	nc      *natsgo.Conn
 	ncDone  chan struct{} // closed when nc is closed
 
-	closing       context.Context //nolint:containedctx // the close signal of Start
-	cancelClosing context.CancelFunc
-
 	releaser *lifecycle.Releaser
 
 	sockets sockets // the TCP connections, interrupted by a cut-off Shutdown
@@ -73,17 +70,13 @@ func NewConnection(cfg Config, opts ...Option) (*Connection, error) {
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12} //nolint:exhaustruct_v5 // Go defaults
 	}
 
-	closing, cancel := context.WithCancel(context.Background())
-
 	c := &Connection{ //nolint:exhaustruct_v5 // state starts at zero
-		name:          o.name,
-		logger:        o.logger,
-		cfg:           cfg.withDefaults(o.name),
-		tlsConfig:     tlsConfig,
-		extra:         o.connOptions,
-		connect:       o.connectPolicy(),
-		closing:       closing,
-		cancelClosing: cancel,
+		name:      o.name,
+		logger:    o.logger,
+		cfg:       cfg.withDefaults(o.name),
+		tlsConfig: tlsConfig,
+		extra:     o.connOptions,
+		connect:   o.connectPolicy(),
 	}
 	c.releaser = lifecycle.ShutdownOnce(c.close)
 
@@ -114,19 +107,18 @@ func (c *Connection) Start(ctx context.Context) error {
 	c.started = true
 	c.mu.Unlock()
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var connected link
 
-	stop := context.AfterFunc(c.closing, cancel) //nolint:contextcheck // the close signal, not a parent context
-	defer stop()
-
-	connected, err := retry.DoValue(ctx, c.connect, c.dial)
-	if err != nil {
-		if c.closing.Err() != nil {
-			return wrap(ErrClosed)
+	err := c.releaser.Do(ctx, func(ctx context.Context) error {
+		var err error
+		if connected, err = retry.DoValue(ctx, c.connect, c.dial); err != nil {
+			return fmt.Errorf("connect: %w", err)
 		}
 
-		return fmt.Errorf("nats: connect: %w", err)
+		return nil
+	})
+	if err != nil {
+		return wrap(err)
 	}
 
 	c.mu.Lock()
@@ -357,8 +349,6 @@ func (c *Connection) handlers(o *natsgo.Options, done chan struct{}) {
 
 // close is the release of Shutdown.
 func (c *Connection) close(ctx context.Context) error {
-	c.cancelClosing()
-
 	c.mu.Lock()
 	c.closed = true
 	nc, done := c.nc, c.ncDone

@@ -46,7 +46,7 @@ func NewProducer(cfg Config, opts ...Option) (*Producer, error) {
 
 			return nil
 		}),
-		closer: lifecycle.CloseOnce(lazy.close),
+		closer: lazy.releaser,
 	}, nil
 }
 

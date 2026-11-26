@@ -3,7 +3,7 @@ module github.com/eidon-go/core/contrib/rabbitmq
 go 1.26.0
 
 require (
-	github.com/eidon-go/core v1.0.0-rc.9
+	github.com/eidon-go/core v1.0.0-rc.10
 	github.com/rabbitmq/amqp091-go v1.17.0
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0
