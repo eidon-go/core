@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/lifecycle"
 )
 
@@ -120,19 +121,12 @@ func NewSubscriber(conn *Connection, cfg SubscriberConfig, handler Handler, onEr
 	}
 
 	s := &Subscriber{ //nolint:exhaustruct_v5 // worker is set below, state starts at zero
-		conn:   conn,
-		cfg:    cfg,
-		name:   o.name,
-		logger: o.logger,
-		tel:    tel,
-		proc: &processor{
-			handler:      handler,
-			errorHandler: onError,
-			redelivery:   o.redelivery(),
-			logger:       o.logger,
-			tel:          tel,
-			sub:          sub,
-		},
+		conn:        conn,
+		cfg:         cfg,
+		name:        o.name,
+		logger:      o.logger,
+		tel:         tel,
+		proc:        newProcessor(handler, onError, &o, tel, sub),
 		concurrency: max(cfg.Concurrency, 1),
 	}
 	s.runner = newRunner(s.loop, s.logger, wrap(ErrNotRunning))
@@ -321,9 +315,8 @@ func (s *Subscriber) handle(end, work context.Context, nc *natsgo.Conn, raw *nat
 
 	attrs := []slog.Attr{slog.String("subject", raw.Subject), slog.String("queue", s.cfg.Queue)}
 
-	out, err := s.proc.process(end, work, msg, attrs)
-	if out == outcomeStop {
-		return fmt.Errorf("%w: subject %q: %w", ErrStopped, s.cfg.Subject, err)
+	if res := s.proc.process(end, work, msg, attrs); res.Outcome == consume.Stopped {
+		return fmt.Errorf("%w: subject %q: %w", ErrStopped, s.cfg.Subject, res.Err)
 	}
 
 	return nil

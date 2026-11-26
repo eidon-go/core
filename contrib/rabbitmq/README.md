@@ -119,6 +119,7 @@ once, wrapping `ErrInvalidConfig`.
 | `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals | `Publisher`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Consumer` |
+| `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Consumer` |
 
 ## Lifecycle
 
@@ -192,6 +193,14 @@ A handler error goes to the `ErrorHandler` passed to `NewConsumer`, which return
 | `ErrorActionRequeue` | after the redelivery policy's delay for the message's delivery number (a quorum queue's `x-delivery-count`; otherwise 1, or 2 once redelivered), `basic.nack` with requeue: back to the queue, to any consumer. The worker holds the message during the delay, so a failing message cannot loop hot; a stop during the delay leaves it to be requeued when the channel closes. Bound it with a quorum queue's `x-delivery-limit` |
 | `ErrorActionReject` | `basic.nack` without requeue: to the queue's dead-letter exchange (`x-dead-letter-exchange`), or dropped when it has none |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is not acked and is requeued |
+
+**Transient errors.** An error of a dependency rather than of the message — a database that is
+down — is marked with `consume.Transient(err)` (package `github.com/eidon-go/core/consume`). The
+consumer then waits with the transient policy (`WithTransientPolicy`, default
+`consume.TransientPolicy()`: 1s doubling up to 30s, until the stop) and makes the same attempt
+again, without counting it or asking the `ErrorHandler`: an outage neither dead-letters every
+message nor stops the consumer. The worker holds the message meanwhile. Once the policy's
+`MaxAttempts` transient failures in a row are reached, the error counts as a failed attempt.
 
 There is no default strategy: choose it for production deliberately. For a message that fails
 repeatedly, prefer the broker's own bounds over requeueing without end: a quorum queue with

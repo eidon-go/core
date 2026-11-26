@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/lifecycle"
 )
 
@@ -254,20 +255,13 @@ func NewConsumer(
 		stream:   o.stream,
 		name:     o.name,
 		logger:   o.logger,
-		proc: &processor{
-			handler:      handler,
-			errorHandler: onError,
-			redelivery:   o.redelivery(),
-			logger:       o.logger,
-			tel:          newTelemetry(&o),
-			sub: &subscription{
-				name: cfg.Stream,
-				attrs: []attribute.KeyValue{
-					semconv.MessagingConsumerGroupName(cfg.Durable),
-					semconv.MessagingDestinationSubscriptionName(cfg.Durable),
-				},
+		proc: newProcessor(handler, onError, &o, newTelemetry(&o), &subscription{
+			name: cfg.Stream,
+			attrs: []attribute.KeyValue{
+				semconv.MessagingConsumerGroupName(cfg.Durable),
+				semconv.MessagingDestinationSubscriptionName(cfg.Durable),
 			},
-		},
+		}),
 		workers:       workers,
 		prefetch:      prefetch,
 		progressEvery: ackDeadline(jsConfig) / 2, //nolint:mnd // half of it
@@ -560,30 +554,29 @@ func (c *Consumer) handle(end, work context.Context, jsMsg jetstream.Msg) error 
 	defer cancel()
 
 	stopProgress := c.keepInProgress(msgCtx, jsMsg)
-	out, err := c.proc.process(end, msgCtx, msg, attrs)
+	res := c.proc.process(end, msgCtx, msg, attrs)
 
 	stopProgress()
 
-	if out == outcomeAbandon && work.Err() == nil {
+	if res.Outcome == consume.Abandoned && msgCtx.Err() != nil && work.Err() == nil {
 		c.logger.LogAttrs(work, slog.LevelWarn, "nats message processing exceeded MaxProcessingTime, nak",
 			append(attrs, slog.Duration("max_processing_time", c.maxProcessing))...)
 	}
 
-	switch out {
-	case outcomeAck:
+	switch res.Outcome {
+	case consume.Handled:
 		c.settle(work, jsMsg, "ack", jsMsg.Ack())
-	case outcomeRetry: // never returned by process
-	case outcomeRequeue:
+	case consume.Requeued:
 		delay := c.proc.redelivery.Delay(int(min(delivered, math.MaxInt32)))
 		c.settle(work, jsMsg, "nak", jsMsg.NakWithDelay(delay))
-	case outcomeReject:
+	case consume.Rejected:
 		c.settle(work, jsMsg, "term", jsMsg.Term())
-	case outcomeAbandon:
+	case consume.Abandoned, consume.Yielded:
 		c.settle(work, jsMsg, "nak", jsMsg.Nak())
-	case outcomeStop:
+	case consume.Stopped:
 		c.settle(work, jsMsg, "nak", jsMsg.Nak())
 
-		return fmt.Errorf("%w: stream %q, consumer %q: %w", ErrStopped, c.cfg.Stream, c.cfg.Durable, err)
+		return fmt.Errorf("%w: stream %q, consumer %q: %w", ErrStopped, c.cfg.Stream, c.cfg.Durable, res.Err)
 	}
 
 	return nil

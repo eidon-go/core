@@ -17,6 +17,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/retry"
 )
@@ -109,17 +110,16 @@ func (c ConsumerConfig) Validate() error {
 // NewConsumer: retry it in place (WithRedeliveryPolicy), requeue it, reject
 // it to the dead-letter exchange, or stop the consumer.
 type Consumer struct {
-	conn         *Connection
-	cfg          ConsumerConfig
-	handler      Handler
-	name         string
-	logger       *slog.Logger
-	redelivery   retry.Policy
-	errorHandler ErrorHandler
-	tel          *telemetry
-	concurrency  int
-	prefetch     int
-	tagPrefix    string
+	conn        *Connection
+	cfg         ConsumerConfig
+	name        string
+	logger      *slog.Logger
+	redelivery  retry.Policy
+	proc        consume.Processor[*Message]
+	tel         *telemetry
+	concurrency int
+	prefetch    int
+	tagPrefix   string
 
 	worker     *lifecycle.Worker
 	subscribed atomic.Bool
@@ -168,18 +168,28 @@ func NewConsumer(conn *Connection, cfg ConsumerConfig, handler Handler, onError 
 		tagPrefix = o.name
 	}
 
-	c := &Consumer{ //nolint:exhaustruct_v5 // worker is set below, state starts at zero
-		conn:         conn,
-		cfg:          cfg,
-		handler:      handler,
-		name:         o.name,
-		logger:       o.logger,
-		redelivery:   o.redelivery(),
-		errorHandler: onError,
-		tel:          newTelemetry(&o),
-		concurrency:  concurrency,
-		prefetch:     prefetch,
-		tagPrefix:    tagPrefix,
+	c := &Consumer{ //nolint:exhaustruct_v5 // proc and worker are set below, state starts at zero
+		conn:        conn,
+		cfg:         cfg,
+		name:        o.name,
+		logger:      o.logger,
+		redelivery:  o.redelivery(),
+		tel:         newTelemetry(&o),
+		concurrency: concurrency,
+		prefetch:    prefetch,
+		tagPrefix:   tagPrefix,
+	}
+	c.proc = consume.Processor[*Message]{
+		Handle:  handler.Handle,
+		Observe: c.observe,
+		OnError: func(ctx context.Context, msg *Message, err error) consume.Action {
+			return onError(ctx, msg, err).consume()
+		},
+		Redelivery: c.redelivery,
+		Transient:  o.transient(),
+		Exhausted:  ErrRetriesExhausted,
+		Logger:     o.logger,
+		Name:       "rabbitmq",
 	}
 	c.worker = lifecycle.NewWorker(lifecycle.WorkerFuncs{Run: c.loop, Logger: c.logger})
 
@@ -380,59 +390,41 @@ func (c *Consumer) work(end, work context.Context, deliveries <-chan amqp.Delive
 }
 
 // handle handles one delivery, with the attempts the ErrorHandler and the
-// redelivery policy allow, and acks, requeues or rejects it. A stop during a
-// redelivery delay leaves it unacked (requeued), and so does an attempt cut
-// off by Shutdown's deadline: the ErrorHandler is not asked about it, since
-// the message did not fail — it would otherwise be rejected (dead-lettered)
-// or stop the consumer. It returns an error only to stop the consumer.
+// redelivery policy allow (see consume.Processor), and acks, requeues or
+// rejects it. A stop during a wait leaves it unacked (requeued), and so does
+// an attempt cut off by Shutdown's deadline: the ErrorHandler is not asked
+// about it, since the message did not fail — it would otherwise be rejected
+// (dead-lettered) or stop the consumer. It returns an error only to stop the
+// consumer.
 func (c *Consumer) handle(stop, work context.Context, d *amqp.Delivery) error {
 	msg := messageFromDelivery(d)
 	c.tel.delivered(work, c.cfg.Queue, msg)
 
-	for attempt := 1; ; attempt++ {
-		err := c.handleOnce(work, msg)
-		if err == nil {
-			c.settle(work, d, actionAck)
-
-			return nil
-		}
-
-		if work.Err() != nil {
-			return nil //nolint:nilerr // cut off, not failed: requeued when the channel closes
-		}
-
-		action, exhausted, err := c.failed(work, d, msg, attempt, err)
-
-		switch {
-		case action == ErrorActionRequeue, action == ErrorActionReject:
-			c.release(stop, work, d, action, err)
-
-			return nil
-		case action == ErrorActionRetry && !exhausted:
-			if !c.waitRedelivery(stop, work, attempt, err) {
-				return nil
-			}
-		default:
-			return fmt.Errorf("%w: queue %q: %w", ErrStopped, c.cfg.Queue, err)
-		}
-	}
-}
-
-// failed asks the ErrorHandler about a failed attempt and logs it. It
-// returns the action, whether the redelivery policy allows no more attempts
-// and the error as the ErrorHandler saw it (ErrRetriesExhausted joined then).
-func (c *Consumer) failed(
-	work context.Context, d *amqp.Delivery, msg *Message, attempt int, err error,
-) (ErrorAction, bool, error) {
-	exhausted := c.redelivery.MaxAttempts >= 0 && attempt >= max(c.redelivery.MaxAttempts, 1)
-	if exhausted {
-		err = errors.Join(ErrRetriesExhausted, err)
+	// Logged with every failure; never the body or the headers, which may
+	// carry personal data or secrets.
+	attrs := []slog.Attr{
+		slog.String("queue", c.cfg.Queue), slog.String("exchange", d.Exchange),
+		slog.String("routing_key", d.RoutingKey), slog.String("message_id", d.MessageId),
+		slog.Uint64("delivery_tag", d.DeliveryTag), slog.Bool("redelivered", d.Redelivered),
 	}
 
-	action := c.decide(work, msg, err)
-	c.logFailure(work, d, attempt, action, err)
+	res := c.proc.Process(stop, work, msg, consume.Delivery{Attrs: attrs}) //nolint:exhaustruct_v5 // no deadline
 
-	return action, exhausted, err
+	switch res.Outcome {
+	case consume.Handled:
+		c.settle(work, d, actionAck)
+	case consume.Requeued:
+		if c.waitRequeue(stop, work, d, res.Err) {
+			c.settle(work, d, ErrorActionRequeue)
+		} // else stopped: requeued when the channel closes
+	case consume.Rejected:
+		c.settle(work, d, ErrorActionReject)
+	case consume.Stopped:
+		return fmt.Errorf("%w: queue %q: %w", ErrStopped, c.cfg.Queue, res.Err)
+	case consume.Abandoned, consume.Yielded: // unacked: requeued when the channel closes
+	}
+
+	return nil
 }
 
 // actionAck is the settlement of a handled message.
@@ -459,39 +451,6 @@ func (c *Consumer) settle(ctx context.Context, d *amqp.Delivery, action ErrorAct
 		c.logger.WarnContext(ctx, "rabbitmq "+what+" failed, the message will be redelivered",
 			slog.String("queue", c.cfg.Queue), slog.Uint64("delivery_tag", d.DeliveryTag), slog.Any("error", err))
 	}
-}
-
-// logFailure logs a failed attempt; never the body or the headers, which
-// may carry personal data or secrets.
-func (c *Consumer) logFailure(ctx context.Context, d *amqp.Delivery, attempt int, action ErrorAction, err error) {
-	c.logger.ErrorContext(ctx, "rabbitmq message handling failed",
-		slog.String("queue", c.cfg.Queue), slog.String("exchange", d.Exchange),
-		slog.String("routing_key", d.RoutingKey), slog.String("message_id", d.MessageId),
-		slog.Uint64("delivery_tag", d.DeliveryTag), slog.Bool("redelivered", d.Redelivered),
-		slog.Int("attempt", attempt), slog.String("action", action.String()), slog.Any("error", err))
-}
-
-// waitRedelivery waits for the redelivery delay after the failed attempt,
-// unless the stop begins first; it reports whether a new attempt may start.
-func (c *Consumer) waitRedelivery(stop, work context.Context, attempt int, err error) bool {
-	delay := c.redelivery.Delay(attempt)
-	if c.redelivery.OnRetry != nil {
-		c.redelivery.OnRetry(work, retry.Attempt{Number: attempt, Err: err, Delay: delay})
-	}
-
-	// The stop may have begun just as the delay ended: no new attempt then.
-	return sleep(stop, delay) && stop.Err() == nil
-}
-
-// release requeues or rejects a failed delivery; a requeue first waits (see
-// waitRequeue), and a stop during that wait leaves the delivery to be
-// requeued when the channel closes.
-func (c *Consumer) release(stop, work context.Context, d *amqp.Delivery, action ErrorAction, err error) {
-	if action == ErrorActionRequeue && !c.waitRequeue(stop, work, d, err) {
-		return
-	}
-
-	c.settle(work, d, action)
 }
 
 // waitRequeue waits, before a requeue, for the redelivery delay of the
@@ -533,38 +492,31 @@ func deliveryNumber(d *amqp.Delivery) int {
 // earlier deliveries of a message.
 const headerDeliveryCount = "x-delivery-count"
 
-// handleOnce calls the handler in the message's process span; a panic is an
-// error.
-func (c *Consumer) handleOnce(work context.Context, msg *Message) (err error) {
+// observe runs one attempt in the message's process span.
+func (c *Consumer) observe(work context.Context, msg *Message, call func(context.Context) error) error {
 	ctx, span := c.tel.startProcess(work, c.cfg.Queue, msg)
 	start := time.Now()
 
-	defer func() {
-		if p := recover(); p != nil {
-			err = fmt.Errorf("rabbitmq: handler panicked: %v", p) //nolint:err113 // carries the panic value
-		}
+	err := call(trace.ContextWithSpan(ctx, span))
+	c.tel.endProcess(ctx, span, c.cfg.Queue, msg, start, err)
 
-		c.tel.endProcess(ctx, span, c.cfg.Queue, msg, start, err)
-	}()
-
-	return c.handler.Handle(trace.ContextWithSpan(ctx, span), msg) //nolint:wrapcheck // goes to the ErrorHandler as is
+	return err
 }
 
-// decide asks the ErrorHandler; a panic in it stops the consumer.
-func (c *Consumer) decide(ctx context.Context, msg *Message, err error) ErrorAction {
-	action := ErrorActionStop
-
-	func() {
-		defer func() {
-			if p := recover(); p != nil {
-				c.logger.ErrorContext(ctx, "rabbitmq error handler panicked", slog.Any("panic", p))
-			}
-		}()
-
-		action = c.errorHandler(ctx, msg, err)
-	}()
-
-	return action
+// consume maps the action to the processor's; an unknown one stops.
+func (a ErrorAction) consume() consume.Action {
+	switch a { //nolint:exhaustive // actionAck is internal
+	case ErrorActionRetry:
+		return consume.Retry
+	case ErrorActionRequeue:
+		return consume.Requeue
+	case ErrorActionReject:
+		return consume.Reject
+	case ErrorActionStop:
+		return consume.Stop
+	default:
+		return consume.Stop
+	}
 }
 
 // randomSuffix makes consumer tags unique.

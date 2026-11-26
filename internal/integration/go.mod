@@ -3,7 +3,7 @@ module github.com/eidon-go/core/internal/integration
 go 1.26.0
 
 require (
-	github.com/eidon-go/core v1.0.0-rc.6
+	github.com/eidon-go/core v1.0.0-rc.9
 	github.com/eidon-go/core/contrib/config/etcd v0.0.0
 	github.com/eidon-go/core/contrib/kafka v0.0.0
 	github.com/eidon-go/core/contrib/rabbitmq v0.0.0

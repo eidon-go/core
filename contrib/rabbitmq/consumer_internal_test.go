@@ -15,6 +15,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/eidon-go/core/consume"
 	"github.com/eidon-go/core/lifecycle"
 	"github.com/eidon-go/core/lifecycle/lifecycletest"
 	"github.com/eidon-go/core/retry"
@@ -281,6 +282,46 @@ func TestConsumer_ErrorActions(t *testing.T) {
 }
 
 func requeueAlways(context.Context, *Message, error) ErrorAction { return ErrorActionRequeue }
+
+// A transient error of a dependency is waited out in place: the
+// ErrorHandler is not asked and the message is acked once handled.
+func TestConsumer_TransientErrorIsWaitedOut(t *testing.T) {
+	t.Parallel()
+
+	var asked atomic.Int32
+
+	broker := newFakeBroker()
+	h := &recordingHandler{failFor: func(call int32) error {
+		if call <= 3 {
+			return consume.Transient(errHandler)
+		}
+
+		return nil
+	}}
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h,
+		func(context.Context, *Message, error) ErrorAction {
+			asked.Add(1)
+
+			return ErrorActionReject
+		},
+		WithTransientPolicy(retry.Policy{MaxAttempts: retry.Forever, InitialDelay: time.Millisecond}))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := run(ctx, c)
+
+	broker.deliver(t, body("a"))
+	require.Eventually(t, func() bool {
+		acked, _, _ := broker.snapshot()
+
+		return len(acked) == 1
+	}, 5*time.Second, time.Millisecond)
+
+	cancel()
+	require.NoError(t, receive(t, done))
+
+	assert.EqualValues(t, 4, h.calls.Load())
+	assert.Zero(t, asked.Load())
+}
 
 // A requeue waits the redelivery delay first, so a failing message does not
 // come straight back from the broker in a hot loop.

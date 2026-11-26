@@ -138,6 +138,7 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals | `Publisher`, `Subscriber`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Subscriber`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Subscriber`, `Consumer` (also the delay of a `Consumer`'s `Requeue`) |
+| `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Subscriber`, `Consumer`: waits of a `consume.Transient` error |
 | `WithStream(jetstream.StreamConfig)` | none: the stream must exist | `Consumer`: create or update the stream before the consumer |
 | `WithConsumerConfig(func(*jetstream.ConsumerConfig))` | none | `Consumer`: settings `ConsumerConfig` lacks (`DeliverPolicy`, `BackOff`, …) |
 
@@ -208,6 +209,15 @@ one of:
 | `ErrorActionRequeue` | nak with the redelivery policy's delay for its delivery count: the server delivers it again later, to any instance, until `MaxDeliver` | dropped (logged) |
 | `ErrorActionReject` | terminated (`AckTerm`): never delivered again; the server publishes a `MSG_TERMINATED` advisory (`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.<stream>.<consumer>`) a dead-letter flow can capture | dropped (logged) |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is naked, delivered again at once | `Run` returns an error wrapping `ErrStopped` |
+
+**Transient errors.** An error of a dependency rather than of the message — a database that is
+down — is marked with `consume.Transient(err)` (package `github.com/eidon-go/core/consume`). The
+component then waits with the transient policy (`WithTransientPolicy`, default
+`consume.TransientPolicy()`: 1s doubling up to 30s, until the stop) and makes the same attempt
+again, without counting it or asking the `ErrorHandler`: an outage neither terminates every message
+nor stops the consumer. A `Consumer` keeps the message in progress meanwhile, up to
+`MaxProcessingTime`. Once the policy's `MaxAttempts` transient failures in a row are reached, the
+error counts as a failed attempt.
 
 There is no default strategy: choose it for production deliberately. `Discard` (recommended)
 retries, then rejects — at once for `retry.Permanent` errors; capture the `MSG_TERMINATED`
