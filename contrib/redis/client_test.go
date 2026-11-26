@@ -1,10 +1,13 @@
 package redis_test
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,17 +86,20 @@ func deadAddr(t *testing.T) string {
 	return addr
 }
 
-// stalledAddr is a server that accepts connections and never replies. It
-// returns the address and a channel that receives a value for every
-// connection.
-func stalledAddr(t *testing.T) (string, <-chan struct{}) {
+// stalledPing is a proxy to a miniredis server that forwards every command
+// (the connection handshake included) up to the first PING of a connection,
+// which it never answers. It returns the address and a channel that
+// receives a value for every stalled PING.
+func stalledPing(t *testing.T) (string, <-chan struct{}) {
 	t.Helper()
+
+	backend := miniredis.RunT(t).Addr()
 
 	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 
-	conns := make(chan struct{}, 16)
+	pinged := make(chan struct{}, 16)
 
 	go func() {
 		for {
@@ -102,19 +108,90 @@ func stalledAddr(t *testing.T) (string, <-chan struct{}) {
 				return
 			}
 
-			select {
-			case conns <- struct{}{}:
-			default:
-			}
-
-			go func() { // until the client closes the connection
-				_, _ = io.Copy(io.Discard, conn)
-				_ = conn.Close()
-			}()
+			go proxyUntilPing(conn, backend, pinged)
 		}
 	}()
 
-	return l.Addr().String(), conns
+	return l.Addr().String(), pinged
+}
+
+func proxyUntilPing(conn net.Conn, backend string, pinged chan<- struct{}) {
+	defer func() { _ = conn.Close() }()
+
+	server, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", backend)
+	if err != nil {
+		return
+	}
+	defer func() { _ = server.Close() }()
+
+	go func() { _, _ = io.Copy(conn, server) }()
+
+	commands := bufio.NewReader(conn)
+
+	for {
+		raw, name, err := readCommand(commands)
+		if err != nil {
+			return
+		}
+
+		if name == "PING" {
+			select {
+			case pinged <- struct{}{}:
+			default:
+			}
+
+			_, _ = io.Copy(io.Discard, commands) // until the client closes the connection
+
+			return
+		}
+
+		if _, err := server.Write(raw); err != nil {
+			return
+		}
+	}
+}
+
+// readCommand reads one RESP command (an array of bulk strings) and returns
+// its bytes and its upper-cased name.
+func readCommand(r *bufio.Reader) ([]byte, string, error) {
+	header, err := r.ReadString('\n')
+	if err != nil {
+		return nil, "", err
+	}
+
+	count, err := strconv.Atoi(strings.TrimSpace(header[1:]))
+	if err != nil {
+		return nil, "", err
+	}
+
+	raw := []byte(header)
+
+	var name string
+
+	for i := range count {
+		size, err := r.ReadString('\n')
+		if err != nil {
+			return nil, "", err
+		}
+
+		n, err := strconv.Atoi(strings.TrimSpace(size[1:]))
+		if err != nil {
+			return nil, "", err
+		}
+
+		arg := make([]byte, n+2) // with \r\n
+		if _, err := io.ReadFull(r, arg); err != nil {
+			return nil, "", err
+		}
+
+		if i == 0 {
+			name = strings.ToUpper(string(arg[:n]))
+		}
+
+		raw = append(append(raw, size...), arg...)
+	}
+
+	return raw, name, nil
 }
 
 func TestNew_Errors(t *testing.T) {
@@ -266,7 +343,7 @@ func TestClient_Healthcheck(t *testing.T) {
 func TestClient_HealthcheckDeadline(t *testing.T) {
 	t.Parallel()
 
-	addr, _ := stalledAddr(t)
+	addr, pinged := stalledPing(t)
 	client := newClient(t, addr) // ReadTimeout: go-redis's 5s
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
@@ -275,26 +352,64 @@ func TestClient_HealthcheckDeadline(t *testing.T) {
 	begin := time.Now()
 	err := client.Healthcheck(ctx)
 
-	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, time.Since(begin), 2*time.Second, "the ctx deadline bounds the PING")
+	require.Len(t, pinged, 1, "the handshake went through, the PING stalled")
 }
 
-func TestClient_ShutdownEndsStalledStart(t *testing.T) {
+func TestClient_StalledStartWithoutReadTimeout(t *testing.T) {
 	t.Parallel()
 
-	addr, accepted := stalledAddr(t)
+	newStalled := func(t *testing.T) (*redis.Client, <-chan struct{}) {
+		t.Helper()
 
-	client, err := redis.New(redis.Config{Addrs: []string{addr}, ReadTimeout: -1, MaxRetries: -1}, quiet())
-	require.NoError(t, err)
+		addr, pinged := stalledPing(t)
 
-	started := make(chan error, 1)
+		client, err := redis.New(redis.Config{Addrs: []string{addr}, ReadTimeout: -1, MaxRetries: -1}, quiet())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Shutdown(context.WithoutCancel(t.Context())) })
 
-	go func() { started <- client.Start(t.Context()) }() // no deadline, no read timeout
+		redis.SetPingTimeout(client, 100*time.Millisecond)
 
-	<-accepted // the PING is sent and waits for a reply
+		return client, pinged
+	}
 
-	require.NoError(t, client.Shutdown(t.Context()))
-	require.ErrorIs(t, <-started, redis.ErrClosed)
+	t.Run("ctx cancelled", func(t *testing.T) { // app.App on a signal during Start
+		t.Parallel()
+
+		client, pinged := newStalled(t)
+		ctx, cancel := context.WithCancel(t.Context()) // no deadline
+		started := make(chan error, 1)
+
+		go func() { started <- client.Start(ctx) }()
+
+		<-pinged
+		cancel()
+
+		require.ErrorIs(t, <-started, context.Canceled)
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		t.Parallel()
+
+		client, pinged := newStalled(t)
+		started := make(chan error, 1)
+
+		go func() { started <- client.Start(t.Context()) }()
+
+		<-pinged
+
+		require.NoError(t, client.Shutdown(t.Context()))
+		require.ErrorIs(t, <-started, redis.ErrClosed)
+	})
+
+	t.Run("healthcheck", func(t *testing.T) {
+		t.Parallel()
+
+		client, _ := newStalled(t)
+
+		require.ErrorIs(t, client.Healthcheck(t.Context()), context.DeadlineExceeded, "bounded without a ctx deadline")
+	})
 }
 
 func TestClient_ClosedThroughRedis(t *testing.T) {

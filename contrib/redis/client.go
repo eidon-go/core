@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	goredis "github.com/redis/go-redis/v9"
@@ -33,16 +34,22 @@ var (
 	ErrClosed = lifecycle.ErrClosed
 )
 
+// unboundedPingTimeout bounds the PING of Start and Healthcheck when the
+// read timeout is disabled, so that a cancelled ctx without a deadline still
+// ends them: go-redis interrupts a blocked read only at a deadline.
+const unboundedPingTimeout = 5 * time.Second
+
 // Client is a go-redis client with the lifecycle of a component. It is a
 // Starter, Resource, Healthchecker and Namer.
 //
 // Register the components that use it (consumers, servers) after the
 // Client, so that they shut down first.
 type Client struct {
-	name     string
-	rdb      goredis.UniversalClient
-	connect  retry.Policy
-	releaser *lifecycle.Releaser
+	name        string
+	rdb         goredis.UniversalClient
+	connect     retry.Policy
+	pingTimeout time.Duration // 0: the read timeout bounds the PING
+	releaser    *lifecycle.Releaser
 
 	closing context.Context //nolint:containedctx // a close signal for a Start in progress
 }
@@ -58,7 +65,8 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 	}
 
 	o := newOptions(opts)
-	rdb := goredis.NewUniversalClient(o.universalOptions(cfg))
+	universal := o.universalOptions(cfg)
+	rdb := goredis.NewUniversalClient(universal)
 
 	metricsDone := make(chan struct{})
 
@@ -72,10 +80,16 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 
 	closing, cancel := context.WithCancel(context.Background())
 
+	var pingTimeout time.Duration
+	if universal.ReadTimeout < 0 {
+		pingTimeout = unboundedPingTimeout
+	}
+
 	return &Client{
-		name:    o.name,
-		rdb:     rdb,
-		connect: o.connectPolicy(),
+		name:        o.name,
+		rdb:         rdb,
+		connect:     o.connectPolicy(),
+		pingTimeout: pingTimeout,
 		releaser: lifecycle.CloseOnce(func() error {
 			cancel()
 			close(metricsDone)
@@ -168,7 +182,17 @@ func (c *Client) Healthcheck(ctx context.Context) error {
 	return nil
 }
 
+// ping is the PING of Start and Healthcheck. With the read timeout disabled
+// it is bounded by pingTimeout, so a cancelled ctx without a deadline ends
+// it too; other commands keep no timeout.
 func (c *Client) ping(ctx context.Context) error {
+	if c.pingTimeout > 0 {
+		var cancel context.CancelFunc
+
+		ctx, cancel = context.WithTimeout(ctx, c.pingTimeout)
+		defer cancel()
+	}
+
 	return c.rdb.Ping(ctx).Err() //nolint:wrapcheck // the callers wrap
 }
 

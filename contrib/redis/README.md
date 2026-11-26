@@ -65,7 +65,9 @@ address. Zero keeps go-redis's default; a negative value disables the feature wh
 `Config.Validate` reports every problem at once (each wraps `ErrInvalidConfig`).
 
 A deadline of a command's ctx bounds its reads and writes as well (go-redis's
-`ContextTimeoutEnabled` is on; `WithUniversalOptions` can turn it off).
+`ContextTimeoutEnabled` is on; `WithUniversalOptions` can turn it off). go-redis interrupts a
+blocked read only at a deadline, so without a read timeout the PING of `Start` and `Healthcheck`
+is bounded by 5s: a cancelled `Start` (a signal during startup) returns within that.
 
 ## Options
 

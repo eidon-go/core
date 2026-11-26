@@ -60,6 +60,8 @@ type Config struct {
 
 	// ReadTimeout bounds reading a reply. Default 0: go-redis's 5s;
 	// negative: no timeout. A deadline of the command's ctx applies too.
+	// Without a read timeout the PING of Start and Healthcheck is still
+	// bounded by 5s, so that they end when their ctx is cancelled.
 	ReadTimeout time.Duration `json:"readTimeout" yaml:"readTimeout"`
 
 	// WriteTimeout bounds writing a command. Default 0: ReadTimeout;
