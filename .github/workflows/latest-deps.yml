@@ -60,7 +60,7 @@ jobs:
       - name: Hold back dependencies for test tools
         if: matrix.module == 'contrib/sql'
         run: |
-          go get github.com/jackc/pgx/v5@v5.10.0
+          go mod edit -require=github.com/jackc/pgx/v5@v5.10.0
           go mod tidy
 
       - name: Test
