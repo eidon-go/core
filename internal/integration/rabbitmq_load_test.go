@@ -258,16 +258,15 @@ func loadMessage(exchange string, id int, body []byte) *rabbitmq.Message {
 func publishLoad(t *testing.T, pub *rabbitmq.Publisher, exchange string, total, workers, batch int) loadStats {
 	t.Helper()
 
-	return publishLoadProgress(t, pub, exchange, total, workers, batch, 0, new(atomic.Int64))
+	return publishLoadWithFaults(t, pub, exchange, total, workers, batch, 0, newFaultPlan())
 }
 
-// publishLoadProgress is publishLoad that pauses every worker for pace after
-// each batch, to spread the publishing over time, and adds every confirmed
-// batch to confirmed, so that a test can inject faults at points of the
-// progress.
-func publishLoadProgress(
+// publishLoadWithFaults is publishLoad that pauses every worker for pace
+// after each batch, to spread the publishing over time, and holds the
+// publishing at each checkpoint of plan until its fault is injected.
+func publishLoadWithFaults(
 	t *testing.T, pub *rabbitmq.Publisher, exchange string, total, workers, batch int, pace time.Duration,
-	confirmed *atomic.Int64,
+	plan *faultPlan,
 ) loadStats {
 	t.Helper()
 
@@ -297,7 +296,12 @@ func publishLoadProgress(
 					return
 				}
 
-				confirmed.Add(int64(len(msgs)))
+				plan.confirmed.Add(int64(len(msgs)))
+
+				if !plan.hold(ctx) {
+					return
+				}
+
 				time.Sleep(pace)
 			}
 		})
@@ -354,22 +358,64 @@ type loadStats struct {
 	slowest  time.Duration
 }
 
-// awaitProgress waits until confirmed reaches n, or done is closed (the
-// publishing ended); it reports whether n was reached.
-func awaitProgress(confirmed *atomic.Int64, n int64, done <-chan struct{}) bool {
+// faultPlan ties faults to the publishing progress: once the confirmed
+// messages reach a checkpoint, every publishing worker waits there until
+// the fault of that checkpoint is injected. So each fault happens with work
+// still to publish, whatever the throughput or the time a fault takes.
+type faultPlan struct {
+	confirmed atomic.Int64
+	at        []int64         // the checkpoints, in confirmed messages, ascending
+	injected  []chan struct{} // closed once the fault of at[i] is injected
+}
+
+func newFaultPlan(at ...int64) *faultPlan {
+	p := &faultPlan{at: at, injected: make([]chan struct{}, len(at))}
+	for i := range p.injected {
+		p.injected[i] = make(chan struct{})
+	}
+
+	return p
+}
+
+// hold makes a worker wait at every checkpoint reached whose fault is not
+// injected yet; false once ctx is done.
+func (p *faultPlan) hold(ctx context.Context) bool {
+	confirmed := p.confirmed.Load()
+
+	for i, at := range p.at {
+		if confirmed < at {
+			return true
+		}
+
+		select {
+		case <-p.injected[i]:
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	return true
+}
+
+// reached waits until checkpoint i is reached (the workers then wait for
+// its fault); false once ctx is done.
+func (p *faultPlan) reached(ctx context.Context, i int) bool {
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
 
-	for confirmed.Load() < n {
+	for p.confirmed.Load() < p.at[i] {
 		select {
-		case <-done:
-			return confirmed.Load() >= n
+		case <-ctx.Done():
+			return false
 		case <-ticker.C:
 		}
 	}
 
 	return true
 }
+
+// done marks the fault of checkpoint i injected: the workers go on.
+func (p *faultPlan) done(i int) { close(p.injected[i]) }
 
 func loadOptions(name string) []rabbitmq.Option {
 	return append(rabbitOptions(name), rabbitmq.WithRedeliveryPolicy(retry.Policy{
@@ -710,18 +756,23 @@ func TestRabbitMQLoad_ConnectionChaos(t *testing.T) {
 
 	const chaosRounds = 8
 
-	var confirmed atomic.Int64
+	// Drop every connection at each tenth of the publishing progress, from
+	// 10% to 80%; the publishing waits at each point until the drop is done,
+	// so every drop happens with a fifth or more of the messages to go.
+	checkpoints := make([]int64, chaosRounds)
+	for i := range checkpoints {
+		checkpoints[i] = int64(i+1) * int64(total) / 10
+	}
 
-	published, chaosDone := make(chan struct{}), make(chan struct{})
+	plan := newFaultPlan(checkpoints...)
+	chaosDone := make(chan struct{})
 	rounds := 0
 
-	// Drop every connection at each tenth of the publishing progress, from
-	// 10% to 80%: the drops hit the publishing whatever its throughput.
 	go func() {
 		defer close(chaosDone)
 
-		for i := range int64(chaosRounds) {
-			if !awaitProgress(&confirmed, (i+1)*int64(total)/10, published) {
+		for i := range checkpoints {
+			if !plan.reached(t.Context(), i) {
 				return
 			}
 
@@ -729,13 +780,14 @@ func TestRabbitMQLoad_ConnectionChaos(t *testing.T) {
 			if err == nil && code == 0 {
 				rounds++
 			}
+
+			plan.done(i)
 		}
 	}()
 
 	start := time.Now()
-	stats := publishLoadProgress(t, pub, exchange, total, 8, 10, 25*time.Millisecond, &confirmed)
+	stats := publishLoadWithFaults(t, pub, exchange, total, 8, 10, 0, plan)
 
-	close(published)
 	receiveWithin(t, chaosDone, loadWait)
 	tracker.waitAll(t)
 
@@ -771,21 +823,25 @@ func TestRabbitMQLoad_BrokerRestart(t *testing.T) {
 
 	pub := newRabbitPublisher(t, newRabbitConnection(t, cfg, "publish"))
 
-	var confirmed atomic.Int64
-
+	// At a quarter of the publishing, the workers wait until the broker is
+	// down, then publish into the downtime: the rest of the messages wait for
+	// the restarted broker.
+	plan := newFaultPlan(int64(total) / 4)
 	restartErr := make(chan error, 1)
-	published := make(chan struct{})
 
 	go func() {
-		if !awaitProgress(&confirmed, int64(total)/4, published) {
-			restartErr <- errors.New("the publishing ended before the restart")
+		if !plan.reached(t.Context(), 0) {
+			restartErr <- errors.New("the publishing did not reach the restart")
 
 			return
 		}
 
 		err := rabbitctlErr(t.Context(), ctr, "stop_app")
+
+		plan.done(0)
+
 		if err == nil {
-			time.Sleep(2 * time.Second)
+			time.Sleep(2 * time.Second) // the downtime, not a synchronization
 
 			err = rabbitctlErr(t.Context(), ctr, "start_app")
 		}
@@ -794,9 +850,8 @@ func TestRabbitMQLoad_BrokerRestart(t *testing.T) {
 	}()
 
 	start := time.Now()
-	stats := publishLoadProgress(t, pub, exchange, total, 8, 10, 25*time.Millisecond, &confirmed)
+	stats := publishLoadWithFaults(t, pub, exchange, total, 8, 10, 25*time.Millisecond, plan)
 
-	close(published)
 	tracker.waitAll(t)
 	require.NoError(t, receiveWithin(t, restartErr, loadWait))
 
