@@ -42,19 +42,25 @@ func requireLoad(t *testing.T) {
 	t.Helper()
 	requireDocker(t)
 
-	if os.Getenv("RABBITMQ_LOAD") == "" {
+	if os.Getenv("RABBITMQ_LOAD") != "1" {
 		t.Skip("load test: set RABBITMQ_LOAD=1")
 	}
 }
 
+// minLoadMessages is the smallest RABBITMQ_LOAD_MESSAGES: the tests take a
+// tenth of it at least, and need enough messages to overlap with the faults
+// they inject.
+const minLoadMessages = 10000
+
 // loadMessages is the base message count of the load tests,
-// RABBITMQ_LOAD_MESSAGES or 20000.
+// RABBITMQ_LOAD_MESSAGES (at least minLoadMessages) or 20000.
 func loadMessages(t *testing.T) int {
 	t.Helper()
 
 	if s := os.Getenv("RABBITMQ_LOAD_MESSAGES"); s != "" {
 		n, err := strconv.Atoi(s)
 		require.NoError(t, err)
+		require.GreaterOrEqual(t, n, minLoadMessages, "RABBITMQ_LOAD_MESSAGES is too small")
 
 		return n
 	}
@@ -147,13 +153,16 @@ func rabbitctlErr(ctx context.Context, ctr *tcrabbitmq.RabbitMQContainer, cmd st
 	return err
 }
 
-// loadTracker counts how often every message ID was handled.
+// loadTracker counts how often every message ID of 0..total-1 was handled.
+// An ID outside the workload is a stray: it is acked, counted, and fails
+// the waits — it must not stand in for a missing ID.
 type loadTracker struct {
 	total int
 
-	mu   sync.Mutex
-	seen map[int]int
-	all  chan struct{}
+	mu     sync.Mutex
+	seen   map[int]int
+	strays []string
+	all    chan struct{}
 }
 
 func newLoadTracker(total int) *loadTracker {
@@ -161,13 +170,15 @@ func newLoadTracker(total int) *loadTracker {
 }
 
 func (lt *loadTracker) mark(msg *rabbitmq.Message) error {
-	id, err := strconv.Atoi(msg.MessageID)
-	if err != nil {
-		return retry.Permanent(fmt.Errorf("bad message id %q: %w", msg.MessageID, err))
-	}
-
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
+
+	id, err := strconv.Atoi(msg.MessageID)
+	if err != nil || id < 0 || id >= lt.total {
+		lt.strays = append(lt.strays, msg.MessageID)
+
+		return nil
+	}
 
 	lt.seen[id]++
 	if lt.seen[id] == 1 && len(lt.seen) == lt.total {
@@ -175,6 +186,28 @@ func (lt *loadTracker) mark(msg *rabbitmq.Message) error {
 	}
 
 	return nil
+}
+
+// requireNoStrays fails the test if an ID outside the workload was handled.
+func (lt *loadTracker) requireNoStrays(t *testing.T) {
+	t.Helper()
+
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+
+	require.Empty(t, lt.strays, "message IDs outside the workload")
+}
+
+// waitUnique waits until at least n IDs were handled.
+func (lt *loadTracker) waitUnique(t *testing.T, n int, timeout time.Duration) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		unique, _ := lt.counts()
+
+		return unique >= n
+	}, timeout, time.Millisecond, "fewer than %d messages handled", n)
+	lt.requireNoStrays(t)
 }
 
 func (lt *loadTracker) counts() (int, int) {
@@ -196,15 +229,18 @@ func (lt *loadTracker) has(id int) bool {
 	return lt.seen[id] > 0
 }
 
-func (lt *loadTracker) waitAll(t *testing.T, timeout time.Duration) {
+// waitAll waits, at most loadWait, until every ID was handled.
+func (lt *loadTracker) waitAll(t *testing.T) {
 	t.Helper()
 
 	select {
 	case <-lt.all:
-	case <-time.After(timeout):
+	case <-time.After(loadWait):
 		unique, dups := lt.counts()
 		require.Failf(t, "messages missing", "handled %d of %d unique (%d duplicates)", unique, lt.total, dups)
 	}
+
+	lt.requireNoStrays(t)
 }
 
 // loadMessage is message id: its ID in MessageID and in the body.
@@ -218,10 +254,20 @@ func loadMessage(exchange string, id int, body []byte) *rabbitmq.Message {
 
 // publishLoad publishes IDs 0..total-1 from workers goroutines, in batches,
 // and republishes a batch until it is confirmed: at least once, whatever
-// happens to the connection. Every worker pauses for pace after each batch,
-// to spread the publishing over time.
-func publishLoad(
+// happens to the connection.
+func publishLoad(t *testing.T, pub *rabbitmq.Publisher, exchange string, total, workers, batch int) loadStats {
+	t.Helper()
+
+	return publishLoadProgress(t, pub, exchange, total, workers, batch, 0, new(atomic.Int64))
+}
+
+// publishLoadProgress is publishLoad that pauses every worker for pace after
+// each batch, to spread the publishing over time, and adds every confirmed
+// batch to confirmed, so that a test can inject faults at points of the
+// progress.
+func publishLoadProgress(
 	t *testing.T, pub *rabbitmq.Publisher, exchange string, total, workers, batch int, pace time.Duration,
+	confirmed *atomic.Int64,
 ) loadStats {
 	t.Helper()
 
@@ -251,6 +297,7 @@ func publishLoad(
 					return
 				}
 
+				confirmed.Add(int64(len(msgs)))
 				time.Sleep(pace)
 			}
 		})
@@ -305,6 +352,23 @@ func (lp *loadPublisher) observe(took time.Duration) {
 type loadStats struct {
 	failures int64
 	slowest  time.Duration
+}
+
+// awaitProgress waits until confirmed reaches n, or done is closed (the
+// publishing ended); it reports whether n was reached.
+func awaitProgress(confirmed *atomic.Int64, n int64, done <-chan struct{}) bool {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for confirmed.Load() < n {
+		select {
+		case <-done:
+			return confirmed.Load() >= n
+		case <-ticker.C:
+		}
+	}
+
+	return true
 }
 
 func loadOptions(name string) []rabbitmq.Option {
@@ -369,13 +433,13 @@ func testConnectionsUnderAlarm(t *testing.T, shared bool) {
 
 	// Fill the queue before the alarm.
 	consumeConn := newRabbitConnection(t, cfg, rabbitName(t, "consume"))
-	tracker := newLoadTracker(total)
+	tracker := newLoadTracker(total + 1) // and the message published during the alarm
 	c := newLoadConsumer(t, consumeConn, exchange, queue, 8,
 		rabbitmq.HandlerFunc(func(_ context.Context, msg *rabbitmq.Message) error { return tracker.mark(msg) }))
 
 	filler := newRabbitPublisher(t, newRabbitConnection(t, cfg, rabbitName(t, "filler")))
 	declareLoadQueue(t, rawChannel(t, cfg), exchange, queue)
-	publishLoad(t, filler, exchange, total, 4, 100, 0)
+	publishLoad(t, filler, exchange, total, 4, 100)
 
 	clearAlarm := raiseDiskAlarm(t, ctr)
 
@@ -407,14 +471,17 @@ func testConnectionsUnderAlarm(t *testing.T, shared bool) {
 	start := time.Now()
 
 	if shared {
-		time.Sleep(window)
+		// Not a single message for the whole window: the consumer cannot
+		// even subscribe on the blocked connection.
+		require.Never(t, func() bool {
+			unique, _ := tracker.counts()
 
-		unique, _ := tracker.counts()
-		t.Logf("shared connection, blocked by the alarm: handled %d of %d in %s; consumer health: %v",
-			unique, total, window, c.Healthcheck(t.Context()))
-		assert.Less(t, unique, total, "the consumer must stall on a blocked connection")
+			return unique > 0
+		}, window, 50*time.Millisecond, "the consumer must stall on a blocked connection")
+		t.Logf("shared connection, blocked by the alarm: handled 0 of %d in %s; consumer health: %v",
+			total, window, c.Healthcheck(t.Context()))
 	} else {
-		tracker.waitAll(t, window*6)
+		tracker.waitUnique(t, total, window*6)
 		t.Logf("separate connections, publisher blocked: consumer handled %s",
 			rate(total, time.Since(start)))
 	}
@@ -426,11 +493,28 @@ func testConnectionsUnderAlarm(t *testing.T, shared bool) {
 	}
 
 	clearAlarm()
-	require.NoError(t, <-published, "the publish completes once the alarm clears")
-	tracker.waitAll(t, loadWait)
+	require.NoError(t, receiveWithin(t, published, loadWait), "the publish completes once the alarm clears")
+	tracker.waitAll(t)
 
 	cancel()
-	require.NoError(t, <-done)
+	require.NoError(t, receiveWithin(t, done, loadWait))
+}
+
+// receiveWithin returns the next value of ch, failing the test after
+// timeout.
+func receiveWithin[T any](t *testing.T, ch <-chan T, timeout time.Duration) T {
+	t.Helper()
+
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(timeout):
+		require.FailNow(t, "no result in time", "waited %s", timeout)
+
+		var zero T
+
+		return zero
+	}
 }
 
 // TestRabbitMQLoad_ShutdownUnderAlarm shuts a publisher and its connection
@@ -472,16 +556,23 @@ func TestRabbitMQLoad_ShutdownUnderAlarm(t *testing.T) {
 	}{pub, conn} {
 		ctx, cancel := context.WithTimeout(t.Context(), deadline)
 		start := time.Now()
-		err := r.Shutdown(ctx)
+		result := make(chan error, 1)
+
+		// A watchdog of its own: a Shutdown that never returns must fail the
+		// test, not hang it.
+		go func() { result <- r.Shutdown(ctx) }()
+
+		err := receiveWithin(t, result, deadline+time.Second)
 		took := time.Since(start)
 
 		cancel()
 
 		t.Logf("%s: Shutdown under the alarm returned %v after %s", r.Name(), err, took.Round(time.Millisecond))
-		assert.Less(t, took, deadline+time.Second, "%s: Shutdown not bounded by its deadline", r.Name())
+		require.ErrorIs(t, err, context.DeadlineExceeded,
+			"%s: the broker does not answer the close: Shutdown ends at its deadline", r.Name())
 
 		if r == any(pub) {
-			require.ErrorIs(t, <-published, rabbitmq.ErrNotConfirmed)
+			require.ErrorIs(t, receiveWithin(t, published, time.Second), rabbitmq.ErrNotConfirmed)
 		}
 	}
 }
@@ -515,11 +606,11 @@ func TestRabbitMQLoad_Throughput(t *testing.T) {
 	pub := newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "publish"))
 
 	start := time.Now()
-	stats := publishLoad(t, pub, exchange, total, 8, 50, 0)
+	stats := publishLoad(t, pub, exchange, total, 8, 50)
 	t.Logf("published %s, %d failed calls, slowest Publish %s",
 		rate(total, time.Since(start)), stats.failures, stats.slowest.Round(time.Millisecond))
 
-	tracker.waitAll(t, loadWait)
+	tracker.waitAll(t)
 	t.Logf("consumed %s", rate(total, time.Since(start)))
 
 	unique, dups := tracker.counts()
@@ -584,10 +675,10 @@ func TestRabbitMQLoad_FlakyHandlers(t *testing.T) {
 	stop := runRabbitConsumer(t, c)
 
 	pub := newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "publish"))
-	publishLoad(t, pub, exchange, total, 8, 50, 0)
+	publishLoad(t, pub, exchange, total, 8, 50)
 
-	tracker.waitAll(t, loadWait)
-	stop()
+	tracker.waitAll(t)
+	require.NoError(t, stop())
 
 	unique, dups := tracker.counts()
 	t.Logf("handled %d unique, %d duplicates; %d requeued, %d retried in place",
@@ -617,19 +708,21 @@ func TestRabbitMQLoad_ConnectionChaos(t *testing.T) {
 
 	pub := newRabbitPublisher(t, newRabbitConnection(t, cfg, "publish"))
 
+	const chaosRounds = 8
+
+	var confirmed atomic.Int64
+
 	published, chaosDone := make(chan struct{}), make(chan struct{})
 	rounds := 0
 
-	// Drop every connection every 500ms for as long as the publishing goes
-	// on (about 6s with the pace below).
+	// Drop every connection at each tenth of the publishing progress, from
+	// 10% to 80%: the drops hit the publishing whatever its throughput.
 	go func() {
 		defer close(chaosDone)
 
-		for {
-			select {
-			case <-published:
+		for i := range int64(chaosRounds) {
+			if !awaitProgress(&confirmed, (i+1)*int64(total)/10, published) {
 				return
-			case <-time.After(500 * time.Millisecond):
 			}
 
 			code, _, err := ctr.Exec(t.Context(), []string{"rabbitmqctl", "-q", "close_all_connections", "chaos"})
@@ -640,22 +733,25 @@ func TestRabbitMQLoad_ConnectionChaos(t *testing.T) {
 	}()
 
 	start := time.Now()
-	stats := publishLoad(t, pub, exchange, total, 8, 10, 25*time.Millisecond)
+	stats := publishLoadProgress(t, pub, exchange, total, 8, 10, 25*time.Millisecond, &confirmed)
 
 	close(published)
-	<-chaosDone
-	tracker.waitAll(t, loadWait)
+	receiveWithin(t, chaosDone, loadWait)
+	tracker.waitAll(t)
 
 	unique, dups := tracker.counts()
 	t.Logf("%d chaos rounds; delivered %s; %d duplicates; %d failed publish calls (republished); slowest Publish %s",
 		rounds, rate(unique, time.Since(start)), dups, stats.failures, stats.slowest.Round(time.Millisecond))
 	assert.Equal(t, total, unique)
-	assert.GreaterOrEqual(t, rounds, 5)
+	assert.Equal(t, chaosRounds, rounds, "every drop happened")
 }
 
-// TestRabbitMQLoad_BrokerRestart stops and starts the broker application in
-// the middle of the load. The durable queue keeps its persistent messages;
-// nothing confirmed is lost, nothing unconfirmed stays unpublished.
+// TestRabbitMQLoad_BrokerRestart stops and starts the broker application —
+// a graceful restart, not a crash — once a quarter of the messages are
+// published, while the consumer runs. It checks that every published
+// message still reaches the handler: the connections redial, the consumer
+// resubscribes and Publish waits for the broker. It does not test what a
+// crash would lose.
 func TestRabbitMQLoad_BrokerRestart(t *testing.T) {
 	t.Parallel()
 	requireLoad(t)
@@ -675,11 +771,17 @@ func TestRabbitMQLoad_BrokerRestart(t *testing.T) {
 
 	pub := newRabbitPublisher(t, newRabbitConnection(t, cfg, "publish"))
 
-	restartErr := make(chan error, 1)
+	var confirmed atomic.Int64
 
-	// The publishing takes about 6s with the pace below: restart within it.
+	restartErr := make(chan error, 1)
+	published := make(chan struct{})
+
 	go func() {
-		time.Sleep(1500 * time.Millisecond)
+		if !awaitProgress(&confirmed, int64(total)/4, published) {
+			restartErr <- errors.New("the publishing ended before the restart")
+
+			return
+		}
 
 		err := rabbitctlErr(t.Context(), ctr, "stop_app")
 		if err == nil {
@@ -692,9 +794,11 @@ func TestRabbitMQLoad_BrokerRestart(t *testing.T) {
 	}()
 
 	start := time.Now()
-	stats := publishLoad(t, pub, exchange, total, 8, 10, 25*time.Millisecond)
-	tracker.waitAll(t, loadWait)
-	require.NoError(t, <-restartErr)
+	stats := publishLoadProgress(t, pub, exchange, total, 8, 10, 25*time.Millisecond, &confirmed)
+
+	close(published)
+	tracker.waitAll(t)
+	require.NoError(t, receiveWithin(t, restartErr, loadWait))
 
 	unique, dups := tracker.counts()
 	t.Logf("broker restarted mid-load; delivered %s; %d duplicates; %d failed publish calls (republished); "+
@@ -758,7 +862,7 @@ func TestRabbitMQLoad_GracefulStopUnderLoad(t *testing.T) {
 	declareLoadQueue(t, ch, exchange, in)
 
 	feeder := newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "feeder"))
-	publishLoad(t, feeder, exchange, total, 8, 100, 0)
+	publishLoad(t, feeder, exchange, total, 8, 100)
 
 	a := app.New(app.WithSignals(), app.WithLogger(slog.New(slog.DiscardHandler)), app.WithShutdownTimeout(loadWait))
 	a.Add(publishConn, consumeConn)
@@ -789,20 +893,29 @@ func TestRabbitMQLoad_GracefulStopUnderLoad(t *testing.T) {
 
 	unique, dups := tracker.counts()
 	assert.Zero(t, dups)
+	tracker.requireNoStrays(t)
 	assert.Equal(t, total, unique+len(remaining), "every message is handled or still queued")
 
-	for id := range remaining {
+	for id, n := range remaining {
+		assert.Equal(t, 1, n, "message %d queued more than once", id)
 		assert.False(t, tracker.has(id), "message %d both handled and still queued", id)
+	}
+
+	// Exactly one copy of each handled message, and no other.
+	for id, n := range copies {
+		assert.True(t, tracker.has(id), "copy of message %d, which was not handled", id)
+		assert.Equal(t, 1, n, "message %d republished %d times", id, n)
 	}
 
 	assert.Len(t, copies, unique, "every handled message was republished, also during the drain")
 }
 
-// drainQueue takes every message of queue and returns their IDs.
-func drainQueue(t *testing.T, ch *amqp.Channel, queue string) map[int]bool {
+// drainQueue takes every message of queue and returns how often each ID was
+// in it.
+func drainQueue(t *testing.T, ch *amqp.Channel, queue string) map[int]int {
 	t.Helper()
 
-	ids := map[int]bool{}
+	ids := map[int]int{}
 
 	for {
 		d, ok, err := ch.Get(queue, true)
@@ -815,7 +928,7 @@ func drainQueue(t *testing.T, ch *amqp.Channel, queue string) map[int]bool {
 		id, err := strconv.Atoi(d.MessageId)
 		require.NoError(t, err)
 
-		ids[id] = true
+		ids[id]++
 	}
 }
 
@@ -863,7 +976,7 @@ func TestRabbitMQLoad_LargeMessages(t *testing.T) {
 	}
 
 	wg.Wait()
-	tracker.waitAll(t, loadWait)
+	tracker.waitAll(t)
 
 	t.Logf("moved %d MiB: %s", total, rate(total, time.Since(start)))
 	assert.Zero(t, corrupt.Load())
