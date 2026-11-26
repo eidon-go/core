@@ -43,6 +43,8 @@ type declarer interface {
 	exchangeDeclare(e Exchange) error
 	queueDeclare(q Queue) error
 	queueBind(b Binding) error
+	exchangeDeclarePassive(e Exchange) error
+	queueDeclarePassive(q Queue) error
 }
 
 // confirmation is the broker's answer to one published message.
@@ -124,6 +126,18 @@ func (r realChannel) queueDeclare(q Queue) error {
 func (r realChannel) queueBind(bind Binding) error {
 	//nolint:wrapcheck // wrapped by the caller
 	return r.ch.QueueBind(bind.Queue, bind.RoutingKey, bind.Exchange, false, toTable(bind.Args, 0))
+}
+
+func (r realChannel) exchangeDeclarePassive(ex Exchange) error {
+	//nolint:wrapcheck // wrapped by the caller
+	return r.ch.ExchangeDeclarePassive(ex.Name, ex.Kind, ex.Durable, ex.AutoDelete, ex.Internal, false,
+		toTable(ex.Args, 0))
+}
+
+func (r realChannel) queueDeclarePassive(q Queue) error {
+	_, err := r.ch.QueueDeclarePassive(q.Name, q.Durable, q.AutoDelete, q.Exclusive, false, toTable(q.Args, 0))
+
+	return err //nolint:wrapcheck // wrapped by the caller
 }
 
 func (r realChannel) consume(queue, tag string, exclusive bool, args amqp.Table) (<-chan amqp.Delivery, error) {

@@ -57,6 +57,10 @@ var (
 	// ErrorActionPause holds the consumer unsubscribed, until
 	// Consumer.Resume.
 	ErrPaused = errors.New("rabbitmq: consumer paused on a handler error")
+
+	// ErrTopology is wrapped by the error of Consumer.Run when, with
+	// TopologyVerify, an exchange or queue of the Topology does not exist.
+	ErrTopology = errors.New("rabbitmq: topology does not exist")
 )
 
 // wrap prefixes err with the module name; nil stays nil.

@@ -315,6 +315,43 @@ func TestRabbitMQ_PublishAndConsume(t *testing.T) {
 	assert.Zero(t, readyMessages(t, rawChannel(t, rabbitConfig), queue), "every message acked")
 }
 
+// TopologyVerify fails on a queue that does not exist and consumes once it
+// does, without declaring anything.
+func TestRabbitMQ_TopologyVerify(t *testing.T) {
+	t.Parallel()
+	requireDocker(t)
+
+	exchange, queue := rabbitName(t, "x"), rabbitName(t, "q")
+	topology := queueTopology(exchange, queue, nil)
+	consumer := func(h rabbitmq.Handler) *rabbitmq.Consumer {
+		c, err := rabbitmq.NewConsumer(newRabbitConnection(t, rabbitConfig, "verify"), rabbitmq.ConsumerConfig{
+			Queue: queue, Topology: topology,
+		}, h, rabbitmq.StopOnFailure,
+			append(rabbitOptions("consumer"), rabbitmq.WithTopologyMode(rabbitmq.TopologyVerify))...)
+		require.NoError(t, err)
+
+		return c
+	}
+
+	err := consumer(newRabbitCollector()).Run(t.Context())
+	require.ErrorIs(t, err, rabbitmq.ErrTopology)
+
+	// Managed outside the service.
+	ch := rawChannel(t, rabbitConfig)
+	require.NoError(t, ch.ExchangeDeclare(exchange, rabbitmq.ExchangeTopic, false, true, false, false, nil))
+
+	_, err = ch.QueueDeclare(queue, false, false, false, false, nil)
+	require.NoError(t, err)
+	require.NoError(t, ch.QueueBind(queue, "#", exchange, false, nil))
+
+	collector := newRabbitCollector()
+	stop := runRabbitConsumer(t, consumer(collector))
+
+	publishBodies(t, newRabbitPublisher(t, newRabbitConnection(t, rabbitConfig, "publish")), exchange, "a")
+	assert.Equal(t, []string{"a"}, collector.wait(t, 1))
+	require.NoError(t, stop())
+}
+
 // gate holds a handler until it is released, or until the handler's ctx is
 // done; the test releases it on cleanup too, so that a failed assertion
 // does not leave the handler blocked.

@@ -101,7 +101,7 @@ once, wrapping `ErrInvalidConfig`.
 | Field | Default | Meaning |
 |---|---|---|
 | `Queue` | required | queue to consume |
-| `Topology` | none | exchanges, queues and bindings declared before every subscription |
+| `Topology` | none | exchanges, queues and bindings declared (or only checked, `WithTopologyMode`) before every subscription |
 | `Concurrency` | 1 | messages handled at the same time; above 1 the queue order is lost |
 | `Prefetch` | `Concurrency` | messages delivered ahead of the acks (`basic.qos`) |
 | `Exclusive` | false | be the queue's only consumer |
@@ -121,6 +121,21 @@ once, wrapping `ErrInvalidConfig`.
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Consumer` |
 | `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Consumer` |
+| `WithTopologyMode(TopologyMode)` | `TopologyDeclare` | `Consumer`: declare the `Topology`, or only check it (`TopologyVerify`, below) |
+
+### Topology
+
+`TopologyDeclare` (the default) declares the `Topology` before every subscription: what is missing
+is created. AMQP never changes an existing exchange or queue — declared with other settings it
+fails the subscription (406 `PRECONDITION_FAILED`) — so instances of two versions in a rolling
+update cannot overwrite each other's topology; change it deliberately (delete and declare again,
+or a policy).
+
+`TopologyVerify` declares nothing: the topology is managed outside the service (a definitions file,
+Terraform, the operator), and the consumer needs no configure permission on the vhost. Its
+exchanges and queues are checked with passive declares; a missing one fails `Run` with
+`ErrTopology`. The settings of existing entities are not compared, and bindings cannot be checked
+in AMQP.
 
 ## Lifecycle
 
