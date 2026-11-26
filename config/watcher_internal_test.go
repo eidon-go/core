@@ -570,6 +570,37 @@ func TestKV_RunShutdownRace(t *testing.T) {
 	}
 }
 
+// A Shutdown whose ctx ends before the watcher stops leaves the KV to be
+// closed once the watcher has stopped.
+func TestKV_ShutdownExpiredClosesKVLater(t *testing.T) {
+	t.Parallel()
+
+	kv := newFakeKV()
+	kv.SetData("/flags.json", []byte(`{"v": 1}`))
+
+	cfg, err := New(t.Context(), WithKV(kv), WithWatchedKeys("/flags.json"), noEnv(), quiet())
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+
+	go func() { done <- cfg.Run(t.Context()) }()
+
+	require.True(t, kv.WaitForWatcher("/flags.json", 1, time.Second))
+
+	expired, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if err := cfg.Shutdown(expired); err != nil {
+		require.ErrorIs(t, err, context.Canceled)
+	}
+
+	require.NoError(t, <-done)
+	require.Eventually(t, func() bool { return kv.CloseCount() == 1 }, time.Second, time.Millisecond)
+	assert.Equal(t, 0, kv.WatcherCount("/flags.json"))
+	require.NoError(t, cfg.Shutdown(t.Context()), "a later Shutdown returns nil")
+	assert.Equal(t, 1, kv.CloseCount(), "the KV is closed once")
+}
+
 // Readers see consistent snapshots while the watcher publishes.
 func TestKV_ConcurrentReadsDuringUpdates(t *testing.T) {
 	t.Parallel()
