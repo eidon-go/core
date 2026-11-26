@@ -920,7 +920,8 @@ func TestRabbitMQLoad_GracefulStopUnderLoad(t *testing.T) {
 	publishLoad(t, feeder, exchange, total, 8, 100)
 
 	a := app.New(app.WithSignals(), app.WithLogger(slog.New(slog.DiscardHandler)), app.WithShutdownTimeout(loadWait))
-	a.Add(publishConn, consumeConn)
+	a.Add(publishConn)
+	a.Add(consumeConn)
 	a.Add(pub)
 	a.Add(c)
 

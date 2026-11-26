@@ -19,9 +19,10 @@ type orderCreated struct {
 // request-reply service, on one connection. The constructors do no I/O;
 // with app.App, register the components in this order:
 //
-//	a.Add(conn)                // a Starter: connects in Start, drained and closed last
-//	a.Add(publisher)           // a Resource: shut down after the runners have drained
-//	a.Add(consumer, responder) // Runners: stopped first
+//	a.Add(conn)      // a Starter: connects in Start, drained and closed last
+//	a.Add(publisher) // a Resource: shut down after the runners have drained
+//	a.Add(consumer)  // Runners: stopped first
+//	a.Add(responder)
 func Example() {
 	conn, err := nats.NewConnection(nats.Config{URL: "nats://localhost:4222", CredsFile: "/etc/nats/app.creds"})
 	if err != nil {

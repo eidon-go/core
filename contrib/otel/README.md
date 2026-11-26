@@ -31,8 +31,9 @@ if err != nil {
 telemetry.SetGlobal() // the contrib modules default to the otel globals
 
 a := app.New()
-a.Add(telemetry)           // first: shut down last, after everything that emits telemetry
-a.Add(httpServer, worker)  // their spans and metrics recorded while stopping are still exported
+a.Add(telemetry)  // first: shut down last, after everything that emits telemetry
+a.Add(httpServer) // their spans and metrics recorded while stopping are still exported
+a.Add(worker)
 ```
 
 Without `SetGlobal`, hand the provider over explicitly: every integration module takes

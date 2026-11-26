@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestHealthReport_RecoversPanickingCheck(t *testing.T) {
 	t.Parallel()
 
 	a := newApp()
-	a.Add(panickingChecker{}, &checker{name: "ok"})
+	addAll(a, panickingChecker{}, &checker{name: "ok"})
 
 	var report []app.HealthResult
 
@@ -86,7 +87,7 @@ func TestHealthReport_RunsChecksConcurrently(t *testing.T) {
 	entered.Add(3)
 
 	a := newApp()
-	a.Add(
+	addAll(a,
 		&barrierChecker{name: "a", entered: &entered},
 		&barrierChecker{name: "b", entered: &entered},
 		&barrierChecker{name: "c", entered: &entered},
@@ -97,5 +98,92 @@ func TestHealthReport_RunsChecksConcurrently(t *testing.T) {
 
 	for _, r := range a.HealthReport(ctx) {
 		require.NoError(t, r.Err, "%s: checks must run concurrently", r.Name)
+	}
+}
+
+func TestHealthcheck_Readiness(t *testing.T) {
+	t.Parallel()
+
+	errDown := errors.New("down")
+
+	tests := []struct {
+		name    string
+		add     func(a *app.App)
+		wantErr string // "" means ready
+		report  []app.HealthResult
+	}{
+		{
+			name: "failing check without WithReadiness is diagnostic only",
+			add: func(a *app.App) {
+				a.Add(&checker{name: "cache", err: errDown})
+			},
+			report: []app.HealthResult{{Name: "cache", Err: errDown, Readiness: false}},
+		},
+		{
+			name: "failing check WithReadiness fails readiness",
+			add: func(a *app.App) {
+				a.Add(&checker{name: "db", err: errDown}, app.WithReadiness())
+			},
+			wantErr: "db: down",
+			report:  []app.HealthResult{{Name: "db", Err: errDown, Readiness: true}},
+		},
+		{
+			name: "only checks WithReadiness count",
+			add: func(a *app.App) {
+				a.Add(&checker{name: "db"}, app.WithReadiness())
+				a.Add(&checker{name: "cache", err: errDown})
+				a.Add(&checker{name: "queue", err: errDown}, app.WithReadiness())
+			},
+			wantErr: "queue: down",
+			report: []app.HealthResult{
+				{Name: "db", Err: nil, Readiness: true},
+				{Name: "cache", Err: errDown, Readiness: false},
+				{Name: "queue", Err: errDown, Readiness: true},
+			},
+		},
+		{
+			name: "WithReadiness on a component without Healthcheck is ignored",
+			add: func(a *app.App) {
+				a.Add(&resource{name: "plain", rec: &recorder{}}, app.WithReadiness())
+				a.Add(&checker{name: "cache"})
+			},
+			report: []app.HealthResult{{Name: "cache", Err: nil, Readiness: false}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newServer("http", &recorder{})
+
+			a := newApp()
+			tt.add(a)
+			a.Add(srv)
+
+			assert.Equal(t, tt.report, a.HealthReport(t.Context()))
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := runAsync(ctx, a)
+
+			<-srv.running
+
+			var err error
+
+			eventually(t, func() bool {
+				err = a.Healthcheck(t.Context())
+
+				return !errors.Is(err, app.ErrNotReady)
+			})
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tt.wantErr)
+			}
+
+			cancel()
+			require.NoError(t, wait(t, done))
+		})
 	}
 }

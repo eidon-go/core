@@ -51,7 +51,7 @@ func TestShutdown_RunnersConcurrently(t *testing.T) {
 	second := &barrierServer{server: newServer("second", rec), barrier: barrier}
 
 	a := newApp(app.WithShutdownTimeout(10 * time.Second))
-	a.Add(first, second)
+	addAll(a, first, second)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -216,7 +216,7 @@ func TestRun_PanickingShutdownAfterFailedStartIsReported(t *testing.T) {
 	failing := &starter{resource: resource{name: "failing", rec: rec}, startErr: errStart}
 
 	a := newApp()
-	a.Add(first, failing, &lazyClient{})
+	addAll(a, first, failing, &lazyClient{})
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, errStart)

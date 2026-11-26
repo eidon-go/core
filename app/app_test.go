@@ -173,6 +173,13 @@ func newApp(opts ...app.Option) *app.App {
 	return app.New(append(base, opts...)...)
 }
 
+// addAll adds every component to a, in order, without options.
+func addAll(a *app.App, components ...lifecycle.Resource) {
+	for _, c := range components {
+		a.Add(c)
+	}
+}
+
 // runAsync runs a in the background and returns its result channel.
 func runAsync(ctx context.Context, a *app.App) <-chan error {
 	done := make(chan error, 1)
@@ -219,8 +226,7 @@ func TestRun_CleanStopOrder(t *testing.T) {
 	httpSrv := newServer("http", rec)
 
 	a := newApp()
-	a.Add(db, cache)
-	a.Add(grpcSrv, httpSrv)
+	addAll(a, db, cache, grpcSrv, httpSrv)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -266,7 +272,7 @@ func TestRun_RunnerErrorStopsApp(t *testing.T) {
 	db := &resource{name: "db", rec: rec}
 
 	a := newApp(app.WithShutdownDelay(time.Hour)) // skipped for a failing runner
-	a.Add(db, srv, failing)
+	addAll(a, db, srv, failing)
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, errBoom)
@@ -281,7 +287,7 @@ func TestRun_RunnerReturningNilEarlyStopsApp(t *testing.T) {
 	rec := &recorder{}
 
 	a := newApp()
-	a.Add(&worker{name: "job", rec: rec, early: true}, &worker{name: "other", rec: rec})
+	addAll(a, &worker{name: "job", rec: rec, early: true}, &worker{name: "other", rec: rec})
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, app.ErrRunnerStopped)
@@ -297,7 +303,7 @@ func TestRun_CancelledContextIsAlwaysClean(t *testing.T) {
 		rec := &recorder{}
 
 		a := newApp()
-		a.Add(&worker{name: "a", rec: rec}, &worker{name: "b", rec: rec})
+		addAll(a, &worker{name: "a", rec: rec}, &worker{name: "b", rec: rec})
 
 		require.NoError(t, a.Run(cancelled(t)))
 	}
@@ -334,7 +340,7 @@ func TestRun_HangingRunnerHitsShutdownTimeout(t *testing.T) {
 	db := &resource{name: "db", rec: rec}
 
 	a := newApp(app.WithShutdownTimeout(100 * time.Millisecond))
-	a.Add(db, &worker{name: "stuck", rec: rec, hang: true})
+	addAll(a, db, &worker{name: "stuck", rec: rec, hang: true})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -356,7 +362,7 @@ func TestRun_HangingShutdownIsAbandoned(t *testing.T) {
 	first := &resource{name: "first", rec: rec}
 
 	a := newApp(app.WithShutdownTimeout(50 * time.Millisecond))
-	a.Add(first, stuck)
+	addAll(a, first, stuck)
 
 	start := time.Now()
 	err := wait(t, runAsync(cancelled(t), a))
@@ -381,7 +387,7 @@ func TestRun_StartFailureShutsDownEveryComponent(t *testing.T) {
 	grpcSrv := newServer("grpc", rec)
 
 	a := newApp()
-	a.Add(first, plain, failing, notStarted, later, srv, grpcSrv)
+	addAll(a, first, plain, failing, notStarted, later, srv, grpcSrv)
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, errStart)
@@ -407,7 +413,7 @@ func TestRun_CancelDuringStartIsCleanStop(t *testing.T) {
 	next := &starter{resource: resource{name: "next", rec: rec}}
 
 	a := newApp()
-	a.Add(blocking, next)
+	addAll(a, blocking, next)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -428,7 +434,7 @@ func TestRun_StartTimeout(t *testing.T) {
 	next := &resource{name: "next", rec: rec}
 
 	a := newApp(app.WithStartTimeout(50 * time.Millisecond))
-	a.Add(blocking, next)
+	addAll(a, blocking, next)
 
 	err := wait(t, runAsync(t.Context(), a))
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -471,7 +477,7 @@ func TestRun_Group(t *testing.T) {
 	srv := newServer("http", rec)
 
 	a := newApp()
-	a.Add(lifecycle.GroupNamed("infra", db, cache), srv)
+	addAll(a, lifecycle.GroupNamed("infra", db, cache), srv)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -513,7 +519,7 @@ func TestRun_ShutdownErrorsAreJoined(t *testing.T) {
 	errB := errors.New("b failed")
 
 	a := newApp()
-	a.Add(&resource{name: "a", rec: rec, shutdownErr: errA}, &resource{name: "b", rec: rec, shutdownErr: errB})
+	addAll(a, &resource{name: "a", rec: rec, shutdownErr: errA}, &resource{name: "b", rec: rec, shutdownErr: errB})
 
 	err := wait(t, runAsync(cancelled(t), a))
 	require.ErrorIs(t, err, errA)
@@ -583,7 +589,7 @@ func TestReadiness(t *testing.T) {
 	srv := newServer("http", rec)
 
 	a := newApp(app.WithShutdownDelay(200 * time.Millisecond))
-	a.Add(slowStart, srv)
+	addAll(a, slowStart, srv)
 
 	require.ErrorIs(t, a.Healthcheck(t.Context()), app.ErrNotReady, "before Run")
 
@@ -637,7 +643,7 @@ func TestObserver(t *testing.T) {
 	}))
 
 	srv := newServer("http", rec)
-	a.Add(&starter{resource: resource{name: "db", rec: rec}}, srv)
+	addAll(a, &starter{resource: resource{name: "db", rec: rec}}, srv)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -657,24 +663,23 @@ func TestAdd_Panics(t *testing.T) {
 
 	var nilResource *resource
 
-	assert.PanicsWithValue(t, "app: Add: component 1 (<nil>) is nil", func() {
-		newApp().Add(&resource{}, nil)
+	assert.PanicsWithValue(t, "app: Add: component (<nil>) is nil", func() {
+		newApp().Add(nil)
 	})
 	assert.Panics(t, func() { newApp().Add(nilResource) }, "typed nil")
 
 	dup := &resource{name: "db"}
 
-	assert.PanicsWithValue(t, "app: Add: component db is already registered", func() { newApp().Add(dup, dup) })
-	assert.Panics(t, func() {
+	assert.PanicsWithValue(t, "app: Add: component db is already registered", func() {
 		a := newApp()
 		a.Add(dup)
-		a.Add(dup)
+		a.Add(dup, app.WithReadiness())
 	})
 
 	// Non-comparable components cannot be detected but must not panic.
 	f := lifecycle.ShutdownFunc(func(context.Context) error { return nil })
 
-	assert.NotPanics(t, func() { newApp().Add(f, f) })
+	assert.NotPanics(t, func() { addAll(newApp(), f, f) })
 
 	a := newApp()
 	require.NoError(t, a.Run(cancelled(t)))
@@ -690,21 +695,19 @@ func TestHealthcheck(t *testing.T) {
 	srv := newServer("http", rec)
 
 	a := newApp()
-	a.Add(
-		&checker{name: "db", delay: 50 * time.Millisecond},
-		&checker{name: "cache", err: errDown, delay: 50 * time.Millisecond},
-		&resource{name: "plain", rec: rec},
-		lifecycle.HealthcheckFunc(func(context.Context) error { return nil }),
-		srv,
-	)
+	a.Add(&checker{name: "db", delay: 50 * time.Millisecond}, app.WithReadiness())
+	a.Add(&checker{name: "cache", err: errDown, delay: 50 * time.Millisecond}, app.WithReadiness())
+	a.Add(&resource{name: "plain", rec: rec}, app.WithReadiness())
+	a.Add(lifecycle.HealthcheckFunc(func(context.Context) error { return nil }))
+	a.Add(srv)
 
 	// Concurrency is covered by TestHealthReport_RunsChecksConcurrently.
 	report := a.HealthReport(t.Context())
 
 	assert.Equal(t, []app.HealthResult{
-		{Name: "db", Err: nil},
-		{Name: "cache", Err: errDown},
-		{Name: "lifecycle.HealthcheckFunc", Err: nil},
+		{Name: "db", Err: nil, Readiness: true},
+		{Name: "cache", Err: errDown, Readiness: true},
+		{Name: "lifecycle.HealthcheckFunc", Err: nil, Readiness: false},
 	}, report)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -763,7 +766,8 @@ func TestHealthcheck_NotReadyWhenShutdownStartsDuringChecks(t *testing.T) {
 	srv := newServer("http", &recorder{})
 
 	a := newApp()
-	a.Add(gate, srv)
+	a.Add(gate, app.WithReadiness())
+	a.Add(srv)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := runAsync(ctx, a)
@@ -839,7 +843,7 @@ func TestRun_CancelWhileRunningIsAlwaysClean(t *testing.T) {
 		w1, w2 := newCtxWorker(), newCtxWorker()
 
 		a := newApp()
-		a.Add(w1, w2)
+		addAll(a, w1, w2)
 
 		ctx, cancel := context.WithCancel(t.Context())
 		done := runAsync(ctx, a)
@@ -863,9 +867,9 @@ func (holder) Shutdown(context.Context) error { return nil }
 func TestAdd_DuplicateDetectionEdgeCases(t *testing.T) {
 	t.Parallel()
 
-	assert.NotPanics(t, func() { newApp().Add(&nop{}, &nop{}) }, "distinct zero-size pointers may share an address")
-	assert.NotPanics(t, func() { newApp().Add(holder{[]int{1}}, holder{[]int{2}}) }, "values are never compared")
-	assert.NotPanics(t, func() { newApp().Add(holder{1}, holder{1}) }, "equal values are distinct components")
+	assert.NotPanics(t, func() { addAll(newApp(), &nop{}, &nop{}) }, "distinct zero-size pointers may share an address")
+	assert.NotPanics(t, func() { addAll(newApp(), holder{[]int{1}}, holder{[]int{2}}) }, "values are never compared")
+	assert.NotPanics(t, func() { addAll(newApp(), holder{1}, holder{1}) }, "equal values are distinct components")
 }
 
 func TestRun_GroupWithoutStartersIsShutDownAfterStartFailure(t *testing.T) {
@@ -877,7 +881,7 @@ func TestRun_GroupWithoutStartersIsShutDownAfterStartFailure(t *testing.T) {
 	plain := &resource{name: "cache", rec: rec}
 
 	a := newApp()
-	a.Add(failing, lifecycle.GroupNamed("infra", plain))
+	addAll(a, failing, lifecycle.GroupNamed("infra", plain))
 
 	require.ErrorIs(t, wait(t, runAsync(t.Context(), a)), errStart)
 	assert.Contains(t, rec.list(), "shutdown cache", "a group without starters holds resources and must be shut down")

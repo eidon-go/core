@@ -94,6 +94,10 @@ rebalance callbacks) passed through `WithKgoOpts` break its guarantees.
 | `Producer` | creates the client, pings with retry | — | flushes buffered records until its ctx is done, then closes | pings |
 | `Client` | creates the client, pings with retry | — | closes | pings |
 
+Add these components to `app.App` without `app.WithReadiness()`: consumers are not
+load-balanced, and a broker outage should delay publishing, not take the service's API offline.
+Their checks still appear in `HealthReport`.
+
 `New*` do no network I/O: the franz-go client — whose background loops talk to the brokers — is
 created in `Start`, so `Kgo()` is `nil` before it and `Publish` returns `ErrNotStarted`. A
 `Shutdown` during `Start` ends its ping retries at once (`Start` returns `ErrClosed`). `Shutdown`

@@ -48,8 +48,8 @@ if err != nil {
 orders := NewOrderRepo(m) // repositories take sql.Transactor / a QuerierProvider
 
 a := app.New()
-a.Add(db)     // before the components that use the pool
-a.Add(server) // …
+a.Add(db, app.WithReadiness()) // before the components that use the pool; gates readiness
+a.Add(server)                  // …
 return a.Run(ctx)
 ```
 
@@ -124,6 +124,9 @@ libpq's `PG*` environment variables, as pgx always does.
 |---|---|---|---|---|
 | `sql.DB` | validates, opens the pool (`database/sql` connects lazily: no I/O) | pings with retry | closes the pool: waits for the queries in flight | pings |
 | `corepgx.DB` | validates, builds the pool config and tracer (no I/O) | creates the pool, pings with retry | closes the `*sql.DB` of `SQLDB`, then the pool: waits until every connection is released | pings; `ErrNotStarted` before `Start` (a `DB` from `New`) |
+
+Register the `DB` with `app.WithReadiness()` when the service cannot answer requests without
+the database (the usual case); without it the health check only appears in `HealthReport`.
 
 A `Shutdown` during `Start` ends its ping retries (`Start` returns `ErrClosed`); `Start` after
 `Shutdown` returns `ErrClosed`. `Shutdown` is idempotent and safe without `Start`; when its ctx is

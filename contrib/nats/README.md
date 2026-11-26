@@ -72,9 +72,10 @@ if err != nil {
 }
 
 a := app.New()
-a.Add(conn)              // connects in Start; drained and closed last
-a.Add(publisher)         // shut down after the runners have drained
-a.Add(consumer, status)  // runners: stopped first
+a.Add(conn)      // connects in Start; drained and closed last
+a.Add(publisher) // shut down after the runners have drained
+a.Add(consumer)  // runners: stopped first
+a.Add(status)
 
 return a.Run(ctx)
 ```
@@ -147,6 +148,10 @@ At most one of `User`, `Token`, `CredsFile` and `NKeySeedFile` may be set.
 | `Publisher` | Resource | — (its connection connects) | — | refuses new calls, waits for the ones in flight, flushes; bounded by the deadline | — |
 | `Subscriber` | Runner | — | subscribes and handles; drains on stop | bounds the drain; at the deadline cancels the handlers' context, the messages not handled are lost | subscribed / `ErrNotRunning` |
 | `Consumer` | Runner | — | creates the stream (`WithStream`) and the consumer, pulls and handles; resubscribes with backoff after a failed subscription; on stop finishes the messages in flight and naks the prefetched ones | bounds the stop; at the deadline cancels the handlers' context and naks what was not acked | subscribed / `ErrNotConnected` while (re)subscribing |
+
+Add these components to `app.App` without `app.WithReadiness()` unless the service cannot answer
+requests without NATS: a reconnect should not take every instance out of the load balancer. Their
+checks still appear in `HealthReport`.
 
 **Registration order:** the connection, then publishers, then subscribers and consumers. `app.App`
 stops the runners first — their handlers may still publish while they drain — then the publishers,

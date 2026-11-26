@@ -18,8 +18,11 @@
 //
 //	func main() {
 //	    a := app.New(app.WithShutdownTimeout(30 * time.Second))
-//	    a.Add(telemetry, db, cache) // dependencies first
-//	    a.Add(grpcServer, httpServer)
+//	    a.Add(telemetry) // dependencies first
+//	    a.Add(db, app.WithReadiness()) // no requests can be served without it
+//	    a.Add(cache)                   // degraded without it, still serving
+//	    a.Add(grpcServer)
+//	    a.Add(httpServer)
 //	    if err := a.Run(context.Background()); err != nil {
 //	        log.Fatal(err)
 //	    }
@@ -92,6 +95,7 @@ type App struct {
 	mu         sync.Mutex
 	started    bool
 	components []lifecycle.Resource
+	readiness  []bool // readiness[i]: components[i] was added WithReadiness
 }
 
 // state is the externally visible phase of the app, used for readiness.
@@ -196,12 +200,33 @@ func New(opts ...Option) *App {
 	return a
 }
 
-// Add registers components in dependency order: a component should be added
-// after the components it uses. Start runs in this order, shutdown in reverse.
-// A component that implements lifecycle.Runner is run; every component is shut
-// down.
+// AddOption configures how Add registers one component.
+type AddOption func(*registration)
+
+// registration is what Add records about one component besides the
+// component itself.
+type registration struct {
+	readiness bool
+}
+
+// WithReadiness makes the component's lifecycle.Healthchecker count toward
+// App.Healthcheck: while it fails, the app is not ready. Use it for the
+// dependencies without which the service cannot serve requests at all — the
+// primary database, say. Without it a component's check only appears in
+// HealthReport, so a cache or a message consumer that is down degrades the
+// service instead of taking every instance out of the load balancer. It has
+// no effect on a component that does not implement lifecycle.Healthchecker.
+func WithReadiness() AddOption {
+	return func(r *registration) { r.readiness = true }
+}
+
+// Add registers a component. Components are added in dependency order: a
+// component should be added after the components it uses. Start runs in this
+// order, shutdown in reverse. A component that implements lifecycle.Runner is
+// run; every component is shut down. Its Healthcheck counts toward
+// App.Healthcheck only if it is added WithReadiness.
 //
-// Add panics if a component is nil (including a typed nil pointer), if the
+// Add panics if the component is nil (including a typed nil pointer), if the
 // same component is added twice, or if it is called after Run: all are
 // programming errors.
 //
@@ -209,7 +234,7 @@ func New(opts ...Option) *App {
 // pointers to zero-size types are never treated as duplicates: equal values
 // need not be the same resource, and distinct zero-size values may share an
 // address.
-func (a *App) Add(components ...lifecycle.Resource) {
+func (a *App) Add(component lifecycle.Resource, opts ...AddOption) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -217,17 +242,21 @@ func (a *App) Add(components ...lifecycle.Resource) {
 		panic("app: Add called after Run")
 	}
 
-	for i, c := range components {
-		if lifecycle.IsNil(c) {
-			panic(fmt.Sprintf("app: Add: component %d (%T) is nil", i, c))
-		}
-
-		if isRegistered(c, a.components) || isRegistered(c, components[:i]) {
-			panic(fmt.Sprintf("app: Add: component %s is already registered", lifecycle.NameOf(c)))
-		}
+	if lifecycle.IsNil(component) {
+		panic(fmt.Sprintf("app: Add: component (%T) is nil", component))
 	}
 
-	a.components = append(a.components, components...)
+	if isRegistered(component, a.components) {
+		panic(fmt.Sprintf("app: Add: component %s is already registered", lifecycle.NameOf(component)))
+	}
+
+	var reg registration
+	for _, opt := range opts {
+		opt(&reg)
+	}
+
+	a.components = append(a.components, component)
+	a.readiness = append(a.readiness, reg.readiness)
 }
 
 // isRegistered reports whether c is already in list. Only pointer components

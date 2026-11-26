@@ -24,7 +24,7 @@ client, err := redis.New(redis.Config{
     Addrs:    []string{"localhost:6379"},
     Password: password,
 })
-a.Add(client) // app.App: Start pings it, Shutdown closes it
+a.Add(client) // app.App: Start pings it, Shutdown closes it; health is diagnostic unless app.WithReadiness()
 
 rdb := client.Redis()
 err = rdb.Set(ctx, "key", "value", time.Hour).Err()
@@ -95,7 +95,9 @@ is bounded by 5s: a cancelled `Start` (a signal during startup) returns within t
 | `Name` | `WithName` |
 
 The `Client` is a `Resource`, not a `Runner`: register the components that use it (servers,
-consumers) after it, so they shut down first.
+consumers) after it, so they shut down first. Used as a cache, add it without `app.WithReadiness()`: the service degrades
+while Redis is down instead of failing readiness on every instance; the check still appears in
+`HealthReport`.
 
 Tests run on [miniredis](https://github.com/alicebob/miniredis), which you can use for your own
 unit tests too.

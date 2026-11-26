@@ -133,7 +133,8 @@ published `go.mod` files.
   `lifecycle.CloseOnce` / `ShutdownOnce` (`*Releaser`), workers (consumers, schedulers) on
   `lifecycle.NewWorker` (`WorkerFuncs{Run func(stop, work context.Context) error}`), servers on `lifecycle.NewServer`
   (`ServerFuncs{Listen, Serve, Drain, Close}`, kept in an unexported field, not embedded).
-- **`app`** — drives components: ordered Start, concurrent Run, signals, readiness/health,
+- **`app`** — drives components (`Add(c, opts...)`, one component per call; readiness is opt-in
+  via `app.WithReadiness()`, every checker is listed in `HealthReport`): ordered Start, concurrent Run, signals, readiness/health,
   bounded shutdown (Run ctx cancelled, runners shut down concurrently, then the rest in reverse
   order), lifecycle events via `app.WithObserver`
   (metrics/traces come from the observer, not from wrapping components — wrappers hide optional
