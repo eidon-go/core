@@ -2,6 +2,7 @@ package redis_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net"
 	"sync/atomic"
@@ -80,6 +81,40 @@ func deadAddr(t *testing.T) string {
 	require.NoError(t, l.Close())
 
 	return addr
+}
+
+// stalledAddr is a server that accepts connections and never replies. It
+// returns the address and a channel that receives a value for every
+// connection.
+func stalledAddr(t *testing.T) (string, <-chan struct{}) {
+	t.Helper()
+
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+
+	conns := make(chan struct{}, 16)
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+
+			select {
+			case conns <- struct{}{}:
+			default:
+			}
+
+			go func() { // until the client closes the connection
+				_, _ = io.Copy(io.Discard, conn)
+				_ = conn.Close()
+			}()
+		}
+	}()
+
+	return l.Addr().String(), conns
 }
 
 func TestNew_Errors(t *testing.T) {
@@ -226,6 +261,40 @@ func TestClient_Healthcheck(t *testing.T) {
 	cancel()
 
 	require.ErrorIs(t, client.Healthcheck(ctx), context.Canceled, "honors ctx")
+}
+
+func TestClient_HealthcheckDeadline(t *testing.T) {
+	t.Parallel()
+
+	addr, _ := stalledAddr(t)
+	client := newClient(t, addr) // ReadTimeout: go-redis's 5s
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	begin := time.Now()
+	err := client.Healthcheck(ctx)
+
+	require.Error(t, err)
+	require.Less(t, time.Since(begin), 2*time.Second, "the ctx deadline bounds the PING")
+}
+
+func TestClient_ShutdownEndsStalledStart(t *testing.T) {
+	t.Parallel()
+
+	addr, accepted := stalledAddr(t)
+
+	client, err := redis.New(redis.Config{Addrs: []string{addr}, ReadTimeout: -1, MaxRetries: -1}, quiet())
+	require.NoError(t, err)
+
+	started := make(chan error, 1)
+
+	go func() { started <- client.Start(t.Context()) }() // no deadline, no read timeout
+
+	<-accepted // the PING is sent and waits for a reply
+
+	require.NoError(t, client.Shutdown(t.Context()))
+	require.ErrorIs(t, <-started, redis.ErrClosed)
 }
 
 func TestClient_ClosedThroughRedis(t *testing.T) {

@@ -58,8 +58,8 @@ type Config struct {
 	// DialTimeout bounds a new connection. Default 0: go-redis's 5s.
 	DialTimeout time.Duration `json:"dialTimeout" yaml:"dialTimeout"`
 
-	// ReadTimeout bounds reading a reply. Default 0: go-redis's 3s;
-	// negative: no timeout (the command's ctx still applies).
+	// ReadTimeout bounds reading a reply. Default 0: go-redis's 5s;
+	// negative: no timeout. A deadline of the command's ctx applies too.
 	ReadTimeout time.Duration `json:"readTimeout" yaml:"readTimeout"`
 
 	// WriteTimeout bounds writing a command. Default 0: ReadTimeout;
@@ -67,7 +67,7 @@ type Config struct {
 	WriteTimeout time.Duration `json:"writeTimeout" yaml:"writeTimeout"`
 
 	// PoolTimeout bounds the wait for a free connection when the pool is
-	// exhausted. Default 0: ReadTimeout + 1s.
+	// exhausted. Default 0: ReadTimeout + 1s (30s without a read timeout).
 	PoolTimeout time.Duration `json:"poolTimeout" yaml:"poolTimeout"`
 
 	// ConnMaxIdleTime closes connections idle for longer than this. Default
@@ -85,7 +85,7 @@ type Config struct {
 	MaxRetries int `json:"maxRetries" yaml:"maxRetries"`
 
 	// MinRetryBackoff and MaxRetryBackoff bound the wait between command
-	// retries. Default 0: go-redis's 8ms and 512ms.
+	// retries. Default 0: go-redis's 10ms and 1s.
 	MinRetryBackoff time.Duration `json:"minRetryBackoff" yaml:"minRetryBackoff"`
 	MaxRetryBackoff time.Duration `json:"maxRetryBackoff" yaml:"maxRetryBackoff"`
 }

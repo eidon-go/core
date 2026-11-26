@@ -54,15 +54,18 @@ address. Zero keeps go-redis's default; a negative value disables the feature wh
 | `PoolSize` | 10 × GOMAXPROCS | connections per node |
 | `MinIdleConns` | `0` | idle connections kept open per node (dialed in the background from `New`) |
 | `DialTimeout` | 5s | new connection |
-| `ReadTimeout` | 3s; < 0: none | reading a reply |
+| `ReadTimeout` | 5s; < 0: none | reading a reply |
 | `WriteTimeout` | `ReadTimeout`; < 0: none | writing a command |
-| `PoolTimeout` | `ReadTimeout` + 1s | waiting for a free connection |
+| `PoolTimeout` | `ReadTimeout` + 1s (30s without one) | waiting for a free connection |
 | `ConnMaxIdleTime` | 30m; < 0: never | closes idle connections |
 | `ConnMaxLifetime` | 30m (`DefaultConnMaxLifetime`); < 0: never | replaces old connections (load balancers, failover) |
 | `MaxRetries` | 3; < 0: none | command retries after a network error |
-| `MinRetryBackoff`, `MaxRetryBackoff` | 8ms, 512ms | wait between command retries |
+| `MinRetryBackoff`, `MaxRetryBackoff` | 10ms, 1s | wait between command retries |
 
 `Config.Validate` reports every problem at once (each wraps `ErrInvalidConfig`).
+
+A deadline of a command's ctx bounds its reads and writes as well (go-redis's
+`ContextTimeoutEnabled` is on; `WithUniversalOptions` can turn it off).
 
 ## Options
 

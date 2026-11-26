@@ -166,6 +166,10 @@ func (o *options) universalOptions(cfg Config) *goredis.UniversalOptions {
 		MaxRetries:       disabled(cfg.MaxRetries, -1),
 		MinRetryBackoff:  cfg.MinRetryBackoff,
 		MaxRetryBackoff:  cfg.MaxRetryBackoff,
+
+		// The deadline of a command's ctx bounds its socket reads and writes
+		// (Healthcheck within app's timeout, a ping in Start).
+		ContextTimeoutEnabled: true,
 	}
 
 	switch {

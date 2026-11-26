@@ -46,6 +46,7 @@ func TestUniversalOptions(t *testing.T) {
 			DialTimeout: time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: 3 * time.Second,
 			PoolTimeout: 4 * time.Second, ConnMaxIdleTime: 5 * time.Second, ConnMaxLifetime: 6 * time.Second,
 			MaxRetries: 8, MinRetryBackoff: time.Millisecond, MaxRetryBackoff: 9 * time.Millisecond,
+			ContextTimeoutEnabled: true,
 		}, u)
 
 		cfg.Addrs[0] = "changed"
@@ -77,10 +78,14 @@ func TestUniversalOptions(t *testing.T) {
 			WithTLSConfig(custom),
 			WithUniversalOptions(nil),
 			WithUniversalOptions(func(u *goredis.UniversalOptions) { u.Protocol = 2 }),
-			WithUniversalOptions(func(u *goredis.UniversalOptions) { u.ClientName = "svc" }),
+			WithUniversalOptions(func(u *goredis.UniversalOptions) {
+				u.ClientName = "svc"
+				u.ContextTimeoutEnabled = false
+			}),
 		})
 		u := o.universalOptions(Config{Addrs: []string{"a:6379"}})
 
+		assert.False(t, u.ContextTimeoutEnabled, "WithUniversalOptions overrides it")
 		assert.Equal(t, "redis.internal", u.TLSConfig.ServerName)
 		assert.NotSame(t, custom, u.TLSConfig, "cloned")
 		assert.Equal(t, 2, u.Protocol)
