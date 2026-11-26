@@ -85,7 +85,10 @@ type Client struct {
 }
 
 func (c *Client) Start(ctx context.Context) error {
-    return c.retry.Logged(c.logger).Do(ctx, c.pool.Ping)
+    // Shutdown during Start ends the retries with lifecycle.ErrClosed.
+    return c.releaser.Do(ctx, func(ctx context.Context) error {
+        return c.retry.Logged(c.logger).Do(ctx, c.pool.Ping)
+    })
 }
 
 func (c *Client) Shutdown(ctx context.Context) error { return c.releaser.Shutdown(ctx) }
@@ -100,6 +103,11 @@ func (c *Client) Shutdown(ctx context.Context) error { return c.releaser.Shutdow
   that has finished wins over an expired context, and a panic becomes the error. `Closing()`
   reports that `Shutdown` was called — advisory, since it races with a concurrent `Shutdown`;
   `Done()` is closed when the release has finished.
+- `Do(ctx, fn)` runs a connect in `Start` with a context that the first `Shutdown` cancels (cause
+  `ErrClosed`) before the release starts: a `Shutdown` during `Start` ends the retries at once,
+  and `Do` returns `ErrClosed` — also without calling `fn` once `Shutdown` was called.
+  `Context()` is that close signal itself, for work the component runs on its own (a reconnect
+  loop). No `closing` context, `AfterFunc` or `cancel` in the release of the component.
 
 **A server** describes itself with four functions of its library; `NewServer` turns them into a
 `Starter`, `Runner` and `Healthchecker`:
