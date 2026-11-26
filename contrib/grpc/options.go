@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 
+	"github.com/eidon-go/core/contrib/grpc/internal/propagator"
 	"github.com/eidon-go/core/lifecycle"
 )
 
@@ -64,7 +65,7 @@ func newOptions(opts []Option) options {
 	}
 
 	if o.propagators == nil {
-		o.propagators = otel.GetTextMapPropagator()
+		o.propagators = propagator.Default()
 	}
 
 	return o
@@ -154,9 +155,9 @@ func WithMeterProvider(mp metric.MeterProvider) Option {
 }
 
 // WithPropagators sets the propagators used to extract the trace context from
-// incoming metadata. Default: the global propagators at New time, which
-// propagate nothing until otel.SetTextMapPropagator is called (the otel
-// module's Provider.SetGlobal does it); see WithTelemetry.
+// incoming metadata. Default: the global propagators once
+// otel.SetTextMapPropagator is called (the otel module's Provider.SetGlobal
+// does it), also after New, and W3C Trace Context and Baggage until then.
 func WithPropagators(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.propagators = p }
 }
@@ -171,11 +172,10 @@ type Telemetry interface {
 
 // WithTelemetry sets the tracer provider, the meter provider and the
 // propagators from telemetry — the way to use an otel Provider that is not installed
-// as the global one. WithTracerProvider alone leaves the propagators at the
-// global default: spans are recorded, but the trace context of incoming
-// calls is lost and traces break between services. Options apply in order,
-// so a WithTracerProvider, WithMeterProvider or WithPropagators after it
-// replaces one of the three. A nil telemetry is ignored.
+// as the global one. WithTracerProvider alone keeps the default propagators
+// (see WithPropagators). Options apply in order, so a WithTracerProvider,
+// WithMeterProvider or WithPropagators after it replaces one of the three. A
+// nil telemetry is ignored.
 func WithTelemetry(telemetry Telemetry) Option {
 	return func(o *options) {
 		if telemetry == nil {

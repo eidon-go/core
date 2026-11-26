@@ -38,10 +38,9 @@ a.Add(worker)
 
 Without `SetGlobal`, hand the provider over explicitly: every integration module takes
 `WithTelemetry(telemetry)` (`http2.WithTelemetry`, `kafka.WithTelemetry`, …), which sets the
-tracer provider, the meter provider and the propagators together. Passing only
-`WithTracerProvider(telemetry.TracerProvider())` is not enough: the propagators stay at the
-global default, which propagates nothing until `SetGlobal`, so spans are recorded but traces
-break between services.
+tracer provider, the meter provider and the propagators together. With only
+`WithTracerProvider(telemetry.TracerProvider())` the modules propagate W3C Trace Context +
+Baggage (their default until a global propagator is set), not the propagators of `Provider`.
 
 ## Configuration
 

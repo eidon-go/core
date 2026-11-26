@@ -59,8 +59,9 @@ negative value disables the timeout.
 | `WithListener(net.Listener)` | listen on `Addr` | unix socket, socket activation, custom listener; closed on Shutdown |
 | `WithTLSConfig(*tls.Config)` | plain HTTP | serve HTTPS; HTTP/2 via ALPN; the config must have a certificate |
 | `WithProbes(lifecycle.Healthchecker)` | off | serve `/livez` and `/readyz` in front of the handler |
-| `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals at `New` | request spans and metrics via otelhttp; pass noop providers to disable |
-| `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global (sets the propagators too, so the incoming trace context is kept) |
+| `WithTracerProvider`, `WithMeterProvider` | otel globals at `New` | request spans and metrics via otelhttp; pass noop providers to disable |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | trace-context extraction |
+| `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global |
 | `WithOtelHTTPOptions(...otelhttp.Option)` | — | extra otelhttp options, e.g. `WithMetricAttributesFn` against cardinality |
 | `WithHTTPServer(func(*http.Server))` | — | escape hatch for other `http.Server` fields (`ConnState`, `RegisterOnShutdown`, `TLSConfig`, …) |
 
@@ -157,8 +158,9 @@ by default.
 | `WithTLSConfig(*tls.Config)` | system roots | mTLS, private CAs; cloned |
 | `WithRoundTripper(wrap)` | — | auth headers, signing, rate limiting, retries; the first passed is the outermost |
 | `WithTransport(func(*http.Transport))` | — | escape hatch for other transport fields (proxy, compression, dialer) |
-| `WithTracerProvider`, `WithMeterProvider`, `WithPropagators` | otel globals at `New` | client spans (`{method}`), metrics and trace-context injection via otelhttp |
-| `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global (sets the propagators too, so the trace context is sent) |
+| `WithTracerProvider`, `WithMeterProvider` | otel globals at `New` | client spans (`{method}`), metrics and trace-context injection via otelhttp |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | trace-context injection |
+| `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global |
 | `WithOtelHTTPOptions(...otelhttp.Option)` | — | extra otelhttp options |
 
 Tracing is innermost, directly around the transport: a span covers one network round trip, and

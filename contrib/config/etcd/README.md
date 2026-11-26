@@ -63,7 +63,7 @@ remote configuration can be read.
 | `WithTLSConfig(*tls.Config)` | none (TLS with system roots if the first endpoint is `https://`) | TLS and client certificates for the cluster connections; `New` rejects `http://` endpoints with it (clientv3 would silently drop TLS) |
 | `WithTracerProvider(trace.TracerProvider)` | global, at `New` | Spans of the etcd gRPC calls (see [OpenTelemetry](#opentelemetry)) |
 | `WithMeterProvider(metric.MeterProvider)` | global, at `New` | Metrics of the etcd gRPC calls |
-| `WithPropagators(propagation.TextMapPropagator)` | global, at `New` | Trace context injected into the calls |
+| `WithPropagators(propagation.TextMapPropagator)` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | Trace context injected into the calls |
 | `WithTelemetry(Telemetry)` | — | All three from the `otel` module's `Provider` when it is not global |
 | `WithClientConfig(func(*clientv3.Config))` | — | Last-chance changes to the `clientv3.Config` (message sizes, gRPC dial options, retry backoff). `DialOptions` already holds the OpenTelemetry stats handler: append to it. Keep `DialTimeout` positive with credentials — it is the only bound on the authentication |
 
