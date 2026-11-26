@@ -34,6 +34,7 @@ core.
 | contrib/http2 | `github.com/eidon-go/core/contrib/http2` | [HTTP server](./contrib/http2/README.md): HTTP/1.1 and HTTP/2 (TLS, h2c), graceful drain, probes, OpenTelemetry, panic recovery; [client](./contrib/http2/README.md#client) (`contrib/http2/client`): tuned transport, h2c, OpenTelemetry, RoundTripper wrappers |
 | contrib/otel | `github.com/eidon-go/core/contrib/otel` | [OpenTelemetry SDK setup](./contrib/otel/README.md): traces, metrics and logs over OTLP/HTTP, resource attributes, globals on request, flushed on shutdown |
 | contrib/grpc | `github.com/eidon-go/core/contrib/grpc` | [gRPC server](./contrib/grpc/README.md): graceful drain, keepalive and connection-age config, TLS, health service from app readiness, OpenTelemetry, panic-recovery interceptors; [client](./contrib/grpc/README.md#client) (`contrib/grpc/client`): TLS by default, load balancing, keepalive, OpenTelemetry, closed on shutdown |
+| contrib/jwt | `github.com/eidon-go/core/contrib/jwt` | [JWT](./contrib/jwt/README.md) on golang-jwt: tokens with a typed payload, issuer/audience/expiry checks with leeway, pluggable signing algorithm (`jwt/hs256`: HMAC-SHA256) |
 | contrib/kafka | `github.com/eidon-go/core/contrib/kafka` | [Kafka](./contrib/kafka/README.md) on franz-go: consumer group with in-flight drain on stop, commit of handled messages only, retry/skip/stop error policy with dead-letter topic; synchronous producer flushed on shutdown, JSON producer; OpenTelemetry |
 | contrib/nats | `github.com/eidon-go/core/contrib/nats` | [NATS](./contrib/nats/README.md) on nats.go: connection drained on shutdown, core publish and request-reply, JetStream publish with acknowledgement and deduplication IDs, core subscriber (queue groups, drained on stop), durable JetStream pull consumer created on start with in-flight drain on stop, retry/requeue (delayed nak)/reject (term)/stop error policy; OpenTelemetry |
 | contrib/rabbitmq | `github.com/eidon-go/core/contrib/rabbitmq` | [RabbitMQ](./contrib/rabbitmq/README.md) on amqp091-go: self-healing connection (redial and resubscribe), publisher confirms with shutdown waiting for outstanding confirms, queue consumer with in-flight drain on stop, worker concurrency, retry/requeue/reject (dead-letter)/stop error policy, topology declared on every subscription; OpenTelemetry |
@@ -56,7 +57,6 @@ to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `life
 
 | Module | Purpose | State |
 |---|---|---|
-| `contrib/jwt` | JWT signing and verification | planned |
 | `contrib/redis` | Redis client | planned |
 
 Later, on the same scheme: adapters for `sql` such as `river` and `sqlx`.
