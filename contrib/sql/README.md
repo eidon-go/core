@@ -116,6 +116,7 @@ libpq's `PG*` environment variables, as pgx always does.
 | `WithPoolConfig(func(*pgxpool.Config))` | | ✓ | — (AfterConnect hooks, type registration), applied last |
 | `WithScanner(Scanner)` | ✓ | ✓ | `DefaultScanner()` |
 | `WithDefaultIsolation(stdsql.IsolationLevel)` | ✓ | | Read Committed (`LevelRepeatableRead` for MySQL/MariaDB) |
+| `WithDriverName(string)` | ✓ | | what `db.DriverName()` reports: `Config.DriverName` with `New`, `""` with `NewFromDB` — for libraries that pick the SQL dialect by it (sqlx's bind types) |
 
 `NewManager(db, opts...)` takes `WithDefaultTxMode(TxMode)` (both worlds).
 
@@ -212,6 +213,7 @@ world and fails in the `sql` world.
 | | `sql` | `sql/pgx` | For |
 |---|---|---|---|
 | the transaction of ctx | `sql.Tx(ctx, db) (*sql.Tx, bool)` | `corepgx.Tx(ctx, db) (pgx.Tx, bool)` | libraries that enlist through their own API (River's `InsertTx`) |
+| the driver | `db.DriverName()` | — | dialect-aware libraries (sqlx's `Rebind`, named parameters) |
 | the pool | `db.DB() *sql.DB` (from `New` on) | `db.Pool() *pgxpool.Pool` (`nil` before `Start`) | migrations, River's `riverpgxv5`; queries on it run outside `WithTx` |
 | `database/sql` over the pgx pool | — | `db.SQLDB() (*sql.DB, error)` (`ErrNotStarted` before `Start`) | goose, `riverdatabasesql`; same pool, **no** shared transactions |
 | sqlc | `GetQuerier(ctx)` is a `DBTX` | `GetQuerier(ctx)` is a pgx/v5 `DBTX` | `queries := db.New(m.GetQuerier(ctx))` inside `WithTx` |

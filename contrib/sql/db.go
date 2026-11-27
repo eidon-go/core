@@ -25,12 +25,13 @@ import (
 // that they shut down first: closing the pool waits for the queries in
 // flight.
 type DB struct {
-	name     string
-	db       *stdsql.DB
-	scanner  Scanner
-	connect  retry.Policy
-	core     *txcore.Core[*stdsql.Tx]
-	releaser *lifecycle.Releaser
+	name       string
+	driverName string
+	db         *stdsql.DB
+	scanner    Scanner
+	connect    retry.Policy
+	core       *txcore.Core[*stdsql.Tx]
+	releaser   *lifecycle.Releaser
 }
 
 // New validates cfg and opens the pool, instrumented with otelsql (traces
@@ -61,12 +62,17 @@ func New(cfg Config, opts ...Option) (*DB, error) {
 		return nil, fmt.Errorf("sql: register pool metrics: %w", err)
 	}
 
+	if o.driverName == "" {
+		o.driverName = cfg.DriverName
+	}
+
 	return newDB(db, o, stats), nil
 }
 
 // NewFromDB wraps an open *sql.DB (a custom connector, sqlmock) and takes
 // it over: Shutdown closes it. It is not instrumented: wrap the connector
-// with otelsql yourself if needed.
+// with otelsql yourself if needed. Pass WithDriverName when a library
+// built on the DB needs DriverName.
 func NewFromDB(db *stdsql.DB, opts ...Option) (*DB, error) {
 	if db == nil {
 		return nil, fmt.Errorf("%w: nil *sql.DB", ErrInvalidConfig)
@@ -77,11 +83,12 @@ func NewFromDB(db *stdsql.DB, opts ...Option) (*DB, error) {
 
 func newDB(db *stdsql.DB, o options, stats metric.Registration) *DB {
 	d := &DB{ //nolint:exhaustruct_v5 // releaser is set below
-		name:    o.name,
-		db:      db,
-		scanner: o.scanner,
-		connect: o.connectPolicy(),
-		core:    txcore.New[*stdsql.Tx](stdDriver{db: db}),
+		name:       o.name,
+		driverName: o.driverName,
+		db:         db,
+		scanner:    o.scanner,
+		connect:    o.connectPolicy(),
+		core:       txcore.New[*stdsql.Tx](stdDriver{db: db}),
 	}
 
 	d.core.SetDefaultIsolation(o.defaultIso)
@@ -126,6 +133,11 @@ func (d *DB) DB() *stdsql.DB { return d.db }
 
 // Name returns the component name (WithName). Implements lifecycle.Namer.
 func (d *DB) Name() string { return d.name }
+
+// DriverName returns the name of the database/sql driver: Config.DriverName
+// with New, the one given by WithDriverName (which takes precedence), or ""
+// for a NewFromDB without it.
+func (d *DB) DriverName() string { return d.driverName }
 
 // Start pings the database until it answers, retried with the
 // WithConnectRetry policy; Shutdown ends the retries. It returns ErrClosed
