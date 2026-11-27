@@ -492,8 +492,10 @@ func TestSQL_PostgresValueDecoding(t *testing.T) {
 
 			got, err := sql.Get[tagged](ctx, w.querier(ctx), w.q("SELECT id, tags FROM "+tbl))
 
-			if w.name == "postgres/sql" {
-				require.Error(t, err, "database/sql cannot scan text[] into []string")
+			// database/sql scans text[] into []string only with pgx >= v5.11
+			// on Go >= 1.27 (driver.RowsColumnScanner); before, it fails.
+			if w.name == "postgres/sql" && err != nil {
+				require.ErrorContains(t, err, "unsupported Scan")
 
 				return
 			}
