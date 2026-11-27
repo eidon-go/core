@@ -3,7 +3,7 @@ module github.com/eidon-go/core/contrib/nats
 go 1.26.0
 
 require (
-	github.com/eidon-go/core v1.0.0-rc.11
+	github.com/eidon-go/core v1.0.0-rc.13
 	github.com/nats-io/nats-server/v2 v2.15.3
 	github.com/nats-io/nats.go v1.56.0
 	github.com/stretchr/testify v1.12.1
