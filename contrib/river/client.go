@@ -96,7 +96,12 @@ func New(db *corepgx.DB, cfg riverqueue.Config, opts ...Option) (*Client, error)
 		cfg.Logger = o.logger
 	}
 
-	cfg.Plugins = append(slices.Clone(cfg.Plugins), o.middleware())
+	middleware, err := o.middleware()
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Plugins = append(slices.Clone(cfg.Plugins), middleware)
 
 	// River validates its configuration in NewClient, which does no I/O; a
 	// pool that is never used stands in for the one Start will have.
@@ -174,10 +179,13 @@ func (c *Client) Start(context.Context) error {
 // Implements lifecycle.Runner.
 func (c *Client) Run(ctx context.Context) error {
 	c.mu.Lock()
-	notStarted := c.engine == nil && !c.closed
+	closed, started := c.closed, c.engine != nil
 	c.mu.Unlock()
 
-	if notStarted {
+	switch {
+	case closed && !started:
+		return nil // Shutdown has begun: nothing to run
+	case !started:
 		return fmt.Errorf("river: %w", ErrNotStarted)
 	}
 
@@ -289,14 +297,17 @@ func (c *Client) run(stop, work context.Context) error {
 		return nil
 	}
 
-	// Run checked that Start built the engine; it is never reset.
 	c.mu.Lock()
 	eng := c.engine
 	c.mu.Unlock()
 
-	// River's own stop is Stop/StopAndCancel; its Start ctx must outlive the
-	// stop's beginning.
-	if err := eng.Start(context.WithoutCancel(work)); err != nil {
+	if eng == nil { // Shutdown began between Run's check and the worker's
+		return nil
+	}
+
+	// work is cancelled only at Shutdown's deadline, which is River's hard
+	// stop too: it aborts a stalled start and cancels the jobs in flight.
+	if err := eng.Start(work); err != nil {
 		return fmt.Errorf("river: start: %w", err)
 	}
 

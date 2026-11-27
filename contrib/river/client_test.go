@@ -191,6 +191,16 @@ func TestNew_Errors(t *testing.T) {
 	_, err = coreriver.New(newDB(t), cfg, quietLogger())
 	require.ErrorIs(t, err, coreriver.ErrInvalidConfig)
 	require.ErrorContains(t, err, "Workers must be set if Queues is set", "River's own validation")
+
+	unit := func(unit string) coreriver.Option {
+		return coreriver.WithOtelRiverConfig(func(cfg *otelriver.MiddlewareConfig) { cfg.DurationUnit = unit })
+	}
+
+	_, err = coreriver.New(newDB(t), riverqueue.Config{}, quietLogger(), unit("minutes"))
+	require.ErrorIs(t, err, coreriver.ErrInvalidConfig, "otelriver would panic")
+
+	_, err = coreriver.New(newDB(t), riverqueue.Config{}, quietLogger(), unit("ms"))
+	require.NoError(t, err)
 }
 
 func TestNew_Config(t *testing.T) {

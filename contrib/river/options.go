@@ -1,6 +1,7 @@
 package river
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/riverqueue/rivercontrib/otelriver"
@@ -117,7 +118,7 @@ func newOptions(opts []Option) options {
 	return o
 }
 
-func (o *options) middleware() *otelriver.Middleware {
+func (o *options) middleware() (*otelriver.Middleware, error) {
 	cfg := otelriver.MiddlewareConfig{ //nolint:exhaustruct_v5 // otelriver's defaults
 		TracerProvider:         o.tracerProvider,
 		MeterProvider:          o.meterProvider,
@@ -128,5 +129,16 @@ func (o *options) middleware() *otelriver.Middleware {
 		fn(&cfg)
 	}
 
-	return otelriver.NewMiddleware(&cfg)
+	// otelriver panics on any other unit.
+	switch cfg.DurationUnit {
+	case "", "ms", "s":
+	default:
+		return nil, fmt.Errorf(
+			"%w: otelriver DurationUnit %q (want \"ms\" or \"s\")",
+			ErrInvalidConfig,
+			cfg.DurationUnit,
+		)
+	}
+
+	return otelriver.NewMiddleware(&cfg), nil
 }
