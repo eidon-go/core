@@ -4,9 +4,7 @@ import (
 	"context"
 	stdsql "database/sql"
 	"errors"
-	"go/version"
-	"runtime"
-	"runtime/debug"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -15,6 +13,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // database/sql driver "mysql"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -495,7 +494,7 @@ func TestSQL_PostgresValueDecoding(t *testing.T) {
 
 			got, err := sql.Get[tagged](ctx, w.querier(ctx), w.q("SELECT id, tags FROM "+tbl))
 
-			if w.name == "postgres/sql" && !stdlibScansArrays(t) {
+			if w.name == "postgres/sql" && !stdlibScansArrays() {
 				require.ErrorContains(t, err, "unsupported Scan")
 
 				return
@@ -508,27 +507,12 @@ func TestSQL_PostgresValueDecoding(t *testing.T) {
 }
 
 // stdlibScansArrays reports whether pgx's database/sql driver scans text[]
-// into []string: from pgx v5.11 on Go 1.27 (driver.RowsColumnScanner).
-func stdlibScansArrays(t *testing.T) bool {
-	t.Helper()
+// into []string: its Rows implement driver.RowsColumnScanner (ScanColumn),
+// from pgx v5.11 built with Go 1.27.
+func stdlibScansArrays() bool {
+	_, ok := reflect.TypeFor[*stdlib.Rows]().MethodByName("ScanColumn")
 
-	info, ok := debug.ReadBuildInfo()
-	require.True(t, ok)
-
-	for _, dep := range info.Deps {
-		if dep.Path != "github.com/jackc/pgx/v5" {
-			continue
-		}
-
-		minor, err := strconv.Atoi(strings.Split(dep.Version, ".")[1]) // v5.<minor>.<patch>
-		require.NoError(t, err, dep.Version)
-
-		return version.Compare(runtime.Version(), "go1.27") >= 0 && minor >= 11
-	}
-
-	t.Fatal("pgx is not in the build")
-
-	return false
+	return ok
 }
 
 func TestSQL_PgxExtensionPoints(t *testing.T) {
