@@ -40,6 +40,7 @@ core.
 | contrib/rabbitmq | `github.com/eidon-go/core/contrib/rabbitmq` | [RabbitMQ](./contrib/rabbitmq/README.md) on amqp091-go: self-healing connection (redial and resubscribe), publisher confirms with shutdown waiting for outstanding confirms, queue consumer with in-flight drain on stop, worker concurrency, retry/requeue/reject (dead-letter)/stop error policy, topology declared on every subscription; OpenTelemetry |
 | contrib/redis | `github.com/eidon-go/core/contrib/redis` | [Redis](./contrib/redis/README.md) on go-redis v9: single node, cluster or Sentinel, ping with retry on start, closed on shutdown, connection rotation by default, TLS; OpenTelemetry (redisotel) |
 | contrib/sql | `github.com/eidon-go/core/contrib/sql` | [SQL databases](./contrib/sql/README.md): `database/sql` (any driver) and PostgreSQL on pgxpool ([`contrib/sql/pgx`](./contrib/sql/pgx/README.md)) with one transaction manager — nested modes (join with rollback-only, savepoint, separate transaction, forbid), isolation and read-only options, after-commit callbacks; typed `Get`/`Select`/`Exec` helpers over raw SQL or squirrel; sqlc-compatible queriers; OpenTelemetry. Starts at v0.x |
+| contrib/sqlx | `github.com/eidon-go/core/contrib/sqlx` | [sqlx](./contrib/sqlx/README.md) on the transactions of `sql`: an sqlx querier (`Rebind`, `sqlx.In`, named parameters, `GetContext`/`SelectContext`) over the transaction of the context, and a scanner with sqlx's mapping for the helpers of `sql`. Starts at v0.x |
 
 ```sh
 go get github.com/eidon-go/core
@@ -55,7 +56,7 @@ integration modules have validated the API; integration modules are tagged after
 
 Integration modules are added one at a time, each as its own module with its own version, written
 to the [contrib guidelines](./docs/contrib-guidelines.md) and checked with `lifecycletest`.
-Later, on the same scheme: adapters for `sql` such as `river` and `sqlx`.
+Later, on the same scheme: more adapters for `sql`, such as `river`.
 
 ## Design principles
 
