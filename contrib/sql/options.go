@@ -28,6 +28,7 @@ type options struct {
 	otelSQLOpts    []otelsql.Option
 	scanner        Scanner
 	defaultIso     stdsql.IsolationLevel
+	driverName     string
 }
 
 // WithName sets the component name (default DefaultName); give two
@@ -99,6 +100,12 @@ func WithScanner(scanner Scanner) Option { return func(o *options) { o.scanner =
 func WithDefaultIsolation(level stdsql.IsolationLevel) Option {
 	return func(o *options) { o.defaultIso = level }
 }
+
+// WithDriverName sets the name DB.DriverName reports, for libraries that
+// pick the SQL dialect by it (sqlx's bind types). NewFromDB needs it (it
+// cannot know the driver: without it DriverName is empty); with New it
+// replaces Config.DriverName, which stays the driver that is opened.
+func WithDriverName(name string) Option { return func(o *options) { o.driverName = name } }
 
 func newOptions(opts []Option) options {
 	var o options

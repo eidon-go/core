@@ -77,6 +77,7 @@ func TestNew_Lifecycle(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "main", db.Name())
+	assert.Equal(t, "sqlmock", db.DriverName())
 	assert.Equal(t, 5, db.DB().Stats().MaxOpenConnections)
 
 	mock.ExpectPing()
@@ -107,6 +108,28 @@ func TestDB_Name(t *testing.T) {
 	db, _ := newMock(t)
 
 	assert.Equal(t, sql.DefaultName, db.Name())
+}
+
+func TestDB_DriverName(t *testing.T) {
+	t.Parallel()
+
+	db, _ := newMock(t)
+	assert.Empty(t, db.DriverName(), "NewFromDB cannot know the driver")
+
+	sdb, _, err := sqlmock.New()
+	require.NoError(t, err)
+
+	db, err = sql.NewFromDB(sdb, sql.WithDriverName("postgres"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Shutdown(t.Context()) })
+
+	assert.Equal(t, "postgres", db.DriverName())
+
+	db, err = sql.New(sql.Config{DriverName: "sqlmock", DataSource: t.Name()}, sql.WithDriverName("mysql"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Shutdown(t.Context()) })
+
+	assert.Equal(t, "mysql", db.DriverName(), "WithDriverName takes precedence")
 }
 
 func TestDB_StartRetries(t *testing.T) {
