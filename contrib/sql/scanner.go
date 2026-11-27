@@ -29,7 +29,8 @@ type Scanner interface {
 //
 // The pgx world maps columns to fields the same way, but decodes values
 // differently: pgx decodes arrays, jsonb and uuid natively, database/sql
-// does not. A struct that scans in the pgx world may fail here.
+// does not (pgx's driver scans arrays into slices from pgx v5.11 on Go
+// 1.27). A struct that scans in the pgx world may fail here.
 func DefaultScanner() Scanner { return defaultScanner }
 
 var defaultScanner Scanner = scanyScanner{api: mustNewAPI()} //nolint:gochecknoglobals // immutable, built once

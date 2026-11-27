@@ -39,7 +39,7 @@ imports.
    + `jwt/hs256`, no lifecycle, no core dependency) → `redis` (done; `Client` on go-redis `UniversalClient`:
    single/cluster/Sentinel, tests on miniredis). Modules may declare a newer `go` than core
    when their dependencies need it (`contrib/http2` and `contrib/sql` are go 1.26: otel ≥ v1.47 for a reachable
-   vulnerability fix). → `sqlx` (done; adapter for `sql`: `Manager` with an sqlx `Querier` over `sql.Tx(ctx, db)`, bind type from `db.DriverName()`, `NewScanner` with sqlx's mapping; v0.x). Later, the same way: `river` (adapter for `sql/pgx`). Each module is written to
+   vulnerability fix). → `sqlx` (done; adapter for `sql`: `Manager` with an sqlx `Querier` over `sql.Tx(ctx, db)`, bind type from `db.DriverName()`, `NewScanner` with sqlx's mapping; v0.x). → `river` (done; `Client` on `corepgx.DB.Pool()` built in `Start`, `lifecycle.Worker` Run: River `Stop` on stop, `StopAndCancel` at the deadline; `Insert` joins `corepgx.Tx(ctx, txFrom)` (`WithTxFrom` for a separate pool); River's own `river.Config` as is, otelriver plugin appended; migrations stay with the service; River v0.47 = last on pgx v5.10, held for pgxmock in `sql`). Each module is written to
    `docs/contrib-guidelines.md` and ships with `lifecycletest` checks, a README, `Example*` tests
    and its own tag. The checklist is in `CONTRIBUTING.md` ("Adding an integration module"); when
    a module lands, move it from the roadmap table to the Modules table in `README.md`.

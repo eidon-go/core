@@ -206,7 +206,8 @@ snake_case (`UserID` → `user_id`); embedded structs are flattened; a column th
 an error; scalars and `sql.Scanner` types (`sql.Null[T]`) scan directly. The mapping is the same in
 both worlds, **the value decoding is not**: pgx decodes arrays, `jsonb` and `uuid` natively,
 `database/sql` does not, so a struct with a `[]string` field for a `text[]` column scans in the pgx
-world and fails in the `sql` world.
+world and fails in the `sql` world — unless the service runs pgx ≥ v5.11 on Go ≥ 1.27, where pgx's
+`database/sql` driver scans arrays and ranges into Go values too (`driver.RowsColumnScanner`).
 
 ## Extension points
 
