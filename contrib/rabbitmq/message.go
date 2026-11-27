@@ -171,11 +171,14 @@ const (
 	// channel closes. Use it when going on would lose data.
 	ErrorActionStop
 
-	// ErrorActionPause pauses the consumer: it cancels its subscription
-	// (the message is not acked and the broker requeues it when the channel
-	// closes), Healthcheck reports ErrPaused, and the service keeps running.
-	// Consumer.Resume (or a restart) subscribes again; meanwhile the message
-	// may go to another consumer of the queue.
+	// ErrorActionPause pauses the consumer: it cancels its subscription and
+	// holds the message unacked (for the redelivery delay, or the pause's
+	// length with WithPauseFor) before the channel closes and the broker
+	// requeues it; Healthcheck reports ErrPaused, and the service keeps
+	// running. Consumer.Resume, the end of the WithPauseFor length (or a
+	// restart) subscribes again; meanwhile the message goes to another
+	// consumer of the queue, which pauses too: a pause soon stops the
+	// consumer on every instance.
 	ErrorActionPause
 )
 

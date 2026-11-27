@@ -170,12 +170,28 @@ func consumerDiffs(have, want jetstream.ConsumerConfig) []string {
 		diffs = append(diffs, fmt.Sprintf("filter subjects %v, want %v", haveF, wantF))
 	}
 
+	return append(diffs, deliveryDiffs(have, want)...)
+}
+
+// deliveryDiffs describes how the delivery settings of have differ from the
+// ones want sets.
+func deliveryDiffs(have, want jetstream.ConsumerConfig) []string {
+	var diffs []string
+
 	if want.AckWait > 0 && have.AckWait != want.AckWait {
 		diffs = append(diffs, fmt.Sprintf("ack wait %s, want %s", have.AckWait, want.AckWait))
 	}
 
 	if want.MaxDeliver != 0 && have.MaxDeliver != want.MaxDeliver {
 		diffs = append(diffs, fmt.Sprintf("max deliver %d, want %d", have.MaxDeliver, want.MaxDeliver))
+	}
+
+	if want.MaxAckPending != 0 && have.MaxAckPending != want.MaxAckPending {
+		diffs = append(diffs, fmt.Sprintf("max ack pending %d, want %d", have.MaxAckPending, want.MaxAckPending))
+	}
+
+	if len(want.BackOff) > 0 && !slices.Equal(have.BackOff, want.BackOff) {
+		diffs = append(diffs, fmt.Sprintf("backoff %v, want %v", have.BackOff, want.BackOff))
 	}
 
 	return diffs

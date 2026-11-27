@@ -117,10 +117,11 @@ once, wrapping `ErrInvalidConfig`.
 | `WithConnectRetry(retry.Policy)` | `retry.ConnectPolicy()` | `Connection`: `Start`; its delays also space the redials, which go on until `Shutdown` |
 | `WithTLSConfig(*tls.Config)` | none | `Connection` |
 | `WithTracerProvider`, `WithMeterProvider` | otel globals | `Publisher`, `Consumer` |
-| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | `Publisher`, `Consumer` |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`); an empty `propagation.NewCompositeTextMapPropagator()` switches it off | `Publisher`, `Consumer` |
 | `WithTelemetry(Telemetry)` | — | `Publisher`, `Consumer`: all three from the `otel` module's `Provider` when it is not global |
 | `WithRedeliveryPolicy(retry.Policy)` | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s | `Consumer` |
 | `WithTransientPolicy(retry.Policy)` | `consume.TransientPolicy()`: 1s doubling to 30s, until the stop | `Consumer` |
+| `WithPauseFor(time.Duration)` | 0 (until `Resume`) | `Consumer`: end an `ErrorActionPause` by itself after this long, doubling for pauses in a row up to `MaxPause` |
 | `WithTopologyMode(TopologyMode)` | `TopologyDeclare` | `Consumer`: declare the `Topology`, or only check it (`TopologyVerify`, below) |
 
 ### Topology
@@ -209,7 +210,17 @@ A handler error goes to the `ErrorHandler` passed to `NewConsumer`, which return
 | `ErrorActionRequeue` | after the redelivery policy's delay for the message's delivery number (a quorum queue's `x-delivery-count`; otherwise 1, or 2 once redelivered), `basic.nack` with requeue: back to the queue, to any consumer. The worker holds the message during the delay, so a failing message cannot loop hot; a stop during the delay leaves it to be requeued when the channel closes. Bound it with a quorum queue's `x-delivery-limit` |
 | `ErrorActionReject` | `basic.nack` without requeue: to the queue's dead-letter exchange (`x-dead-letter-exchange`), or dropped when it has none |
 | `ErrorActionStop` | `Run` returns an error wrapping `ErrStopped`; the message is not acked and is requeued |
-| `ErrorActionPause` | the consumer cancels its subscription (the message is not acked and is requeued); `Healthcheck` reports `ErrPaused` (alert on it) and the service keeps running. `Consumer.Resume()` — or a restart — subscribes again |
+| `ErrorActionPause` | the consumer cancels its subscription and holds the message unacked for a while before it is requeued; `Healthcheck` reports `ErrPaused` and the gauge `rabbitmq.consumer.paused` is 1 (alert on either) while the service keeps running. `Consumer.Resume()`, the end of the `WithPauseFor` length, or a restart subscribes again |
+
+**Pause stops the consumer on every instance.** The requeued message reaches another consumer of
+the queue, which pauses too: soon the queue stands still everywhere until the cause is gone. Pause
+is for a cause shared by every message (a schema that is behind, a feature switched off); for an
+error of the message itself use `Reject` (`DeadLetter`), for a dependency that is down
+`consume.Transient`. To soften it, the message (and those prefetched with it) is held unacked
+before the requeue — for the redelivery delay, or the pause's length under `WithPauseFor(d)` —
+and `WithPauseFor(d)` ends each pause by itself after `d`, doubling for a pause that follows soon
+after, up to `MaxPause` (15m, below the broker's 30m `consumer_timeout`); `Resume()` still ends one
+at once, and a restart forgets it.
 
 **Transient errors.** An error of a dependency rather than of the message — a database that is
 down — is marked with `consume.Transient(err)` (package `github.com/eidon-go/core/consume`). The

@@ -577,8 +577,13 @@ func TestConsumer_PauseAndResume(t *testing.T) {
 	require.Eventually(t, func() bool { return errors.Is(c.Healthcheck(t.Context()), ErrPaused) },
 		5*time.Second, time.Millisecond)
 
-	_, requeued, rejected := broker.snapshot()
-	assert.Len(t, requeued, 1, "unacked, requeued with the channel")
+	require.Eventually(t, func() bool {
+		_, requeued, _ := broker.snapshot()
+
+		return len(requeued) == 1
+	}, 5*time.Second, time.Millisecond, "unacked, requeued with the channel after the redelivery delay")
+
+	_, _, rejected := broker.snapshot()
 	assert.Empty(t, rejected)
 
 	fixed.Store(true)
@@ -591,6 +596,42 @@ func TestConsumer_PauseAndResume(t *testing.T) {
 	cancel()
 	require.NoError(t, receive(t, done))
 	assert.Equal(t, []string{"b"}, h.handled())
+}
+
+// With WithPauseFor the paused message is held unacked for the pause, then
+// requeued, and the consumer subscribes again without Resume.
+func TestConsumer_PauseEndsByItself(t *testing.T) {
+	t.Parallel()
+
+	const pauseFor = 300 * time.Millisecond
+
+	broker := newFakeBroker()
+	h := &recordingHandler{failFor: func(int32) error { return errHandler }}
+	pause := func(context.Context, *Message, error) ErrorAction { return ErrorActionPause }
+	c := newTestConsumerOnError(t, newTestConnection(t, broker, true), ordersConfig, h, pause,
+		fastRedelivery(2), WithPauseFor(pauseFor))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := run(ctx, c)
+
+	began := time.Now()
+
+	broker.deliver(t, body("a"))
+	require.Eventually(t, func() bool { return errors.Is(c.Healthcheck(t.Context()), ErrPaused) },
+		5*time.Second, time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		_, requeued, _ := broker.snapshot()
+
+		return len(requeued) == 1
+	}, 5*time.Second, time.Millisecond)
+	assert.GreaterOrEqual(t, time.Since(began), pauseFor, "held for the pause before the requeue")
+
+	require.Eventually(t, func() bool { return c.Healthcheck(t.Context()) == nil }, 5*time.Second, time.Millisecond,
+		"subscribed again without Resume")
+
+	cancel()
+	require.NoError(t, receive(t, done))
 }
 
 func TestConsumer_RetriesAFailedSubscription(t *testing.T) {

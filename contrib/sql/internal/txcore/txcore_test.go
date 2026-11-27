@@ -709,6 +709,54 @@ func TestWithTx_OptionsCompatibility(t *testing.T) {
 	}
 }
 
+func TestCore_SetDefaultIsolation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		set     sql.IsolationLevel
+		inner   sql.IsolationLevel
+		wantErr bool
+	}{
+		{
+			name:  "repeatable read joins a repeatable read default",
+			set:   sql.LevelRepeatableRead,
+			inner: sql.LevelRepeatableRead,
+		},
+		{name: "serializable is stricter", set: sql.LevelRepeatableRead, inner: sql.LevelSerializable, wantErr: true},
+		{
+			name:    "LevelDefault keeps read committed",
+			set:     sql.LevelDefault,
+			inner:   sql.LevelRepeatableRead,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := txcore.New(newDriver())
+			c.SetDefaultIsolation(tt.set)
+
+			outer := txcore.Options{Mode: txcore.ModeJoin, Isolation: sql.LevelDefault}
+			inner := txcore.Options{Mode: txcore.ModeJoin, Isolation: tt.inner}
+
+			err := c.WithTx(t.Context(), outer, func(ctx context.Context) error {
+				return c.WithTx(ctx, inner, ok)
+			})
+
+			if tt.wantErr {
+				require.ErrorIs(t, err, txcore.ErrTxOptionsIncompatible)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestCore_KeyPerDatabase(t *testing.T) {
 	t.Parallel()
 

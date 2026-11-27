@@ -152,13 +152,26 @@ type Driver[T any] interface {
 
 // Core runs transactions of one database through its Driver.
 type Core[T any] struct {
-	driver          Driver[T]
-	rollbackTimeout time.Duration
+	driver           Driver[T]
+	rollbackTimeout  time.Duration
+	defaultIsolation sql.IsolationLevel
 }
 
-// New returns a Core over driver.
+// New returns a Core over driver. A transaction begun with LevelDefault
+// counts as Read Committed; SetDefaultIsolation changes that.
 func New[T any](driver Driver[T]) *Core[T] {
-	return &Core[T]{driver: driver, rollbackTimeout: DefaultRollbackTimeout}
+	return &Core[T]{driver: driver, rollbackTimeout: DefaultRollbackTimeout, defaultIsolation: sql.LevelReadCommitted}
+}
+
+// SetDefaultIsolation sets the level a transaction begun with LevelDefault
+// is known to have: the server's default level. LevelDefault keeps Read
+// Committed. It must be called before the first transaction.
+func (c *Core[T]) SetDefaultIsolation(level sql.IsolationLevel) {
+	if level == sql.LevelDefault {
+		level = sql.LevelReadCommitted
+	}
+
+	c.defaultIsolation = level
 }
 
 // ctxKey is the context key of the transactions of one Core.
@@ -176,6 +189,9 @@ const (
 type state[T any] struct {
 	tx   T
 	opts Options
+	// level is the isolation level the transaction is known to have at
+	// least: opts.Isolation, or the Core's default for LevelDefault.
+	level sql.IsolationLevel
 
 	mu         sync.Mutex
 	savepoints int
@@ -300,8 +316,9 @@ func (c *Core[T]) root(ctx context.Context, opts Options, body func(context.Cont
 		return fmt.Errorf("sql: begin transaction: %w", err)
 	}
 
-	st := &state[T]{tx: tx, opts: opts} //nolint:exhaustruct_v5 // state starts at zero
-	top := &scope[T]{state: st}         //nolint:exhaustruct_v5 // the transaction scope
+	level := c.effectiveIsolation(opts.Isolation)
+	st := &state[T]{tx: tx, opts: opts, level: level} //nolint:exhaustruct_v5 // state starts at zero
+	top := &scope[T]{state: st}                       //nolint:exhaustruct_v5 // the transaction scope
 
 	finished := false
 
@@ -534,7 +551,7 @@ func (sc *scope[T]) live() *scope[T] {
 func (sc *scope[T]) enter(opts Options) error {
 	txState := sc.state
 
-	if opts.Isolation > effectiveIsolation(txState.opts.Isolation) {
+	if opts.Isolation > txState.level {
 		return fmt.Errorf(
 			"%w: isolation %s inside %s",
 			ErrTxOptionsIncompatible,
@@ -551,12 +568,11 @@ func (sc *scope[T]) enter(opts Options) error {
 }
 
 // effectiveIsolation is the level a transaction begun with level is known
-// to have at least. The database's default is at least Read Committed in
-// PostgreSQL, MySQL, SQL Server and Oracle, so a call asking for Read
-// Committed may join a transaction begun with LevelDefault.
-func effectiveIsolation(level sql.IsolationLevel) sql.IsolationLevel {
+// to have at least: the Core's default (Read Committed unless set) for
+// LevelDefault.
+func (c *Core[T]) effectiveIsolation(level sql.IsolationLevel) sql.IsolationLevel {
 	if level == sql.LevelDefault {
-		return sql.LevelReadCommitted
+		return c.defaultIsolation
 	}
 
 	return level

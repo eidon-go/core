@@ -88,8 +88,9 @@ func WithTxMode(mode TxMode) TxOption {
 
 // WithIsolation sets the isolation level of a new transaction. A joined or
 // nested call may ask for the same or a weaker level than the transaction
-// has — a transaction begun with sql.LevelDefault counts as Read Committed,
-// the weakest default of PostgreSQL, MySQL and SQL Server — and a stricter
+// has — a transaction begun with sql.LevelDefault counts as the server's
+// default level: Read Committed (PostgreSQL, SQL Server) unless the DB was
+// built WithDefaultIsolation (Repeatable Read for MySQL) — and a stricter
 // one fails with ErrTxOptionsIncompatible. Levels are compared by their order in
 // database/sql, which fits PostgreSQL and MySQL; levels outside one scale
 // (SQL Server's Snapshot against RepeatableRead) are compared the same way.

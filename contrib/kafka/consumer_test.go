@@ -427,6 +427,47 @@ func TestConsumer_PauseAndResume(t *testing.T) {
 	assert.Equal(t, 2, rec.callsOf("bad"))
 }
 
+// A rebalance resumes the revoked partitions a pause held: with an eager
+// balancer every partition is revoked when a second member joins, so the
+// first one reports no pause afterwards and the paused message is handled
+// again by whichever member gets the partition.
+func TestConsumer_RevokeResumesPausedPartitions(t *testing.T) {
+	t.Parallel()
+
+	brokers := newCluster(t, testTopic)
+	produce(t, brokers, testTopic, "a", "bad", "c")
+
+	var fixed atomic.Bool
+
+	rec := newRecorder()
+	rec.handle = func(_ context.Context, msg *kafka.Message, _ int) error {
+		if string(msg.Value) == "bad" && !fixed.Load() {
+			return errors.New("invalid")
+		}
+
+		return nil
+	}
+
+	pause := func(context.Context, *kafka.Message, error) kafka.ErrorAction { return kafka.ErrorActionPause }
+	eager := kafka.WithKgoOpts(kgo.Balancers(kgo.RangeBalancer()))
+
+	first, stopFirst := startConsumerOnError(t, consumerConfig(brokers), rec, pause, eager)
+
+	require.Eventually(t, func() bool { return errors.Is(first.Healthcheck(t.Context()), kafka.ErrPaused) },
+		waitFor, 10*time.Millisecond)
+
+	fixed.Store(true)
+
+	_, stopSecond := startConsumerOnError(t, consumerConfig(brokers), rec, pause, eager)
+
+	rec.waitSeen(t, "c")
+	require.Eventually(t, func() bool { return !errors.Is(first.Healthcheck(t.Context()), kafka.ErrPaused) },
+		waitFor, 10*time.Millisecond)
+
+	require.NoError(t, stopSecond())
+	require.NoError(t, stopFirst())
+}
+
 // With Concurrency 2, a partition whose handler waits does not hold up the
 // other one.
 func TestConsumer_ConcurrentPartitions(t *testing.T) {

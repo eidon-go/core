@@ -70,9 +70,35 @@ type AuthClaims[T any] struct {
 
 // Subjecter is implemented by a payload that names the subject of its token
 // (the user's ID): CreateToken puts Subject() into the "sub" claim, where
-// gateways, meshes and audit logs look for it.
+// gateways, meshes and audit logs look for it. Either T or *T may implement
+// it.
 type Subjecter interface {
 	Subject() string
+}
+
+// subjectOf returns info.Subject() when info or &info is a Subjecter.
+func subjectOf[T any](info T) (string, bool) {
+	if s, ok := any(info).(Subjecter); ok {
+		return s.Subject(), true
+	}
+
+	if s, ok := any(&info).(Subjecter); ok {
+		return s.Subject(), true
+	}
+
+	return "", false
+}
+
+// isSubjecter reports whether T or *T implements Subjecter.
+func isSubjecter[T any]() bool {
+	var zero T
+	if _, ok := any(zero).(Subjecter); ok {
+		return true
+	}
+
+	_, ok := any(&zero).(Subjecter)
+
+	return ok
 }
 
 // Option configures NewAuthService.
@@ -120,7 +146,7 @@ func NewAuthService[T any](cfg Config, signer Signer, verifier Verifier, opts ..
 		err = errors.Join(err, fmt.Errorf("%w: nil Verifier", ErrInvalidConfig))
 	}
 
-	if _, ok := any(*new(T)).(Subjecter); ok && cfg.RequiredSubject != "" {
+	if isSubjecter[T]() && cfg.RequiredSubject != "" {
 		err = errors.Join(err, fmt.Errorf("%w: RequiredSubject with a Subjecter payload", ErrInvalidConfig))
 	}
 
@@ -162,15 +188,15 @@ func NewAuthService[T any](cfg Config, signer Signer, verifier Verifier, opts ..
 }
 
 // CreateToken signs a new token carrying info. It sets iss from the Config,
-// sub to info.Subject() when info is a Subjecter (else Config.RequiredSubject),
+// sub to info.Subject() when info (or &info) is a Subjecter (else Config.RequiredSubject),
 // aud to Config.Audience, iat and nbf to now, exp to now + TTL and a random
 // jti.
 func (s *AuthService[T]) CreateToken(ctx context.Context, info T) (string, error) {
 	now := s.now()
 
 	subject := s.cfg.RequiredSubject
-	if subjecter, ok := any(info).(Subjecter); ok {
-		subject = subjecter.Subject()
+	if sub, ok := subjectOf(info); ok {
+		subject = sub
 	}
 
 	claims := &AuthClaims[T]{

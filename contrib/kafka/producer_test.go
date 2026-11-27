@@ -237,16 +237,36 @@ func TestStopOnFailure(t *testing.T) {
 		kafka.StopOnFailure(t.Context(), msg, errors.Join(kafka.ErrRetriesExhausted, errDown)))
 }
 
-func TestDeadLetter_PublishFailureStops(t *testing.T) {
+func TestDeadLetter_PublishFailure(t *testing.T) {
 	t.Parallel()
 
-	h := kafka.DeadLetter(publisherFunc(func(context.Context, ...*kafka.Message) error {
-		return errors.New("dlt down")
-	}), "dlt")
+	tests := []struct {
+		name string
+		opts []kafka.DeadLetterOption
+		want kafka.ErrorAction
+	}{
+		{name: "pauses by default", want: kafka.ErrorActionPause},
+		{
+			name: "OnDLTFailure stop",
+			opts: []kafka.DeadLetterOption{kafka.OnDLTFailure(kafka.ErrorActionStop)},
+			want: kafka.ErrorActionStop,
+		},
+		{name: "nil option is ignored", opts: []kafka.DeadLetterOption{nil}, want: kafka.ErrorActionPause},
+	}
 
-	msg := &kafka.Message{Topic: testTopic}
-	assert.Equal(t, kafka.ErrorActionRetry, h(t.Context(), msg, errors.New("transient")))
-	assert.Equal(t, kafka.ErrorActionStop, h(t.Context(), msg, kafka.ErrRetriesExhausted))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := kafka.DeadLetter(publisherFunc(func(context.Context, ...*kafka.Message) error {
+				return errors.New("dlt down")
+			}), "dlt", tt.opts...)
+
+			msg := &kafka.Message{Topic: testTopic}
+			assert.Equal(t, kafka.ErrorActionRetry, h(t.Context(), msg, errors.New("transient")))
+			assert.Equal(t, tt.want, h(t.Context(), msg, kafka.ErrRetriesExhausted))
+		})
+	}
 }
 
 // The dead letter gets the time of publishing (the original goes to a

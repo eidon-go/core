@@ -73,7 +73,7 @@ everything but `Addr`; negative values are rejected by `Validate`.
 | `WithHealth(lifecycle.Healthchecker)` | off | register `grpc.health.v1.Health` (see [Health](#health)) |
 | `WithUnaryInterceptors(...)`, `WithStreamInterceptors(...)` | — | interceptors; across calls, the first passed is the outermost |
 | `WithTracerProvider`, `WithMeterProvider` | otel globals at `New` | RPC spans and metrics via otelgrpc; pass noop providers to disable |
-| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | trace-context extraction |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`); an empty `propagation.NewCompositeTextMapPropagator()` switches it off | trace-context extraction |
 | `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global |
 | `WithOtelGRPCOptions(...otelgrpc.Option)` | — | extra otelgrpc options, e.g. `WithMetricAttributesFn`; a `WithFilter` here replaces the one that leaves health RPCs out |
 | `WithServerOptions(...grpc.ServerOption)` | — | escape hatch, applied last: a codec, other credentials, extra stats handlers, … |
@@ -187,7 +187,7 @@ mesh. There is no connection-wide deadline: bound every call with its context.
 | `WithTLSConfig(*tls.Config)` | system roots | private CAs, mTLS; cloned; not with `Plaintext` |
 | `WithUnaryInterceptors(...)`, `WithStreamInterceptors(...)` | — | auth metadata, retries, logging; the first passed is the outermost |
 | `WithTracerProvider`, `WithMeterProvider` | otel globals at `New` | client spans (`{package}.{Service}/{Method}`), metrics and trace-context injection via otelgrpc |
-| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | trace-context injection |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`); an empty `propagation.NewCompositeTextMapPropagator()` switches it off | trace-context injection |
 | `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global |
 | `WithOtelGRPCOptions(...otelgrpc.Option)` | — | extra otelgrpc options, e.g. `WithFilter` for long-lived streams |
 | `WithDialOptions(...grpc.DialOption)` | — | escape hatch, applied last: per-RPC credentials, a service config with retry policies (include the load-balancing policy in it — it replaces the one from `Config`), resolvers, … |

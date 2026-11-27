@@ -61,7 +61,8 @@ case errors.Is(err, jwt.ErrInvalidToken): // reject
 - `CreateToken(ctx, info)` sets `iss`, `sub`, `aud`, `iat`, `nbf` (now), `exp` (now + TTL), a
   random `jti`, and the payload under `authInfo` (`AuthClaims[T]`). `sub` is the subject of the
   token — the user's ID, where gateways, meshes and audit logs look for it: a payload that
-  implements `jwt.Subjecter` (`Subject() string`) sets it; else it is `RequiredSubject`.
+  implements `jwt.Subjecter` (`Subject() string`, on `T` or on `*T`) sets it; else it is
+  `RequiredSubject`.
 
 ```go
 func (s Session) Subject() string { return s.UserID }

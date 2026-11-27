@@ -60,7 +60,7 @@ negative value disables the timeout.
 | `WithTLSConfig(*tls.Config)` | plain HTTP | serve HTTPS; HTTP/2 via ALPN; the config must have a certificate |
 | `WithProbes(lifecycle.Healthchecker)` | off | serve `/livez` and `/readyz` in front of the handler |
 | `WithTracerProvider`, `WithMeterProvider` | otel globals at `New` | request spans and metrics via otelhttp; pass noop providers to disable |
-| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | trace-context extraction |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`); an empty `propagation.NewCompositeTextMapPropagator()` switches it off | trace-context extraction |
 | `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global |
 | `WithOtelHTTPOptions(...otelhttp.Option)` | — | extra otelhttp options, e.g. `WithMetricAttributesFn` against cardinality |
 | `WithHTTPServer(func(*http.Server))` | — | escape hatch for other `http.Server` fields (`ConnState`, `RegisterOnShutdown`, `TLSConfig`, …) |
@@ -159,7 +159,7 @@ by default.
 | `WithRoundTripper(wrap)` | — | auth headers, signing, rate limiting, retries; the first passed is the outermost |
 | `WithTransport(func(*http.Transport))` | — | escape hatch for other transport fields (proxy, compression, dialer) |
 | `WithTracerProvider`, `WithMeterProvider` | otel globals at `New` | client spans (`{method}`), metrics and trace-context injection via otelhttp |
-| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`) | trace-context injection |
+| `WithPropagators` | W3C Trace Context + Baggage until a global propagator is set (also after `New`); an empty `propagation.NewCompositeTextMapPropagator()` switches it off | trace-context injection |
 | `WithTelemetry(Telemetry)` | — | all three from the `otel` module's `Provider` when it is not global |
 | `WithOtelHTTPOptions(...otelhttp.Option)` | — | extra otelhttp options |
 

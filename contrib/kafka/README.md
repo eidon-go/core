@@ -79,7 +79,7 @@ franz-go setting through `WithKgoOpts`.
 | `WithConnectRetry(retry.Policy)` | all: the ping in `Start` | `retry.ConnectPolicy()`, logged |
 | `WithTLSConfig(*tls.Config)` | all | plaintext |
 | `WithTracerProvider` / `WithMeterProvider` | all | the otel globals at construction time |
-| `WithPropagators` | all | W3C Trace Context + Baggage until a global propagator is set (also after construction) |
+| `WithPropagators` | all | W3C Trace Context + Baggage until a global propagator is set (also after construction); an empty `propagation.NewCompositeTextMapPropagator()` switches it off |
 | `WithTelemetry` (all three from the `otel` module's `Provider` when it is not global) | all | — |
 | `WithKgoOpts(...kgo.Opt)` | all, applied last | — |
 | `WithRedeliveryPolicy(retry.Policy)` | consumer | `DefaultRedeliveryPolicy()`: 5 attempts, 100ms doubling to 2s |
@@ -168,7 +168,11 @@ poison messages and recovering once the attempts are exhausted:
   `dlt-original-offset`, `dlt-original-timestamp` (Unix ms) and `dlt-error` (cut to
   `MaxDLTErrorLength`, 1 KiB, so a long error cannot push the record past `max.message.bytes`). The
   dead letter's own timestamp is the time of publishing, so the DLT's retention counts from then,
-  not from the original message. If that publish fails, the consumer stops.
+  not from the original message. If that publish fails — the DLT is a dependency that is down,
+  not a fault of the message — the failure is logged and the partition is paused
+  (`ErrorActionPause`): nothing is lost and the service keeps running.
+  `DeadLetter(publisher, topic, kafka.OnDLTFailure(kafka.ErrorActionStop))` stops the consumer
+  instead.
 - `StopOnFailure`: retry; stop once the attempts are exhausted or at once for an error marked
   with `retry.Permanent`. No message is ever skipped, but the service stops (see above): for
   topics where skipping a message is worse than an outage.

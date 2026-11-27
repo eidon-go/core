@@ -115,6 +115,7 @@ libpq's `PG*` environment variables, as pgx always does.
 | `WithOtelPgxOptions(...otelpgx.Option)` | | ✓ | — (`otelpgx.WithDisableAcquireTracer()` against noisy acquire spans) |
 | `WithPoolConfig(func(*pgxpool.Config))` | | ✓ | — (AfterConnect hooks, type registration), applied last |
 | `WithScanner(Scanner)` | ✓ | ✓ | `DefaultScanner()` |
+| `WithDefaultIsolation(stdsql.IsolationLevel)` | ✓ | | Read Committed (`LevelRepeatableRead` for MySQL/MariaDB) |
 
 `NewManager(db, opts...)` takes `WithDefaultTxMode(TxMode)` (both worlds).
 
@@ -163,8 +164,9 @@ Inside a transaction of the same `DB`, `WithTxMode` (or the manager's default) d
 
 Outside a transaction every mode begins one. `WithIsolation(level)` and `ReadOnly()` configure a
 new transaction; a joined or nested call may ask for the same or a weaker isolation level
-(a transaction begun with `LevelDefault` counts as Read Committed, the weakest default of
-PostgreSQL, MySQL and SQL Server) and must be `ReadOnly` inside a read-only transaction — otherwise
+(a transaction begun with `LevelDefault` counts as the server's default level: Read Committed,
+right for PostgreSQL and SQL Server, unless the `DB` is built with
+`WithDefaultIsolation(stdsql.LevelRepeatableRead)`, as it should be for MySQL/MariaDB) and must be `ReadOnly` inside a read-only transaction — otherwise
 `ErrTxOptionsIncompatible`. The pgx world rejects levels PostgreSQL does not have
 (`ErrUnsupportedIsolation`).
 

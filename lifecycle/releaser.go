@@ -90,7 +90,12 @@ func newReleaser(release func(ctx context.Context) error, background bool) *Rele
 }
 
 // Shutdown starts the release on the first call and waits for it until ctx
-// is done. Implements Resource.
+// is done. With ShutdownOnce the first call runs the release itself, with
+// its ctx, and returns its result even after ctx is done (the release honors
+// ctx); with CloseOnce it returns ctx.Err() if ctx is done first. Later and
+// concurrent calls wait for the same release with their own ctx and return
+// nil once it is over (only the first call reports its error), or ctx.Err().
+// Implements Resource.
 func (r *Releaser) Shutdown(ctx context.Context) error {
 	first := false
 

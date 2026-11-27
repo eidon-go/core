@@ -41,6 +41,9 @@ jobs:
           done
           exit $status
 
+      - name: Shared file copies are identical
+        run: scripts/check-copies.sh
+
       - name: Compute module matrix
         id: modules
         env:

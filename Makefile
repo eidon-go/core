@@ -40,8 +40,12 @@ test: ## Run unit tests of every published module with the race detector
 	$(call each,$(PUBLISHED),go test -race -count=1 -timeout=5m -short ./...)
 
 .PHONY: lint
-lint: ## Run golangci-lint in every module
+lint: check-copies ## Run golangci-lint in every module
 	$(call each,$(MODULES),golangci-lint run ./...)
+
+.PHONY: check-copies
+check-copies: ## Fail if the copies of a file shared by several modules diverged
+	@scripts/check-copies.sh
 
 .PHONY: format
 format: ## Format code in every module with golangci-lint
